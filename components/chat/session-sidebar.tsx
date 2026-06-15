@@ -86,82 +86,88 @@ export function SessionSidebar({
       {open ? (
         <button
           aria-label="Close sidebar"
-          className="fixed inset-0 z-40 bg-foreground/20 backdrop-blur-[1px] sm:hidden"
+          className="fixed inset-0 z-30 bg-foreground/20 backdrop-blur-[1px] sm:hidden"
           onClick={onClose}
           type="button"
         />
       ) : null}
 
-      {/* Width animates between the full panel and a slim rail. The rail stays
-          docked, so the sidebar is never fully gone. */}
-      <aside className="fixed inset-y-0 left-0 z-50 flex w-[var(--sidebar-width)] flex-col overflow-hidden border-r border-border bg-background transition-[width] duration-200 ease-out">
-        {/* The toggle lives where the close (X) control used to: one spot owns
-            both expand and collapse, instead of two competing buttons. */}
-        <div className="flex items-center gap-2 px-2 py-3 sm:py-4">
-          {open ? <span className="pl-1 text-sm font-semibold text-foreground">Chats</span> : null}
-          <Button
-            aria-label={open ? "Collapse sidebar" : "Expand sidebar"}
-            className={cn("size-9", open ? "ml-auto" : "mx-auto")}
-            onClick={onToggle}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            {open ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
-          </Button>
-        </div>
+      {/* In-flow rail that reserves the sidebar's width in the body row, so the
+          conversation is pushed (not overlapped) on desktop. The panel itself is
+          absolutely positioned within it: on mobile the rail stays slim and the
+          expanded panel overlays the conversation instead of shoving it aside. */}
+      <div className="relative w-[var(--sidebar-rail)] shrink-0 transition-[width] duration-200 ease-out sm:w-[var(--sidebar-width)]">
+        <aside className="absolute inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col overflow-hidden border-r border-border bg-background shadow-xl transition-[width] duration-200 ease-out sm:shadow-none">
+          {/* The toggle lives where the close (X) control used to: one spot owns
+              both expand and collapse, instead of two competing buttons. */}
+          <div className="flex items-center gap-2 px-2 py-3 sm:py-4">
+            {open ? (
+              <span className="pl-1 text-sm font-semibold text-foreground">Chats</span>
+            ) : null}
+            <Button
+              aria-label={open ? "Collapse sidebar" : "Expand sidebar"}
+              className={cn("size-9", open ? "ml-auto" : "mx-auto")}
+              onClick={onToggle}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              {open ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+            </Button>
+          </div>
 
-        <div className={cn("pb-2", open ? "px-3" : "px-2")}>
-          <Button
-            aria-label="New chat"
-            className={open ? "w-full justify-start gap-2" : "mx-auto size-9"}
-            disabled={busy}
-            onClick={onNew}
-            size={open ? "sm" : "icon"}
-            title={open ? undefined : "New chat"}
-            type="button"
-            variant="outline"
-          >
-            <Plus className="size-4" />
-            {open ? "New chat" : null}
-          </Button>
-        </div>
+          <div className={cn("pb-2", open ? "px-3" : "px-2")}>
+            <Button
+              aria-label="New chat"
+              className={open ? "w-full justify-start gap-2" : "mx-auto size-9"}
+              disabled={busy}
+              onClick={onNew}
+              size={open ? "sm" : "icon"}
+              title={open ? undefined : "New chat"}
+              type="button"
+              variant="outline"
+            >
+              <Plus className="size-4" />
+              {open ? "New chat" : null}
+            </Button>
+          </div>
 
-        {/* The list only earns its room in the full panel; the rail keeps just
+          {/* The list only earns its room in the full panel; the rail keeps just
             the two primary affordances. */}
-        {open ? (
-          <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-            {loading && sessions.length === 0 ? (
-              <p className="px-2 py-3 text-xs text-muted-foreground">Loading chats...</p>
-            ) : sessions.length === 0 ? (
-              <p className="px-2 py-3 text-xs text-muted-foreground">
-                No chats yet. Start a conversation to see it here.
-              </p>
-            ) : (
-              groups.map((group) => (
-                <div className="mb-3" key={group.label}>
-                  <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    {group.label}
-                  </p>
-                  <ul className="space-y-0.5">
-                    {group.items.map((session) => (
-                      <SessionRow
-                        busy={busy}
-                        isActive={session.id === activeSessionId}
-                        key={session.id}
-                        onDelete={onDelete}
-                        onRename={onRename}
-                        onSelect={onSelect}
-                        session={session}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              ))
-            )}
-          </nav>
-        ) : null}
-      </aside>
+          {open ? (
+            <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+              {loading && sessions.length === 0 ? (
+                <p className="px-2 py-3 text-xs text-muted-foreground">Loading chats...</p>
+              ) : sessions.length === 0 ? (
+                <p className="px-2 py-3 text-xs text-muted-foreground">
+                  No chats yet. Start a conversation to see it here.
+                </p>
+              ) : (
+                groups.map((group) => (
+                  <div className="mb-3" key={group.label}>
+                    <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      {group.label}
+                    </p>
+                    <ul className="space-y-0.5">
+                      {group.items.map((session) => (
+                        <SessionRow
+                          busy={busy}
+                          isActive={session.id === activeSessionId}
+                          key={session.id}
+                          onDelete={onDelete}
+                          onRename={onRename}
+                          onSelect={onSelect}
+                          session={session}
+                        />
+                      ))}
+                    </ul>
+                  </div>
+                ))
+              )}
+            </nav>
+          ) : null}
+        </aside>
+      </div>
     </>
   );
 }

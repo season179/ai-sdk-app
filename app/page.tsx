@@ -5,6 +5,8 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from "re
 
 import { ChatSurface } from "@/components/chat/chat-surface";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
+import { type ChatUsageSummary, TokenUsageMenu } from "@/components/chat/token-usage-menu";
+import { SiteHeader, SiteHeaderStatus } from "@/components/site-header";
 import type { ChatSessionSummary } from "@/lib/chat/sessions";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
 import { isUuid } from "@/lib/utils";
@@ -60,6 +62,7 @@ export default function ChatPage() {
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatBusy, setChatBusy] = useState(false);
+  const [usage, setUsage] = useState<ChatUsageSummary>({ sessionUsage: {} });
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const booted = useRef(false);
 
@@ -228,12 +231,13 @@ export default function ChatPage() {
   }, [refreshSessions]);
 
   const handleBusyChange = useCallback((busy: boolean) => setChatBusy(busy), []);
+  const handleUsageChange = useCallback((next: ChatUsageSummary) => setUsage(next), []);
   const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), []);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
 
   return (
     <main
-      className="h-dvh overflow-hidden bg-background"
+      className="flex h-dvh flex-col overflow-hidden bg-background"
       style={
         {
           "--sidebar-rail": SIDEBAR_RAIL,
@@ -242,33 +246,43 @@ export default function ChatPage() {
       }
     >
       <h1 className="sr-only">AI SDK App</h1>
-      <SessionSidebar
-        activeSessionId={activeId ?? ""}
-        busy={chatBusy}
-        loading={sessionsLoading}
-        onClose={closeSidebar}
-        onDelete={deleteSession}
-        onNew={startNewSession}
-        onRename={renameSession}
-        onSelect={selectSession}
-        onToggle={toggleSidebar}
-        open={sidebarOpen}
-        sessions={sessions}
+      <SiteHeader
+        actions={<TokenUsageMenu {...usage} />}
+        status={
+          <SiteHeaderStatus pulse={chatBusy}>{chatBusy ? "Responding" : "Ready"}</SiteHeaderStatus>
+        }
       />
 
-      {active ? (
-        <ChatSurface
-          initialMessages={active.messages}
-          key={active.id}
-          onBusyChange={handleBusyChange}
-          onConversationUpdated={handleConversationUpdated}
-          sessionId={active.id}
+      <div className="relative flex min-h-0 flex-1">
+        <SessionSidebar
+          activeSessionId={activeId ?? ""}
+          busy={chatBusy}
+          loading={sessionsLoading}
+          onClose={closeSidebar}
+          onDelete={deleteSession}
+          onNew={startNewSession}
+          onRename={renameSession}
+          onSelect={selectSession}
+          onToggle={toggleSidebar}
+          open={sidebarOpen}
+          sessions={sessions}
         />
-      ) : (
-        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-          Loading…
-        </div>
-      )}
+
+        {active ? (
+          <ChatSurface
+            initialMessages={active.messages}
+            key={active.id}
+            onBusyChange={handleBusyChange}
+            onConversationUpdated={handleConversationUpdated}
+            onUsageChange={handleUsageChange}
+            sessionId={active.id}
+          />
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+            Loading…
+          </div>
+        )}
+      </div>
     </main>
   );
 }
