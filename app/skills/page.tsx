@@ -234,7 +234,7 @@ export default function SkillsPage() {
   const enabledCount = skills?.filter((skill) => skill.isEnabled).length;
 
   return (
-    <main className="min-h-dvh bg-background">
+    <main className="min-h-0 flex-1 overflow-y-auto bg-background">
       <h1 className="sr-only">Skills</h1>
       <SiteHeader
         actions={

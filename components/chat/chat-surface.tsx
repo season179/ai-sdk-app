@@ -274,7 +274,7 @@ export function ChatSurface({
         ) : null}
       </Conversation>
 
-      <div className="shrink-0 border-t border-border/60 bg-background/95 py-3 backdrop-blur sm:py-5">
+      <div className="shrink-0 bg-background/95 py-3 backdrop-blur sm:py-5">
         <div className={`relative ${SHELL_COLUMN}`}>
           {error ? (
             <div

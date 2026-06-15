@@ -61,7 +61,7 @@ export function ScheduledJobsBoard() {
     overview.past.length === 0;
 
   return (
-    <main className="min-h-dvh bg-background">
+    <main className="min-h-0 flex-1 overflow-y-auto bg-background">
       <h1 className="sr-only">Scheduled tasks</h1>
       <SiteHeader
         actions={

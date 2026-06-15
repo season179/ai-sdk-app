@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  BookOpen,
+  CalendarClock,
   Check,
   MessageSquare,
   PanelLeftClose,
@@ -9,27 +11,22 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useChatShell } from "@/components/chat/chat-shell-context";
 import { Button } from "@/components/ui/button";
 import type { ChatSessionSummary } from "@/lib/chat/sessions";
 import { cn } from "@/lib/utils";
 
-export type SessionSidebarProps = {
-  sessions: ChatSessionSummary[];
-  activeSessionId: string;
-  open: boolean;
-  /** A stream is in flight: switching sessions is blocked until it settles. */
-  busy?: boolean;
-  loading?: boolean;
-  onSelect: (id: string) => void;
-  onNew: () => void;
-  onRename: (id: string, title: string) => void;
-  onDelete: (id: string) => void;
-  onClose: () => void;
-  /** Toggle between the full panel and the slim docked rail. */
-  onToggle: () => void;
-};
+const NAV_ITEMS = [
+  { href: "/", icon: MessageSquare, label: "Chat" },
+  { href: "/tasks", icon: CalendarClock, label: "Scheduled tasks" },
+  { href: "/skills", icon: BookOpen, label: "Skills" },
+] as const;
+
+const MOBILE_QUERY = "(max-width: 639px)";
 
 type SessionGroup = {
   label: string;
@@ -65,20 +62,29 @@ function groupSessions(sessions: ChatSessionSummary[]): SessionGroup[] {
   ].filter((group) => group.items.length > 0);
 }
 
-export function SessionSidebar({
-  sessions,
-  activeSessionId,
-  open,
-  busy = false,
-  loading = false,
-  onSelect,
-  onNew,
-  onRename,
-  onDelete,
-  onClose,
-  onToggle,
-}: SessionSidebarProps) {
+export function AppSidebar() {
+  const {
+    sessions,
+    sessionsLoading,
+    activeId,
+    chatBusy,
+    sidebarOpen: open,
+    toggleSidebar,
+    closeSidebar,
+    selectSession,
+    startNewSession,
+    renameSession,
+    deleteSession,
+  } = useChatShell();
+  const pathname = usePathname();
   const groups = useMemo(() => groupSessions(sessions), [sessions]);
+
+  // Dismiss the mobile overlay after a nav tap; on desktop the rail stays put.
+  function closeOnMobile() {
+    if (typeof window !== "undefined" && window.matchMedia(MOBILE_QUERY).matches) {
+      closeSidebar();
+    }
+  }
 
   return (
     <>
@@ -87,27 +93,25 @@ export function SessionSidebar({
         <button
           aria-label="Close sidebar"
           className="fixed inset-0 z-30 bg-foreground/20 backdrop-blur-[1px] sm:hidden"
-          onClick={onClose}
+          onClick={closeSidebar}
           type="button"
         />
       ) : null}
 
-      {/* In-flow rail that reserves the sidebar's width in the body row, so the
-          conversation is pushed (not overlapped) on desktop. The panel itself is
-          absolutely positioned within it: on mobile the rail stays slim and the
-          expanded panel overlays the conversation instead of shoving it aside. */}
+      {/* In-flow rail reserves the sidebar's width so the content is pushed (not
+          overlapped) on desktop. The panel is absolutely positioned within it so
+          that on mobile the rail stays slim and the expanded panel overlays the
+          content instead of shoving it aside. */}
       <div className="relative w-[var(--sidebar-rail)] shrink-0 transition-[width] duration-200 ease-out sm:w-[var(--sidebar-width)]">
         <aside className="absolute inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col overflow-hidden border-r border-border bg-background shadow-xl transition-[width] duration-200 ease-out sm:shadow-none">
-          {/* The toggle lives where the close (X) control used to: one spot owns
-              both expand and collapse, instead of two competing buttons. */}
           <div className="flex items-center gap-2 px-2 py-3 sm:py-4">
             {open ? (
-              <span className="pl-1 text-sm font-semibold text-foreground">Chats</span>
+              <span className="pl-1 text-sm font-semibold text-foreground">AI SDK App</span>
             ) : null}
             <Button
               aria-label={open ? "Collapse sidebar" : "Expand sidebar"}
               className={cn("size-9", open ? "ml-auto" : "mx-auto")}
-              onClick={onToggle}
+              onClick={toggleSidebar}
               size="icon"
               type="button"
               variant="ghost"
@@ -116,12 +120,42 @@ export function SessionSidebar({
             </Button>
           </div>
 
-          <div className={cn("pb-2", open ? "px-3" : "px-2")}>
+          <nav aria-label="Primary" className="flex flex-col gap-0.5 px-2">
+            {NAV_ITEMS.map((item) => {
+              const isActive =
+                item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+              const Icon = item.icon;
+
+              return (
+                <Link
+                  aria-current={isActive ? "page" : undefined}
+                  className={cn(
+                    "flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/30",
+                    open ? "" : "justify-center",
+                    isActive
+                      ? "bg-muted font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                  )}
+                  href={item.href}
+                  key={item.href}
+                  onClick={closeOnMobile}
+                  title={open ? undefined : item.label}
+                >
+                  <Icon className={cn("size-4 shrink-0", isActive && "text-primary")} />
+                  {open ? <span className="truncate">{item.label}</span> : null}
+                </Link>
+              );
+            })}
+          </nav>
+
+          <div className="mx-3 my-2 border-t border-border/70" />
+
+          <div className="px-2 pb-2">
             <Button
               aria-label="New chat"
               className={open ? "w-full justify-start gap-2" : "mx-auto size-9"}
-              disabled={busy}
-              onClick={onNew}
+              disabled={chatBusy}
+              onClick={startNewSession}
               size={open ? "sm" : "icon"}
               title={open ? undefined : "New chat"}
               type="button"
@@ -132,11 +166,11 @@ export function SessionSidebar({
             </Button>
           </div>
 
-          {/* The list only earns its room in the full panel; the rail keeps just
-            the two primary affordances. */}
+          {/* The session list only earns its room in the full panel; the rail
+              keeps just the nav icons and the two primary affordances. */}
           {open ? (
-            <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-              {loading && sessions.length === 0 ? (
+            <nav aria-label="Chats" className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+              {sessionsLoading && sessions.length === 0 ? (
                 <p className="px-2 py-3 text-xs text-muted-foreground">Loading chats...</p>
               ) : sessions.length === 0 ? (
                 <p className="px-2 py-3 text-xs text-muted-foreground">
@@ -151,12 +185,12 @@ export function SessionSidebar({
                     <ul className="space-y-0.5">
                       {group.items.map((session) => (
                         <SessionRow
-                          busy={busy}
-                          isActive={session.id === activeSessionId}
+                          busy={chatBusy}
+                          isActive={session.id === activeId}
                           key={session.id}
-                          onDelete={onDelete}
-                          onRename={onRename}
-                          onSelect={onSelect}
+                          onDelete={deleteSession}
+                          onRename={renameSession}
+                          onSelect={selectSession}
                           session={session}
                         />
                       ))}
@@ -273,7 +307,7 @@ function SessionRow({ session, isActive, busy, onSelect, onRename, onDelete }: S
           {label}
         </span>
       </button>
-      <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      <div className="flex shrink-0 items-center opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
         <button
           aria-label="Rename chat"
           className="rounded p-1 text-muted-foreground hover:text-foreground"
