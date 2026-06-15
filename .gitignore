@@ -147,3 +147,5 @@ vite.config.ts.timestamp-*
 .case/
 .commandcode/*
 graphify-out/
+.claude/*
+.codex/
