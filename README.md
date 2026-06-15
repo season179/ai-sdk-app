@@ -51,6 +51,14 @@ Real (non-mock) scheduler tools backed by pg-boss, in the same catalog the tool 
    pnpm worker:scheduled-tasks
    ```
 
+   Our tables (`agent_scheduled_tasks`, `agent_scheduled_task_runs`, `agent_skills`) are
+   the typed Drizzle data-access layer defined in `db/schema.ts`. The schema is the
+   source of truth: `pnpm db:generate` writes a migration to `db/drizzle/`, and
+   `pnpm db:migrate` applies it. The baseline migration is idempotent, so `pnpm db:migrate`
+   is safe on a fresh database and on one that already has the tables. pg-boss still owns
+   its `pgboss` schema and is not modeled by Drizzle. The legacy raw SQL under
+   `db/migrations/` is kept for history only (see `db/migrations/README.md`).
+
 5. Start the app:
 
    ```bash
