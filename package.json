@@ -10,7 +10,8 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit",
-    "db:migrate": "tsx scripts/migrate.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/db-migrate.ts",
     "worker:scheduled-tasks": "tsx workers/scheduled-tasks.ts"
   },
   "dependencies": {
@@ -20,6 +21,7 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "cron-parser": "^5.5.0",
+    "drizzle-orm": "^0.45.2",
     "lucide-react": "1.17.0",
     "next": "16.2.7",
     "pg": "^8.21.0",
@@ -36,6 +38,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "19.2.16",
     "@types/react-dom": "19.2.3",
+    "drizzle-kit": "^0.31.10",
     "tailwindcss": "4.3.0",
     "tsx": "^4.22.4",
     "typescript": "6.0.3"
