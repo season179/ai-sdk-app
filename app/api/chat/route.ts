@@ -1,6 +1,15 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { createAgentUIStreamResponse, smoothStream, ToolLoopAgent, type UIMessage } from "ai";
+import {
+  consumeStream,
+  createAgentUIStreamResponse,
+  createIdGenerator,
+  smoothStream,
+  ToolLoopAgent,
+  type UIMessage,
+} from "ai";
 
+import { saveChatSession, sessionNeedsTitle, setSessionTitleIfUnset } from "@/lib/chat/sessions";
+import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { schedulerTools } from "@/lib/scheduler/tool-specs";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
@@ -20,8 +29,21 @@ import {
   createToolSearchTools,
   resolveToolExposureMode,
 } from "@/lib/tool-search";
+import { isUuid } from "@/lib/utils";
 
 export const maxDuration = 30;
+
+/** Concatenated visible text of a UI message; used to seed the title model. */
+function messageText(message: UIMessage<ChatMessageMetadata> | undefined): string {
+  if (!message) {
+    return "";
+  }
+
+  return message.parts
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join(" ")
+    .trim();
+}
 
 const SYSTEM_PROMPT = [
   "Be friendly, concise, and helpful. Use tool_search, tool_describe, and tool_call when hidden tools are needed.",
@@ -77,9 +99,12 @@ function configErrorResponse(error: MissingEnvironmentVariableError) {
 
 export async function POST(req: Request) {
   let messages: UIMessage<ChatMessageMetadata>[];
+  // The persisted chat session id. useChat({ id }) sends it in the default
+  // transport body. Absent => ephemeral (no persistence). Malformed => 400.
+  let sessionId: string | null = null;
 
   try {
-    const body: { messages?: UIMessage<ChatMessageMetadata>[] } = await req.json();
+    const body: { messages?: UIMessage<ChatMessageMetadata>[]; id?: unknown } = await req.json();
 
     if (!Array.isArray(body.messages)) {
       return Response.json(
@@ -89,6 +114,18 @@ export async function POST(req: Request) {
     }
 
     messages = body.messages;
+
+    if (typeof body.id === "string") {
+      if (!isUuid(body.id)) {
+        return Response.json({ error: "Chat id must be a UUID." }, { status: 400 });
+      }
+
+      sessionId = body.id;
+    } else if (body.id != null) {
+      return Response.json({ error: "Chat id must be a UUID string." }, { status: 400 });
+    } else {
+      console.warn("Chat request has no session id; streaming without persistence.");
+    }
   } catch {
     return Response.json({ error: "Request body must be valid JSON." }, { status: 400 });
   }
@@ -130,6 +167,10 @@ export async function POST(req: Request) {
       agent,
       uiMessages,
       abortSignal: req.signal,
+      generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
+      // Consume the tee'd SSE stream server-side so onFinish (persistence) runs
+      // even if the browser disconnects or navigates away mid-stream.
+      consumeSseStream: consumeStream,
       experimental_transform: smoothStream({
         chunking: "word",
         delayInMs: 35,
@@ -163,6 +204,42 @@ export async function POST(req: Request) {
             trace: toolSearchTrace,
           }),
         };
+      },
+      async onFinish({ responseMessage, isAborted, finishReason }) {
+        // Fail-soft: a persistence error must never break the stream the client
+        // already received. Skip aborted/errored finishes.
+        if (!sessionId || isAborted || finishReason === "error") {
+          return;
+        }
+
+        try {
+          // Persist the RAW transcript (not the skill-injected uiMessages) plus
+          // the assistant reply. injectUserActivatedSkills is pure, so `messages`
+          // is still the clean, user-visible array. responseMessage carries its
+          // generateMessageId id and the messageMetadata token usage.
+          const persisted = [...messages, responseMessage];
+          await saveChatSession({ sessionId, messages: persisted });
+
+          // Title only the first completed assistant reply, and only while the
+          // session is still untitled. The sessionNeedsTitle precheck skips the
+          // paid, stream-blocking title-model call on regenerate (where
+          // assistantCount is still 1 but a title already exists);
+          // setSessionTitleIfUnset remains the atomic write-time guard.
+          const assistantCount = persisted.filter((message) => message.role === "assistant").length;
+
+          if (assistantCount === 1 && (await sessionNeedsTitle(sessionId))) {
+            const title = await generateSessionTitle({
+              firstUserText: messageText(persisted.find((message) => message.role === "user")),
+              firstAssistantText: messageText(responseMessage),
+            });
+
+            if (title) {
+              await setSessionTitleIfUnset(sessionId, title);
+            }
+          }
+        } catch (error) {
+          console.error("Persisting chat session failed", error);
+        }
       },
       onError(error) {
         console.error("Chat stream failed", error);

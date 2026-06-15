@@ -1,11 +1,14 @@
+import type { UIMessage } from "ai";
 import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   boolean,
   check,
   index,
+  integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -14,6 +17,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import type { ScheduledTaskPayload } from "@/lib/scheduler/execute";
+import type { ChatMessageMetadata } from "@/lib/token-usage";
 
 // Column-level unions mirror the text+CHECK enums on the live tables; the
 // CHECK constraints below are the database-side backstop for the same sets.
@@ -21,6 +25,7 @@ export type ScheduleType = "once" | "cron";
 export type ScheduledTaskStatus = "active" | "paused" | "completed" | "cancelled";
 export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "skipped";
 export type SkillType = "skill" | "reference";
+export type ChatMessageRole = "user" | "assistant" | "system";
 
 export const agentScheduledTasks = pgTable(
   "agent_scheduled_tasks",
@@ -124,9 +129,72 @@ export const agentSkills = pgTable(
   ],
 );
 
+// Persisted chat conversations. Distinct from the in-page "sessionUsage" token
+// term — this is the durable, reopenable transcript domain.
+export const agentChatSessions = pgTable(
+  "agent_chat_sessions",
+  {
+    // No default: the client supplies the id (crypto.randomUUID) so it can drive
+    // useChat({ id }) before the first message is ever persisted.
+    id: uuid("id").primaryKey(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    // Null until the title model names it; the UI shows "New chat" meanwhile.
+    title: text("title"),
+    // Activity time for list ordering/grouping; distinct from updatedAt, which a
+    // rename also bumps.
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedBy: uuid("deleted_by"),
+  },
+  (t) => [
+    check(
+      "agent_chat_sessions_title_check",
+      sql`${t.title} is null or char_length(${t.title}) between 1 and 200`,
+    ),
+    // Sidebar list: an agent's live sessions. Ordering by
+    // coalesce(last_message_at, created_at) desc happens in the query.
+    index("agent_chat_sessions_list_idx").on(t.agentId).where(sql`${t.deletedAt} is null`),
+  ],
+);
+
+export const agentChatMessages = pgTable(
+  "agent_chat_messages",
+  {
+    // AI SDK message id (string; client-generated for user turns, server
+    // generateMessageId for assistant turns). Not globally unique by design —
+    // identity is per session via the composite primary key below.
+    id: text("id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentChatSessions.id, { onDelete: "cascade" }),
+    role: text("role").$type<ChatMessageRole>().notNull(),
+    parts: jsonb("parts").$type<UIMessage<ChatMessageMetadata>["parts"]>().notNull(),
+    metadata: jsonb("metadata").$type<ChatMessageMetadata>(),
+    // Ordering only: equals the array index at save time. Deliberately NOT
+    // unique — saveChatSession rewrites the whole transcript (delete-all then
+    // insert) and reassigns ordinals, so a unique(session_id, ordinal) would
+    // risk mid-write collisions on edit/regenerate.
+    ordinal: integer("ordinal").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Composite identity: a message belongs to a session. A cross-session id
+    // collision must not be fatal, and this suits delete-all-then-insert.
+    primaryKey({ columns: [t.sessionId, t.id] }),
+    check("agent_chat_messages_role_check", sql`${t.role} in ('user', 'assistant', 'system')`),
+    index("agent_chat_messages_session_ordinal_idx").on(t.sessionId, t.ordinal),
+  ],
+);
+
 export type AgentScheduledTask = typeof agentScheduledTasks.$inferSelect;
 export type NewAgentScheduledTask = typeof agentScheduledTasks.$inferInsert;
 export type AgentScheduledTaskRun = typeof agentScheduledTaskRuns.$inferSelect;
 export type NewAgentScheduledTaskRun = typeof agentScheduledTaskRuns.$inferInsert;
 export type AgentSkill = typeof agentSkills.$inferSelect;
 export type NewAgentSkill = typeof agentSkills.$inferInsert;
+export type AgentChatSession = typeof agentChatSessions.$inferSelect;
+export type NewAgentChatSession = typeof agentChatSessions.$inferInsert;
+export type AgentChatMessage = typeof agentChatMessages.$inferSelect;
+export type NewAgentChatMessage = typeof agentChatMessages.$inferInsert;

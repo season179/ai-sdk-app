@@ -28,6 +28,7 @@ connections):
 
 ## Database
 
-- Our tables (`agent_scheduled_tasks`, `agent_scheduled_task_runs`, `agent_skills`) are modeled with Drizzle ORM in `db/schema.ts` — the typed data-access layer. Query them through `getDb()` in `db/index.ts`, which binds Drizzle to the shared `pg` pool (`getPool()`); never open a second pool.
+- Our tables (`agent_scheduled_tasks`, `agent_scheduled_task_runs`, `agent_skills`, `agent_chat_sessions`, `agent_chat_messages`) are modeled with Drizzle ORM in `db/schema.ts` — the typed data-access layer. Query them through `getDb()` in `db/index.ts`, which binds Drizzle to the shared `pg` pool (`getPool()`); never open a second pool.
+- Persistent chat lives in `agent_chat_sessions` (one row per conversation, soft-deleted via `deleted_at`) and `agent_chat_messages` (UIMessage `parts`/`metadata` as jsonb, ordered by `ordinal`, composite PK `(session_id, id)`, FK cascade). Access them through `lib/chat/sessions.ts`; the whole transcript is saved per turn by delete-all-then-insert from the chat route's `onFinish`.
 - `db/schema.ts` is the source of truth: `pnpm db:generate` writes a migration to `db/drizzle/`, `pnpm db:migrate` applies it. The baseline migration is idempotent (safe on fresh and existing databases). The raw SQL in `db/migrations/` is historical only.
 - pg-boss owns the `pgboss` schema; never model or migrate its tables with Drizzle.
