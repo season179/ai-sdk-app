@@ -1,6 +1,9 @@
 import { CronExpressionParser } from "cron-parser";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { PgBoss } from "pg-boss";
 
+import { getDb } from "@/db";
+import { agentScheduledTaskRuns, agentScheduledTasks } from "@/db/schema";
 import {
   getBoss,
   TASK_QUEUE_NAME,
@@ -9,15 +12,6 @@ import {
 } from "@/lib/scheduler/boss";
 import { getPool } from "@/lib/scheduler/db";
 import { getPgBossSchema } from "@/lib/scheduler/env";
-
-type CatchupRow = {
-  id: string;
-  title: string;
-  cron: string;
-  timezone: string;
-  baseline: Date;
-  db_now: Date;
-};
 
 /**
  * Recover cron fires that were missed while no scheduler instance was
@@ -37,28 +31,38 @@ type CatchupRow = {
  */
 export async function recoverMissedCronRuns() {
   const boss = await getBoss();
+  const db = getDb();
 
   // baseline: updated_at moves on pause/resume, so fires due while a task
   // was paused (or before it existed) never count as missed. db_now anchors
   // the cron evaluation to the database clock — the same clock the fires
   // and run timestamps live on — so app-host clock skew cannot misjudge a
   // fire as missed.
-  const { rows } = await getPool().query<CatchupRow>(
-    `select t.id, t.title, t.cron, t.timezone,
-            greatest(t.updated_at, r.started_at) as baseline,
-            now() as db_now
-     from agent_scheduled_tasks t
-     left join lateral (
-       select started_at
-       from agent_scheduled_task_runs
-       where task_id = t.id
-       order by started_at desc
-       limit 1
-     ) r on true
-     where t.status = 'active' and t.schedule_type = 'cron'`,
-  );
+  const latestRun = db
+    .select({ startedAt: agentScheduledTaskRuns.startedAt })
+    .from(agentScheduledTaskRuns)
+    .where(eq(agentScheduledTaskRuns.taskId, agentScheduledTasks.id))
+    .orderBy(desc(agentScheduledTaskRuns.startedAt))
+    .limit(1)
+    .as("r");
 
-  const reasserted: CatchupRow[] = [];
+  const rows = await db
+    .select({
+      id: agentScheduledTasks.id,
+      title: agentScheduledTasks.title,
+      // schedule_type = 'cron' guarantees cron is non-null (table CHECK).
+      cron: sql<string>`${agentScheduledTasks.cron}`,
+      timezone: agentScheduledTasks.timezone,
+      baseline: sql<Date>`greatest(${agentScheduledTasks.updatedAt}, ${latestRun.startedAt})`,
+      dbNow: sql<Date>`now()`,
+    })
+    .from(agentScheduledTasks)
+    .leftJoinLateral(latestRun, sql`true`)
+    .where(
+      and(eq(agentScheduledTasks.status, "active"), eq(agentScheduledTasks.scheduleType, "cron")),
+    );
+
+  const reasserted: typeof rows = [];
 
   for (const row of rows) {
     try {
@@ -82,7 +86,7 @@ export async function recoverMissedCronRuns() {
     try {
       const lastDueFire = CronExpressionParser.parse(row.cron, {
         tz: row.timezone,
-        currentDate: row.db_now,
+        currentDate: row.dbNow,
       })
         .prev()
         .toDate();

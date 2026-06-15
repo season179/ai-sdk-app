@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 
 import { CronExpressionParser } from "cron-parser";
+import { and, desc, eq, getTableColumns, sql } from "drizzle-orm";
 
+import { getDb } from "@/db";
+import { agentScheduledTaskRuns, agentScheduledTasks } from "@/db/schema";
 import {
   getBoss,
   TASK_QUEUE_NAME,
   taskScheduleOptions,
   taskSendOptions,
 } from "@/lib/scheduler/boss";
-import { getPool } from "@/lib/scheduler/db";
 import { getDefaultScheduleTimezone } from "@/lib/scheduler/env";
 import { parseScheduledTaskPayload, type ScheduledTaskPayload } from "@/lib/scheduler/execute";
 
@@ -74,22 +76,13 @@ export class ScheduledTaskNotFoundError extends SchedulerInputError {
   }
 }
 
-type TaskRow = {
-  id: string;
-  title: string;
-  payload: ScheduledTaskPayload;
-  schedule_type: "once" | "cron";
-  run_at: Date | null;
-  cron: string | null;
-  timezone: string;
-  status: ScheduledTaskStatus;
-  job_id: string | null;
-  created_at: Date;
-  updated_at: Date;
-  last_run_status?: ScheduledTaskRunStatus | null;
-  last_run_started_at?: Date | null;
-  last_run_completed_at?: Date | null;
-  last_run_error?: string | null;
+// Table columns come from $inferSelect; the last-run fields are joined in by
+// listScheduledTasks (and absent on the single-row reads, hence optional).
+type TaskRow = typeof agentScheduledTasks.$inferSelect & {
+  lastRunStatus?: ScheduledTaskRunStatus | null;
+  lastRunStartedAt?: Date | null;
+  lastRunCompletedAt?: Date | null;
+  lastRunError?: string | null;
 };
 
 export async function createScheduledTask(input: CreateScheduledTaskInput) {
@@ -101,18 +94,22 @@ export async function createScheduledTask(input: CreateScheduledTaskInput) {
 
   const payload = parseScheduledTaskPayload(input.payload);
   const id = randomUUID();
-  const pool = getPool();
+  const db = getDb();
   const boss = await getBoss();
 
   if (input.scheduleType === "once") {
     const runAt = parseRunAt(input.runAt);
 
-    await pool.query(
-      `insert into agent_scheduled_tasks
-        (id, title, payload, schedule_type, run_at, timezone, status, queue_name)
-       values ($1, $2, $3, 'once', $4, 'UTC', 'active', $5)`,
-      [id, title, payload, runAt.toISOString(), TASK_QUEUE_NAME],
-    );
+    await db.insert(agentScheduledTasks).values({
+      id,
+      title,
+      payload,
+      scheduleType: "once",
+      runAt,
+      timezone: "UTC",
+      status: "active",
+      queueName: TASK_QUEUE_NAME,
+    });
 
     try {
       const jobId = await boss.sendAfter(
@@ -126,12 +123,12 @@ export async function createScheduledTask(input: CreateScheduledTaskInput) {
         throw new Error("pg-boss did not return a job id for the scheduled task.");
       }
 
-      await pool.query(
-        "update agent_scheduled_tasks set job_id = $2, updated_at = now() where id = $1",
-        [id, jobId],
-      );
+      await db
+        .update(agentScheduledTasks)
+        .set({ jobId, updatedAt: sql`now()` })
+        .where(eq(agentScheduledTasks.id, id));
     } catch (error) {
-      await pool.query("delete from agent_scheduled_tasks where id = $1", [id]);
+      await db.delete(agentScheduledTasks).where(eq(agentScheduledTasks.id, id));
       throw error;
     }
   } else if (input.scheduleType === "cron") {
@@ -144,17 +141,22 @@ export async function createScheduledTask(input: CreateScheduledTaskInput) {
     const timezone = parseTimezone(input.timezone);
     parseCron(cron, timezone);
 
-    await pool.query(
-      `insert into agent_scheduled_tasks
-        (id, title, payload, schedule_type, cron, timezone, status, queue_name, schedule_key)
-       values ($1, $2, $3, 'cron', $4, $5, 'active', $6, $7)`,
-      [id, title, payload, cron, timezone, TASK_QUEUE_NAME, id],
-    );
+    await db.insert(agentScheduledTasks).values({
+      id,
+      title,
+      payload,
+      scheduleType: "cron",
+      cron,
+      timezone,
+      status: "active",
+      queueName: TASK_QUEUE_NAME,
+      scheduleKey: id,
+    });
 
     try {
       await boss.schedule(TASK_QUEUE_NAME, cron, { taskId: id }, taskScheduleOptions(id, timezone));
     } catch (error) {
-      await pool.query("delete from agent_scheduled_tasks where id = $1", [id]);
+      await db.delete(agentScheduledTasks).where(eq(agentScheduledTasks.id, id));
       throw error;
     }
   } else {
@@ -234,45 +236,53 @@ export async function resumeScheduledTask(id: string) {
       throw new Error("pg-boss did not return a job id while resuming the task.");
     }
 
-    await getPool().query(
-      "update agent_scheduled_tasks set status = 'active', job_id = $2, updated_at = now() where id = $1",
-      [id, jobId],
-    );
+    await getDb()
+      .update(agentScheduledTasks)
+      .set({ status: "active", jobId, updatedAt: sql`now()` })
+      .where(eq(agentScheduledTasks.id, id));
   }
 
   return requireScheduledTask(id);
 }
 
 export async function listScheduledTasks() {
-  const { rows } = await getPool().query<TaskRow>(
-    `select t.id, t.title, t.payload, t.schedule_type, t.run_at, t.cron, t.timezone, t.status,
-            t.job_id, t.created_at, t.updated_at,
-            r.status as last_run_status,
-            r.started_at as last_run_started_at,
-            r.completed_at as last_run_completed_at,
-            r.error as last_run_error
-     from agent_scheduled_tasks t
-     left join lateral (
-       select status, started_at, completed_at, error
-       from agent_scheduled_task_runs
-       where task_id = t.id
-       order by started_at desc
-       limit 1
-     ) r on true
-     order by t.created_at desc
-     limit 100`,
-  );
+  const db = getDb();
+
+  // Latest run per task, correlated to the outer row via the lateral join.
+  const latestRun = db
+    .select({
+      status: agentScheduledTaskRuns.status,
+      startedAt: agentScheduledTaskRuns.startedAt,
+      completedAt: agentScheduledTaskRuns.completedAt,
+      error: agentScheduledTaskRuns.error,
+    })
+    .from(agentScheduledTaskRuns)
+    .where(eq(agentScheduledTaskRuns.taskId, agentScheduledTasks.id))
+    .orderBy(desc(agentScheduledTaskRuns.startedAt))
+    .limit(1)
+    .as("r");
+
+  const rows = await db
+    .select({
+      ...getTableColumns(agentScheduledTasks),
+      lastRunStatus: latestRun.status,
+      lastRunStartedAt: latestRun.startedAt,
+      lastRunCompletedAt: latestRun.completedAt,
+      lastRunError: latestRun.error,
+    })
+    .from(agentScheduledTasks)
+    .leftJoinLateral(latestRun, sql`true`)
+    .orderBy(desc(agentScheduledTasks.createdAt))
+    .limit(100);
 
   return rows.map(mapTaskRow);
 }
 
 export async function getScheduledTaskById(id: string) {
-  const { rows } = await getPool().query<TaskRow>(
-    `select id, title, payload, schedule_type, run_at, cron, timezone, status, job_id, created_at, updated_at
-     from agent_scheduled_tasks
-     where id = $1`,
-    [id],
-  );
+  const rows = await getDb()
+    .select()
+    .from(agentScheduledTasks)
+    .where(eq(agentScheduledTasks.id, id));
 
   return rows[0] ? mapTaskRow(rows[0]) : null;
 }
@@ -280,32 +290,22 @@ export async function getScheduledTaskById(id: string) {
 export async function getScheduledTaskRuns(taskId: string) {
   await requireScheduledTask(taskId);
 
-  const { rows } = await getPool().query<{
-    id: string;
-    task_id: string;
-    status: ScheduledTaskRunStatus;
-    output: unknown;
-    error: string | null;
-    started_at: Date;
-    completed_at: Date | null;
-  }>(
-    `select id, task_id, status, output, error, started_at, completed_at
-     from agent_scheduled_task_runs
-     where task_id = $1
-     order by started_at desc
-     limit 50`,
-    [taskId],
-  );
+  const rows = await getDb()
+    .select()
+    .from(agentScheduledTaskRuns)
+    .where(eq(agentScheduledTaskRuns.taskId, taskId))
+    .orderBy(desc(agentScheduledTaskRuns.startedAt))
+    .limit(50);
 
   return rows.map(
     (row): ScheduledTaskRun => ({
       id: row.id,
-      taskId: row.task_id,
+      taskId: row.taskId,
       status: row.status,
       output: row.output,
       error: row.error,
-      startedAt: row.started_at.toISOString(),
-      completedAt: row.completed_at?.toISOString() ?? null,
+      startedAt: row.startedAt.toISOString(),
+      completedAt: row.completedAt?.toISOString() ?? null,
     }),
   );
 }
@@ -313,57 +313,66 @@ export async function getScheduledTaskRuns(taskId: string) {
 // --- Worker-facing helpers -------------------------------------------------
 
 export async function markRunStarted(taskId: string, pgBossJobId: string) {
-  await getPool().query(
-    `insert into agent_scheduled_task_runs (task_id, pg_boss_job_id, status)
-     values ($1, $2, 'running')
-     on conflict (pg_boss_job_id)
-     do update set status = 'running', started_at = now(), completed_at = null, output = null, error = null`,
-    [taskId, pgBossJobId],
-  );
+  await getDb()
+    .insert(agentScheduledTaskRuns)
+    .values({ taskId, pgBossJobId, status: "running" })
+    .onConflictDoUpdate({
+      target: agentScheduledTaskRuns.pgBossJobId,
+      set: {
+        status: "running",
+        startedAt: sql`now()`,
+        completedAt: null,
+        output: null,
+        error: null,
+      },
+    });
 }
 
 export async function markRunSkipped(taskId: string, pgBossJobId: string, reason: string) {
-  await getPool().query(
-    `insert into agent_scheduled_task_runs (task_id, pg_boss_job_id, status, error, completed_at)
-     values ($1, $2, 'skipped', $3, now())
-     on conflict (pg_boss_job_id)
-     do update set status = 'skipped', error = $3, completed_at = now()`,
-    [taskId, pgBossJobId, reason],
-  );
+  await getDb()
+    .insert(agentScheduledTaskRuns)
+    .values({ taskId, pgBossJobId, status: "skipped", error: reason, completedAt: sql`now()` })
+    .onConflictDoUpdate({
+      target: agentScheduledTaskRuns.pgBossJobId,
+      set: { status: "skipped", error: reason, completedAt: sql`now()` },
+    });
 }
 
 export async function markRunCompleted(pgBossJobId: string, output: unknown) {
-  await getPool().query(
-    `update agent_scheduled_task_runs
-     set status = 'completed', output = $2, completed_at = now()
-     where pg_boss_job_id = $1`,
-    [pgBossJobId, output === undefined ? null : JSON.stringify(output)],
-  );
+  await getDb()
+    .update(agentScheduledTaskRuns)
+    .set({
+      status: "completed",
+      // Mirror the original raw query: stringify then cast text -> jsonb, so an
+      // object is encoded exactly once (drizzle's jsonb would re-stringify a
+      // pre-stringified string) and a literal null is stored as jsonb 'null'.
+      output: sql`${output === undefined ? null : JSON.stringify(output)}::jsonb`,
+      completedAt: sql`now()`,
+    })
+    .where(eq(agentScheduledTaskRuns.pgBossJobId, pgBossJobId));
 }
 
 export async function markRunFailed(pgBossJobId: string, error: string) {
-  await getPool().query(
-    `update agent_scheduled_task_runs
-     set status = 'failed', error = $2, completed_at = now()
-     where pg_boss_job_id = $1`,
-    [pgBossJobId, error],
-  );
+  await getDb()
+    .update(agentScheduledTaskRuns)
+    .set({ status: "failed", error, completedAt: sql`now()` })
+    .where(eq(agentScheduledTaskRuns.pgBossJobId, pgBossJobId));
 }
 
 export async function markTaskCompleted(id: string) {
-  await getPool().query(
-    "update agent_scheduled_tasks set status = 'completed', updated_at = now() where id = $1 and status = 'active'",
-    [id],
-  );
+  await getDb()
+    .update(agentScheduledTasks)
+    .set({ status: "completed", updatedAt: sql`now()` })
+    .where(and(eq(agentScheduledTasks.id, id), eq(agentScheduledTasks.status, "active")));
 }
 
 // --- Internals --------------------------------------------------------------
 
 async function updateTaskStatus(id: string, status: ScheduledTaskStatus) {
-  await getPool().query(
-    "update agent_scheduled_tasks set status = $2, updated_at = now() where id = $1",
-    [id, status],
-  );
+  await getDb()
+    .update(agentScheduledTasks)
+    .set({ status, updatedAt: sql`now()` })
+    .where(eq(agentScheduledTasks.id, id));
 }
 
 async function requireScheduledTask(id: string) {
@@ -434,20 +443,20 @@ function mapTaskRow(row: TaskRow): ScheduledTask {
     id: row.id,
     title: row.title,
     payload: row.payload,
-    scheduleType: row.schedule_type,
-    runAt: row.run_at?.toISOString() ?? null,
+    scheduleType: row.scheduleType,
+    runAt: row.runAt?.toISOString() ?? null,
     cron: row.cron,
     timezone: row.timezone,
     status: row.status,
-    jobId: row.job_id,
-    createdAt: row.created_at.toISOString(),
-    updatedAt: row.updated_at.toISOString(),
-    lastRun: row.last_run_status
+    jobId: row.jobId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    lastRun: row.lastRunStatus
       ? {
-          status: row.last_run_status,
-          startedAt: row.last_run_started_at?.toISOString() ?? "",
-          completedAt: row.last_run_completed_at?.toISOString() ?? null,
-          error: row.last_run_error ?? null,
+          status: row.lastRunStatus,
+          startedAt: row.lastRunStartedAt?.toISOString() ?? "",
+          completedAt: row.lastRunCompletedAt?.toISOString() ?? null,
+          error: row.lastRunError ?? null,
         }
       : null,
   };
