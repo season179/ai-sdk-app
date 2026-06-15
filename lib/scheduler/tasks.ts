@@ -12,7 +12,11 @@ import {
   taskSendOptions,
 } from "@/lib/scheduler/boss";
 import { getDefaultScheduleTimezone } from "@/lib/scheduler/env";
-import { parseScheduledTaskPayload, type ScheduledTaskPayload } from "@/lib/scheduler/execute";
+import {
+  clampChainDelaySeconds,
+  parseScheduledTaskPayload,
+  type ScheduledTaskPayload,
+} from "@/lib/scheduler/execute";
 
 export type ScheduledTaskStatus = "active" | "paused" | "completed" | "cancelled";
 
@@ -22,6 +26,7 @@ export type ScheduledTaskLastRun = {
   status: ScheduledTaskRunStatus;
   startedAt: string;
   completedAt: string | null;
+  output: unknown;
   error: string | null;
 };
 
@@ -82,6 +87,7 @@ type TaskRow = typeof agentScheduledTasks.$inferSelect & {
   lastRunStatus?: ScheduledTaskRunStatus | null;
   lastRunStartedAt?: Date | null;
   lastRunCompletedAt?: Date | null;
+  lastRunOutput?: unknown;
   lastRunError?: string | null;
 };
 
@@ -221,7 +227,14 @@ export async function resumeScheduledTask(id: string) {
     );
     await updateTaskStatus(id, "active");
   } else {
-    const runAt = task.runAt ? new Date(task.runAt) : null;
+    // Self-chaining instruction tasks have no meaningful run_at once the chain
+    // is moving: resume picks the chain back up after one cadence delay.
+    const runAt =
+      task.payload.kind === "instruction"
+        ? new Date(Date.now() + clampChainDelaySeconds(task.payload.cadenceSeconds) * 1000)
+        : task.runAt
+          ? new Date(task.runAt)
+          : null;
 
     if (!runAt || runAt.getTime() <= Date.now()) {
       throw new SchedulerInputError(
@@ -254,6 +267,7 @@ export async function listScheduledTasks() {
       status: agentScheduledTaskRuns.status,
       startedAt: agentScheduledTaskRuns.startedAt,
       completedAt: agentScheduledTaskRuns.completedAt,
+      output: agentScheduledTaskRuns.output,
       error: agentScheduledTaskRuns.error,
     })
     .from(agentScheduledTaskRuns)
@@ -268,6 +282,7 @@ export async function listScheduledTasks() {
       lastRunStatus: latestRun.status,
       lastRunStartedAt: latestRun.startedAt,
       lastRunCompletedAt: latestRun.completedAt,
+      lastRunOutput: latestRun.output,
       lastRunError: latestRun.error,
     })
     .from(agentScheduledTasks)
@@ -366,6 +381,71 @@ export async function markTaskCompleted(id: string) {
     .where(and(eq(agentScheduledTasks.id, id), eq(agentScheduledTasks.status, "active")));
 }
 
+/** Abnormal chain stop (e.g. consecutive failures). No pending job to detach. */
+export async function markTaskCancelled(id: string) {
+  await getDb()
+    .update(agentScheduledTasks)
+    .set({ status: "cancelled", updatedAt: sql`now()` })
+    .where(and(eq(agentScheduledTasks.id, id), eq(agentScheduledTasks.status, "active")));
+}
+
+/** Advance an instruction payload's round counter ahead of the next fire. */
+export async function setInstructionRound(id: string, round: number) {
+  await getDb()
+    .update(agentScheduledTasks)
+    .set({
+      payload: sql`jsonb_set(${agentScheduledTasks.payload}, '{round}', to_jsonb(${round}::int), true)`,
+      updatedAt: sql`now()`,
+    })
+    .where(eq(agentScheduledTasks.id, id));
+}
+
+/** Keep job_id pointing at the latest chained job so pause can cancel it. */
+export async function updateTaskJobId(id: string, jobId: string) {
+  await getDb()
+    .update(agentScheduledTasks)
+    .set({ jobId, updatedAt: sql`now()` })
+    .where(eq(agentScheduledTasks.id, id));
+}
+
+export async function getLatestCompletedRunOutput(taskId: string) {
+  const rows = await getDb()
+    .select({ output: agentScheduledTaskRuns.output })
+    .from(agentScheduledTaskRuns)
+    .where(
+      and(
+        eq(agentScheduledTaskRuns.taskId, taskId),
+        eq(agentScheduledTaskRuns.status, "completed"),
+      ),
+    )
+    .orderBy(desc(agentScheduledTaskRuns.startedAt))
+    .limit(1);
+
+  return rows[0]?.output ?? null;
+}
+
+/** Length of the trailing run of 'failed' statuses, capped at `limit`. */
+export async function countConsecutiveFailedRuns(taskId: string, limit: number) {
+  const rows = await getDb()
+    .select({ status: agentScheduledTaskRuns.status })
+    .from(agentScheduledTaskRuns)
+    .where(eq(agentScheduledTaskRuns.taskId, taskId))
+    .orderBy(desc(agentScheduledTaskRuns.startedAt))
+    .limit(limit);
+
+  let failures = 0;
+
+  for (const row of rows) {
+    if (row.status !== "failed") {
+      break;
+    }
+
+    failures += 1;
+  }
+
+  return failures;
+}
+
 // --- Internals --------------------------------------------------------------
 
 async function updateTaskStatus(id: string, status: ScheduledTaskStatus) {
@@ -456,6 +536,7 @@ function mapTaskRow(row: TaskRow): ScheduledTask {
           status: row.lastRunStatus,
           startedAt: row.lastRunStartedAt?.toISOString() ?? "",
           completedAt: row.lastRunCompletedAt?.toISOString() ?? null,
+          output: row.lastRunOutput ?? null,
           error: row.lastRunError ?? null,
         }
       : null,

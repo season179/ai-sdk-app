@@ -253,3 +253,72 @@ Downtime handling is launchd-style: each cron task runs at most once on recovery
 - The task queue uses pg-boss's `stately` policy, and **every send or schedule must carry the task id as its singleton key** via `taskSendOptions` / `taskScheduleOptions` from `lib/scheduler/boss.ts`. Under `stately`, keyless jobs share one queue-wide slot, so a bare `send`/`schedule` silently swallows other tasks' jobs.
 - Stacked fires (worker down, web up) coalesce into one queued job at insert time. Full-outage misses are recovered by `lib/scheduler/catchup.ts` at worker startup: it re-asserts schedules, migrates pre-`stately` queues (createQueue can't change an existing policy), and queues at most one catch-up run per task — judged on the database clock against the latest run / task update.
 - Accepted trade-offs: a job failing while an earlier same-key job still sits in `retry` goes straight to the DLQ (the retry slot is occupied — see pg-boss `failJobs`' `ON CONFLICT DO NOTHING`); jobs queued before the one-time policy flip are exempt from coalescing during that upgrade window.
+
+## Instruction payloads and self-chaining check-ins (planned and shipped 2026-06-12)
+
+Adds the deferred `instruction` payload kind. Motivating example: "check in on x every 60s" — the agent schedules a one-off that fires in 60s; at fire time an agent loop checks on x, reports status, and judges whether another round is warranted. `tool_call` payloads are unchanged and remain the right choice for deterministic replays; `instruction` is a new dispatcher branch in `lib/scheduler/execute.ts`, exactly the two-way door the V1 decision reserved.
+
+### Trust boundary
+
+The model judges; deterministic worker code performs every schedule mutation. Scheduled execution gets **no scheduler tools** — this keeps the V1 recursion decision intact while still allowing recurrence:
+
+- The instruction run must end with a structured verdict (enforced output schema, not prose):
+
+  ```json
+  { "statusUpdate": "...", "continue": true, "nextDelaySeconds": 60 }
+  ```
+
+- The worker acts on the verdict. Stopping is `continue: false` — cancellation is convergent (can only reduce work), so it needs no tool either.
+
+### Payload shape
+
+```json
+{
+  "kind": "instruction",
+  "instruction": "check in on x every 60s",
+  "round": 3,
+  "maxRounds": 20,
+  "cadenceSeconds": 60
+}
+```
+
+Chain state lives in the task's `payload` jsonb (worker updates `round` per fire) — no migration. `instruction` is orthogonal to `schedule_type`:
+
+- **`once` + instruction (self-chaining):** on `continue: true`, the worker sends the successor job (`sendAfter`, singleton key = task id per the stately rules below), increments `round`, and the task stays `active`. On `continue: false`, mark the task `completed`.
+- **`cron` + instruction:** the cron schedule provides recurrence; the worker never sends successors. `continue: false` maps to the existing `cancelScheduledTask()`.
+
+### Round counter = context + cap
+
+`round`/`maxRounds` does double duty: it is injected into the prompt ("round 7 of 20", so the model can pace itself and wrap up cleanly on the final round) and it is the hard guardrail — the worker refuses to schedule past `maxRounds` regardless of the verdict. `nextDelaySeconds` is clamped to a floor (default 30s) so a confused model cannot tighten the loop.
+
+### Fire-time prompt context
+
+The worker assembles: the original instruction verbatim, current UTC time (same treatment the chat route already has — without it relative phrasing is meaningless), round N of M, chain start time and intended cadence, and the previous run's `output` (read from `agent_scheduled_task_runs`; do not accumulate history into the payload). Last-round output is what turns a stateless check into a real status update ("80% last round, now 85%").
+
+### Failure policy and chain liveness
+
+Self-chaining one-offs break in a way cron does not: the entire recurrence lives in the single pending job. Two measures:
+
+- **No rethrow for instruction runs.** The handler catches execution errors, records the run `failed`, and still schedules the next round (failure consumes a round). This trades pg-boss retry/DLQ for a single decision point per fire and keeps recurrence alive through transient LLM outages. A consecutive-failure limit (default 3) stops hopeless chains.
+- **Catch-up re-asserts chain liveness.** Invariant: an `active` instruction-chain task has exactly one pending job. `lib/scheduler/catchup.ts` (which today only re-asserts cron schedules) additionally queues one job at worker startup for any active chain task with no pending job.
+
+### Carried-over constraints
+
+- Every successor `sendAfter` must use `taskSendOptions(taskId)` — under the `stately` policy a keyless send silently collides (see 2026-06-11 section). Successors are sent only after the prior job completes, so the singleton slot is free.
+- The worker now needs OpenRouter env in addition to `DATABASE_URL`. Fail at startup with a clear message, same standard as the chat route.
+
+### Surface changes
+
+- `scheduled_task_create` (tool + POST route) accepts the new payload kind; validation requires non-empty `instruction` and sane `maxRounds`.
+- System prompt: prefer `tool_call` for single deterministic calls; use `instruction` when the task needs judgment, multiple steps, or a stop condition.
+- Tasks panel: show round N/M for chains; `statusUpdate` lands in the run's `output` and is shown on the last-run line.
+- Accepted limitation: there is no push channel into the chat — status updates are visible only in the Tasks panel / runs API.
+
+### Implementation notes (post-build)
+
+- The agent loop is `ToolLoopAgent` with `output: Output.object({ schema })` (AI SDK v6; `experimental_output` is deprecated); the verdict is read from `result.output`. All three verdict fields are required in the schema because strict structured-output providers reject optional properties — `nextDelaySeconds` is simply ignored when `continue` is false.
+- Instruction runs get the mock catalog only. Reusing the tool-search bridge was rejected: its `tool_call` dispatcher routes to scheduler tools, which would leak scheduling back into scheduled execution.
+- Delay clamping is `[30s, 24h]` (ceiling added beyond the planned floor); `cadenceSeconds` is validated to the same window at create time. `payload.round` is the round number of the *next* fire; the worker advances it before sending the successor, so a crash between the two can only skip a round number, never replay one.
+- Stop semantics: verdict/cap stop marks a `once` chain `completed` and cancels a `cron` one; the consecutive-failure stop marks the task `cancelled` (abnormal end). Chain mutations after a round never rethrow — a failed successor send is logged and healed by startup catch-up.
+- Resuming a paused `once` + instruction chain re-enters after one cadence delay instead of requiring `run_at` to still be in the future (mid-chain, `run_at` is the long-past first fire).
+- Verified live on 2026-06-12: a two-round chain ran end to end (round 2's prompt visibly used round 1's output), and a deliberately broken chain (active task, pending job cancelled directly in `pgboss.job`) was revived at worker startup by the liveness reconciler.

@@ -241,6 +241,7 @@ export default function ChatPage() {
         } as SidebarStyle
       }
     >
+      <h1 className="sr-only">AI SDK App</h1>
       <SessionSidebar
         activeSessionId={activeId ?? ""}
         busy={chatBusy}

@@ -14,6 +14,29 @@ import { getPool } from "@/lib/scheduler/db";
 import { getPgBossSchema } from "@/lib/scheduler/env";
 
 /**
+ * Worker-startup recovery entry point. Phases are isolated: a failure in
+ * cron catch-up must not block chain-liveness recovery, and vice versa.
+ */
+export async function recoverMissedRuns() {
+  let cronRuns = 0;
+  let chainRuns = 0;
+
+  try {
+    cronRuns = await recoverMissedCronRuns();
+  } catch (error) {
+    console.error("Cron missed-run catch-up failed", error);
+  }
+
+  try {
+    chainRuns = await recoverBrokenInstructionChains();
+  } catch (error) {
+    console.error("Instruction-chain liveness recovery failed", error);
+  }
+
+  return { cronRuns, chainRuns };
+}
+
+/**
  * Recover cron fires that were missed while no scheduler instance was
  * running, launchd-style: however long the outage, each task gets at most
  * one catch-up run. pg-boss itself only backfills fires missed within the
@@ -106,6 +129,54 @@ export async function recoverMissedCronRuns() {
       }
     } catch (error) {
       console.warn(`Catch-up failed for task ${row.id}`, error);
+    }
+  }
+
+  return recovered;
+}
+
+/**
+ * Re-assert instruction-chain liveness. Invariant: an active self-chaining
+ * (once + instruction) task has exactly one pending job — the whole
+ * recurrence lives in it, so a worker crash between completing a round and
+ * sending its successor kills the chain. Queue one immediate job for any
+ * active chain task with nothing pending; the stately singleton key dedupes
+ * against races with a job that appears concurrently.
+ */
+export async function recoverBrokenInstructionChains() {
+  const boss = await getBoss();
+
+  const { rows } = await getPool().query<{ id: string; title: string }>(
+    `select t.id, t.title
+     from agent_scheduled_tasks t
+     where t.status = 'active'
+       and t.schedule_type = 'once'
+       and t.payload->>'kind' = 'instruction'
+       and not exists (
+         select 1
+         from ${getPgBossSchema()}.job j
+         where j.name = $1
+           and j.singleton_key = t.id::text
+           and j.state in ('created', 'retry', 'active')
+       )`,
+    [TASK_QUEUE_NAME],
+  );
+
+  let recovered = 0;
+
+  for (const row of rows) {
+    try {
+      const jobId = await boss.send(TASK_QUEUE_NAME, { taskId: row.id }, taskSendOptions(row.id));
+
+      if (jobId) {
+        recovered += 1;
+        console.log(
+          `Chain liveness restored for task ${row.id} ('${row.title}'): ` +
+            "no pending job existed for this active instruction chain.",
+        );
+      }
+    } catch (error) {
+      console.warn(`Chain liveness recovery failed for task ${row.id}`, error);
     }
   }
 

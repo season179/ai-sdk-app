@@ -24,18 +24,39 @@ export const schedulerToolSpecs: RealisticToolSpec[] = [
     service: "scheduler",
     action: "create",
     description:
-      "Schedule a real task that runs another catalog tool later. One-off tasks require run_at; recurring tasks require a cron expression and run in the given IANA timezone (default UTC). Returns the created task with its id.",
+      "Schedule a real task that runs later. Payload kind 'tool_call' (default) executes one catalog tool with fixed arguments; kind 'instruction' runs a free-form instruction through an agent loop each time it fires and judges whether to continue. One-off tasks require run_at; recurring tasks require a cron expression and run in the given IANA timezone (default UTC). One-off instruction tasks re-schedule themselves after each round until the agent stops or max_rounds is reached. Returns the created task with its id.",
     properties: {
       title: { type: "string", description: "Short human-readable task title." },
+      kind: {
+        type: "string",
+        enum: ["tool_call", "instruction"],
+        description:
+          "Payload kind. 'tool_call' (default) executes one catalog tool; 'instruction' runs an agent loop over a free-form instruction at fire time.",
+      },
       tool_name: {
         type: "string",
         description:
-          "Exact name of the catalog tool to execute when the task runs. Scheduler and skill tools cannot be scheduled.",
+          "Exact name of the catalog tool to execute when the task runs. Required when kind is 'tool_call'. Scheduler and skill tools cannot be scheduled.",
       },
       tool_arguments: {
         type: "object",
-        description: "Arguments passed to the tool when the task runs.",
+        description: "Arguments passed to the tool when the task runs (kind 'tool_call').",
         additionalProperties: true,
+      },
+      instruction: {
+        type: "string",
+        description:
+          "Free-form instruction executed each round, e.g. 'check in on the data export and report progress'. Required when kind is 'instruction'.",
+      },
+      max_rounds: {
+        type: "number",
+        description:
+          "Hard cap on instruction rounds (default 10, max 100). The chain stops at this cap regardless of the agent's judgment.",
+      },
+      cadence_seconds: {
+        type: "number",
+        description:
+          "Intended seconds between instruction rounds (min 30). One-off instruction tasks re-schedule themselves at this cadence unless the agent requests a different delay.",
       },
       schedule_type: {
         type: "string",
@@ -57,7 +78,7 @@ export const schedulerToolSpecs: RealisticToolSpec[] = [
           "IANA timezone the cron expression is evaluated in, e.g. Asia/Kuala_Lumpur. Defaults to UTC.",
       },
     },
-    required: ["title", "tool_name", "schedule_type"],
+    required: ["title", "schedule_type"],
   },
   {
     name: "scheduled_task_list",
@@ -133,13 +154,22 @@ export async function executeSchedulerTool(name: string, input: RealisticToolInp
     switch (name) {
       case "scheduled_task_create": {
         const scheduleType = input.schedule_type === "cron" ? "cron" : "once";
+        const payload =
+          input.kind === "instruction"
+            ? {
+                kind: "instruction",
+                instruction: input.instruction,
+                maxRounds: input.max_rounds,
+                cadenceSeconds: input.cadence_seconds,
+              }
+            : {
+                kind: "tool_call",
+                toolName: input.tool_name,
+                arguments: input.tool_arguments ?? {},
+              };
         const task = await createScheduledTask({
           title: String(input.title ?? ""),
-          payload: {
-            kind: "tool_call",
-            toolName: input.tool_name,
-            arguments: input.tool_arguments ?? {},
-          },
+          payload,
           scheduleType,
           runAt: asOptionalString(input.run_at),
           cron: asOptionalString(input.cron),
@@ -231,19 +261,35 @@ function formatTask(task: ScheduledTask) {
     cron: task.cron,
     timezone: task.timezone,
     status: task.status,
-    executes: {
-      toolName: task.payload.toolName,
-      arguments: task.payload.arguments,
-    },
+    executes:
+      task.payload.kind === "tool_call"
+        ? {
+            kind: "tool_call",
+            toolName: task.payload.toolName,
+            arguments: task.payload.arguments,
+          }
+        : {
+            kind: "instruction",
+            instruction: task.payload.instruction,
+            round: task.payload.round,
+            maxRounds: task.payload.maxRounds,
+            cadenceSeconds: task.payload.cadenceSeconds,
+          },
     lastRun: task.lastRun,
     createdAt: task.createdAt,
   };
 }
 
 function describeSchedule(task: ScheduledTask) {
-  return task.scheduleType === "once"
-    ? `It will run once at ${task.runAt} (UTC).`
-    : `Cron '${task.cron}' is evaluated in ${task.timezone}.`;
+  if (task.scheduleType !== "once") {
+    return `Cron '${task.cron}' is evaluated in ${task.timezone}.`;
+  }
+
+  if (task.payload.kind === "instruction") {
+    return `It first runs at ${task.runAt} (UTC) and re-schedules itself for up to ${task.payload.maxRounds} rounds.`;
+  }
+
+  return `It will run once at ${task.runAt} (UTC).`;
 }
 
 function requireTaskId(input: RealisticToolInput) {

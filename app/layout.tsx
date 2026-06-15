@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OpenRouter Chat",
+  title: "AI SDK App",
   description: "A streaming chatbot powered by the Vercel AI SDK and OpenRouter.",
 };
 

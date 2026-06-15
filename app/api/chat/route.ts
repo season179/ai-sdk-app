@@ -49,6 +49,7 @@ const SYSTEM_PROMPT = [
   "Be friendly, concise, and helpful. Use tool_search, tool_describe, and tool_call when hidden tools are needed.",
   "Scheduled tasks (scheduled_task_* tools) are real and persistent, not mocked.",
   "Before creating a scheduled task, ask a follow-up question if the requested time is ambiguous (no date, no timezone, or unclear wording). One-off run_at values must be ISO 8601 with a timezone offset; recurring tasks use cron with an IANA timezone (UTC unless the user says otherwise).",
+  "scheduled_task_create supports two payload kinds. Prefer kind 'tool_call' for a single deterministic tool call. Use kind 'instruction' when the task needs judgment, several steps, or a stop condition: an agent loop runs the instruction each round and decides whether to continue. For repeated check-ins like 'check in on x every 60s', create a one-off instruction task whose run_at is the first check and set cadence_seconds; it re-schedules itself after each round and stops when satisfied or at max_rounds.",
   "After creating a task, confirm whether it is one-off or recurring, when it runs, and in which timezone.",
 ].join(" ");
 

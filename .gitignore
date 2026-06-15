@@ -146,6 +146,7 @@ vite.config.ts.timestamp-*
 .playwright-cli/
 .case/
 .commandcode/*
+.claude/*
 graphify-out/
 .claude/*
 !.claude/settings.json

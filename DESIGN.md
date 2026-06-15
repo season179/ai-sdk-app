@@ -40,7 +40,7 @@ Fixed rem scale, tight steps (product register):
 | Step | Class | Use |
 | --- | --- | --- |
 | 18px semibold | `text-lg font-semibold` | Detail-view title (one per view) |
-| 14px semibold | `text-sm font-semibold` | Page title, panel headings |
+| 14px semibold | `text-sm font-semibold` | Panel headings (page titles are `sr-only`) |
 | 14px | `text-sm` | Body, descriptions, controls |
 | 12px medium/semibold | `text-xs` | Field labels, section headings, nav items |
 | 11px | `text-[11px]` | Hints, counters, metadata chips |
@@ -54,14 +54,20 @@ run wider.
 Tailwind's 4pt scale. Rhythm: tight within groups (`gap-1`–`gap-3`, `space-y-0.5` for list rows),
 generous between sections (`mt-6`–`mt-10`, `gap-10` between panes).
 
-- Page chrome: full-width header with a hairline `border-b`; content centered in `max-w-7xl` with
-  `px-4 sm:px-8 lg:px-10` gutters. Every page uses the same container.
+- Page chrome: one shared app bar (`components/site-header.tsx`), a single-row translucent
+  header pinned to the top (`sticky top-0 z-30 bg-background/95 backdrop-blur`, no border).
+  Left side is the global nav; right side is the page zone: a status readout (teal `size-1.5`
+  dot + short runtime text) followed by page actions. Pages don't render visible titles, the
+  active nav tab is the location indicator; each page keeps an `sr-only` `h1`. Content centered
+  in `max-w-7xl` with `px-4 sm:px-8 lg:px-10` gutters. Every page uses the same container.
 - **Management surfaces are master-detail on wide screens**: a `lg:grid
   lg:grid-cols-[minmax(16rem,21rem)_minmax(0,1fr)]` split with a sticky list rail
-  (`lg:sticky lg:top-8`) and a content pane. Below `lg` the panes stack; selecting a list item
-  scrolls the detail into view.
-- Chat is the exception: a fixed-viewport shell (`h-dvh`, fixed header/composer) because the
-  conversation owns the page.
+  (`lg:sticky lg:top-20`, clearing the pinned header) and a content pane. Below `lg` the panes
+  stack; selecting a list item scrolls the detail into view (`scroll-mt-32 sm:scroll-mt-20`,
+  clearing the wrapped mobile header).
+- Chat is the exception: a fixed-viewport shell (`h-dvh`, measured header/composer heights
+  drive the conversation viewport) because the conversation owns the page. It renders the same
+  `SiteHeader`, passing a ref so the shell can measure it.
 - Forms group short fields side by side on `sm:` (`grid sm:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]`)
   instead of stacking everything full-width.
 
@@ -74,14 +80,19 @@ shadow on the same element.
 
 ## Components
 
-Source of truth: `components/ui/button.tsx` (cva variants), `components/site-nav.tsx`,
-`components/ai-elements/*`.
+Source of truth: `components/ui/button.tsx` (cva variants), `components/site-header.tsx`,
+`components/site-nav.tsx`, `components/ai-elements/*`.
 
 - **Button**: `default` (teal, primary action — at most one per view), `outline` (secondary),
   `ghost` (tertiary/inline), `destructive`. Sizes `default` / `sm` / `icon`. Labels are
   verb + object ("Create skill", "Save changes").
-- **Nav**: segmented pill group (`bg-muted/60 p-1`, active item `bg-background shadow-sm`),
-  rendered in the header right cluster on every page.
+- **Nav**: left-aligned text tabs in the app bar (`text-xs font-medium`, every item the same
+  weight so widths never shift). Active = `text-foreground` + a 2px teal underline
+  (`after:bg-primary`, accent-as-selection); inactive = `text-muted-foreground` with
+  `hover:bg-muted/60 hover:text-foreground`. New surfaces are added to `LINKS` in
+  `components/site-nav.tsx`.
+- **Header status** (`SiteHeaderStatus`): teal dot + short runtime text in the header right
+  cluster; the dot pulses (`animate-pulse`) while the page is actively working.
 - **Field**: label + optional hint + control + optional counter (top-right, `tabular-nums`) +
   inline error (`text-[11px] text-destructive`, `role="alert"`) below the control.
 - **Badge**: `rounded-full px-2 py-0.5 text-[10px] font-medium`, tinted per state.

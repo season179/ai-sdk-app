@@ -4,6 +4,7 @@ import { CalendarClock, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { extractStatusUpdate, formatTimestamp } from "@/lib/scheduler/display";
 import type { ScheduledTask } from "@/lib/scheduler/tasks";
 
 const REFRESH_INTERVAL_MS = 10_000;
@@ -83,12 +84,10 @@ export function TasksPanel() {
 
   return (
     <details className="relative shrink-0" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary className="block cursor-pointer list-none rounded-md px-2 py-1 outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/30 [&::-webkit-details-marker]:hidden">
-        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <CalendarClock className="size-3.5" />
-          Tasks
-        </span>
-        <span className="block text-right tabular-nums text-sm font-semibold text-foreground">
+      <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/30 [&::-webkit-details-marker]:hidden">
+        <CalendarClock aria-hidden="true" className="size-3.5" />
+        Tasks
+        <span className="font-semibold tabular-nums text-foreground">
           {state.tasks.filter((task) => task.status === "active").length}
         </span>
       </summary>
@@ -179,12 +178,23 @@ function TaskCard({
             : "no run time"}
       </p>
 
-      <p className="mt-0.5 text-[11px] text-muted-foreground">
+      {task.payload.kind === "instruction" ? (
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          <span className="font-medium text-foreground/80">Check-in</span> · round{" "}
+          {task.payload.round}/{task.payload.maxRounds}
+          {task.payload.cadenceSeconds ? ` · every ~${task.payload.cadenceSeconds}s` : ""}
+        </p>
+      ) : null}
+
+      <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
         Last run:{" "}
         {task.lastRun
           ? `${task.lastRun.status} ${formatTimestamp(task.lastRun.startedAt)}`
           : "never"}
         {task.lastRun?.error ? ` — ${task.lastRun.error}` : ""}
+        {extractStatusUpdate(task.lastRun?.output)
+          ? ` — ${extractStatusUpdate(task.lastRun?.output)}`
+          : ""}
       </p>
 
       {canCancel ? (
@@ -237,20 +247,4 @@ function getStatusClasses(status: ScheduledTask["status"]) {
     case "cancelled":
       return "bg-muted text-muted-foreground";
   }
-}
-
-function formatTimestamp(value: string) {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
 }
