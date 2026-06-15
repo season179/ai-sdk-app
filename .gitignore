@@ -149,3 +149,5 @@ vite.config.ts.timestamp-*
 graphify-out/
 .claude/*
 .codex/
+.codedb/
+codedb.snapshot

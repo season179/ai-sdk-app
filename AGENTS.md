@@ -1,11 +1,29 @@
-## graphify
+## Code intelligence
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+This project uses **codedb** (MCP server) as the primary tool for navigating and searching the
+codebase, and **graphify** (knowledge graph at graphify-out/) for architecture-level questions.
 
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+### codedb — default for all code lookups
+Use codedb MCP tools first; they are sub-millisecond and token-cheap:
+- `codedb_search` — trigram full-text / regex search
+- `codedb_word` — O(1) identifier lookup
+- `codedb_symbol` — where a symbol is defined
+- `codedb_callers` — every call site of a symbol
+- `codedb_outline` — symbols (functions/types/imports) in a file
+- `codedb_deps` — import / imported-by graph (`transitive=true` for full BFS)
+- `codedb_context` — pass a natural-language task, get keywords + defs + ranked files + snippets
+- `codedb_tree`, `codedb_ls`, `codedb_glob`, `codedb_read` — navigation and reading
+
+Reach for raw `Read`/`grep` only to modify or debug specific lines after codedb has located them.
+
+### graphify — architecture and cross-cutting questions only
+Use graphify when the question is conceptual/architectural rather than a precise lookup
+(e.g. "what are the major subsystems", "how does auth relate to billing", surprising cross-file
+connections):
+- `graphify query "<question>"` — scoped subgraph
+- `graphify path "<A>" "<B>"` — relationship between two concepts
+- `graphify explain "<concept>"` — plain-language explanation of a node
+- Read graphify-out/GRAPH_REPORT.md only for a broad architecture review.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
 ## Database
