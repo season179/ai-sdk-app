@@ -65,9 +65,9 @@ Real (non-mock) scheduler tools backed by pg-boss, in the same catalog the tool 
    pnpm dev
    ```
 
-6. Open `https://ai-sdk-app.localhost` and send a message.
+6. Open `https://ai-sdk-app.dev` and send a message.
 
-`pnpm dev` runs through Portless and serves the app at a stable HTTPS `.localhost` URL. Portless assigns the underlying Next.js process a random app port, so this project does not need to reserve `3000` or `3001`.
+`pnpm dev` runs through Portless and serves the app at a stable HTTPS `.dev` URL. Portless assigns the underlying Next.js process a random app port, so this project does not need to reserve `3000` or `3001`.
 
 If you need to bypass Portless while debugging, run the raw Next.js server with:
 

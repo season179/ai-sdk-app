@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  allowedDevOrigins: ["ai-sdk-app.localhost", "*.ai-sdk-app.localhost"],
+  allowedDevOrigins: ["ai-sdk-app.dev", "*.ai-sdk-app.dev"],
   devIndicators: false,
 };
 
