@@ -237,6 +237,55 @@ export async function truncateConversationAfter(
     .where(and(...conds));
 }
 
+/** A stored turn paired with its ordinal — the unit the SSE listener pushes. */
+export type OrdinalChatMessage = { ordinal: number; message: ChatUIMessage };
+
+/**
+ * Highest ordinal currently in a session, or -1 when empty. The baseline an SSE
+ * subscriber starts from (when it doesn't supply its own high-water mark) so it
+ * receives only turns appended after it connected — not the whole transcript it
+ * already loaded.
+ */
+export async function getSessionMaxOrdinal(sessionId: string): Promise<number> {
+  const [row] = await getDb()
+    .select({ maxOrdinal: sql<number>`coalesce(max(${agentChatMessages.ordinal}), -1)` })
+    .from(agentChatMessages)
+    .where(eq(agentChatMessages.sessionId, sessionId));
+
+  return Number(row?.maxOrdinal ?? -1);
+}
+
+/**
+ * Turns with ordinal strictly greater than afterOrdinal, ascending — the
+ * incremental tail an SSE listener flushes on each append NOTIFY. Each row
+ * carries its ordinal so the listener can advance its high-water mark; the
+ * client dedupes by message id, so re-delivering a turn the tab already has is
+ * harmless. Unlike getChatSession this skips safeValidateUIMessages: these rows
+ * were just written by appendSessionMessages, not replayed from cold storage.
+ */
+export async function getSessionMessagesAfter(
+  sessionId: string,
+  afterOrdinal: number,
+): Promise<OrdinalChatMessage[]> {
+  const rows = await getDb()
+    .select()
+    .from(agentChatMessages)
+    .where(
+      and(eq(agentChatMessages.sessionId, sessionId), gt(agentChatMessages.ordinal, afterOrdinal)),
+    )
+    .orderBy(agentChatMessages.ordinal);
+
+  return rows.map((row) => ({
+    ordinal: row.ordinal,
+    message: {
+      id: row.id,
+      role: row.role,
+      parts: row.parts,
+      ...(row.metadata ? { metadata: row.metadata } : {}),
+    },
+  }));
+}
+
 /**
  * Map a message id to its ordinal within a session — the fork point the chat
  * route needs to drive truncateConversationAfter on edit/regenerate. Returns

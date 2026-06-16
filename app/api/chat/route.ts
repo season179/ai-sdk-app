@@ -7,7 +7,7 @@ import {
   ToolLoopAgent,
   type UIMessage,
 } from "ai";
-
+import { notifySessionAppended } from "@/lib/chat/notify";
 import {
   appendSessionMessages,
   getChatSession,
@@ -313,6 +313,9 @@ export async function POST(req: Request) {
           // generateMessageId id and the messageMetadata token usage; the
           // composite-PK onConflictDoNothing makes a re-run idempotent.
           await appendSessionMessages(sessionId, [responseMessage]);
+          // Push the assistant turn to any other open tab on this session (K2).
+          // The tab that submitted already has it locally and dedupes by id.
+          await notifySessionAppended(sessionId);
 
           // Title only the first completed assistant reply, and only while the
           // session is still untitled. assistantCount = assistants already in the

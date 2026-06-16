@@ -2,6 +2,7 @@ import "@/lib/scheduler/load-env";
 
 import type { Job } from "pg-boss";
 
+import { notifySessionAppended } from "@/lib/chat/notify";
 import { appendSessionMessages, type ChatUIMessage } from "@/lib/chat/sessions";
 import { getBoss, stopBoss, TASK_QUEUE_NAME, taskSendOptions } from "@/lib/scheduler/boss";
 import { recoverMissedRuns } from "@/lib/scheduler/catchup";
@@ -126,6 +127,10 @@ async function processInstructionJob(
   if (verdict && task.homeSessionId && roundMessages.length > 0) {
     try {
       await appendSessionMessages(task.homeSessionId, roundMessages);
+      // Push the new turn to any open tab on this session (K2). Fail-soft and
+      // inside the same try: a missed NOTIFY only delays the live update until
+      // the next reload, the turn is already durably appended.
+      await notifySessionAppended(task.homeSessionId);
     } catch (error) {
       console.error(
         `Appending round ${payload.round} for task ${task.id} to session ${task.homeSessionId} failed`,
