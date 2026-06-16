@@ -1,4 +1,5 @@
-import { executeMockTool, getMockToolSpec } from "@/lib/mock-tools";
+import type { ChatUIMessage } from "@/lib/chat/sessions";
+import { executeMockTool, getMockToolSpec, type RealisticToolOutput } from "@/lib/mock-tools";
 
 /**
  * Discriminated execution payload stored on each scheduled task. New kinds
@@ -166,4 +167,35 @@ export async function executeScheduledTaskPayload(payload: ToolCallTaskPayload) 
   }
 
   return output;
+}
+
+/**
+ * Map one completed tool_call fire into the home-session transcript: a single
+ * assistant turn whose visible text summarizes the tool result, tagged with
+ * metadata.origin='scheduled' so the chat UI renders it with the scheduled
+ * badge (no round — tool_call tasks have no instruction-chain rounds) and
+ * edit-truncation preserves it (K3). Mirrors instruction.ts:buildRoundMessages.
+ *
+ * The id is keyed off the pg-boss job id (one job per fire, including catch-up
+ * requeues of the same job) so re-running an identical job is idempotent under
+ * the composite PK + onConflictDoNothing in appendSessionMessages.
+ */
+export function buildToolCallMessages(
+  taskId: string,
+  jobId: string,
+  output: RealisticToolOutput,
+): ChatUIMessage[] {
+  return [
+    {
+      id: `task-${taskId}-job-${jobId}`,
+      role: "assistant",
+      parts: [
+        { type: "text", text: `Ran scheduled tool \`${output.toolName}\` — ${output.summary}` },
+      ],
+      metadata: {
+        origin: "scheduled",
+        taskId,
+      },
+    },
+  ];
 }

@@ -8,6 +8,7 @@ import { getBoss, stopBoss, TASK_QUEUE_NAME, taskSendOptions } from "@/lib/sched
 import { recoverMissedRuns } from "@/lib/scheduler/catchup";
 import { closePool } from "@/lib/scheduler/db";
 import {
+  buildToolCallMessages,
   clampChainDelaySeconds,
   executeScheduledTaskPayload,
   type InstructionTaskPayload,
@@ -73,6 +74,26 @@ async function processJob(job: Job<TaskJobData>) {
 
     if (task.scheduleType === "once") {
       await markTaskCompleted(task.id);
+    }
+
+    // Append the tool-call result into the task's home session, fail-soft.
+    // Same contract as the instruction path: the run is already durable in
+    // agent_scheduled_task_runs, so a transcript error must never escape to the
+    // outer catch (which rethrows and triggers a pg-boss retry → double-fire).
+    // homeSessionId is null only for legacy tasks predating session provenance.
+    if (task.homeSessionId) {
+      try {
+        await appendSessionMessages(
+          task.homeSessionId,
+          buildToolCallMessages(task.id, job.id, output),
+        );
+        await notifySessionAppended(task.homeSessionId);
+      } catch (appendError) {
+        console.error(
+          `Appending tool-call turn for task ${task.id} (job ${job.id}) to session ${task.homeSessionId} failed`,
+          appendError,
+        );
+      }
     }
 
     console.log(`Completed run for task ${task.id} (job ${job.id}).`);
