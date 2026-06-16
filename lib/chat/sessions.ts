@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { safeValidateUIMessages, type UIMessage } from "ai";
 import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 
@@ -251,6 +253,57 @@ export async function getMessageOrdinal(
     .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
 
   return rows[0]?.ordinal ?? null;
+}
+
+/**
+ * Create the dedicated home session a standalone scheduled task owns — a task
+ * created without an originating chat (via API or the tasks UI). The session is
+ * tagged origin = 'scheduled_task' and task_id = taskId; the partial-unique
+ * index (agent_chat_sessions_task_id_uniq) guarantees at most one per task.
+ *
+ * Idempotent: if a dedicated session already exists for the task it's returned
+ * as-is rather than inserting a duplicate the unique index would reject, so a
+ * retried createScheduledTask never strands a second session. Returns the home
+ * session id.
+ */
+export async function createTaskSession(
+  taskId: string,
+  title?: string | null,
+  agentId: string = DEFAULT_AGENT_ID,
+): Promise<string> {
+  const db = getDb();
+
+  const existing = await db
+    .select({ id: agentChatSessions.id })
+    .from(agentChatSessions)
+    .where(eq(agentChatSessions.taskId, taskId));
+
+  if (existing[0]) {
+    return existing[0].id;
+  }
+
+  const id = randomUUID();
+  // Mirror the session title CHECK (1..200 chars or null): a long task title
+  // would otherwise violate it.
+  const trimmedTitle = title?.trim().slice(0, MAX_TITLE_LENGTH) || null;
+
+  const inserted = await db
+    .insert(agentChatSessions)
+    .values({ id, agentId, origin: "scheduled_task", taskId, title: trimmedTitle })
+    .onConflictDoNothing()
+    .returning({ id: agentChatSessions.id });
+
+  if (inserted[0]) {
+    return inserted[0].id;
+  }
+
+  // Lost a race to a concurrent writer; re-read the session it created.
+  const winner = await db
+    .select({ id: agentChatSessions.id })
+    .from(agentChatSessions)
+    .where(eq(agentChatSessions.taskId, taskId));
+
+  return winner[0]?.id ?? id;
 }
 
 /** User-initiated rename — unconditional (always overwrites), unlike the auto-title path. */
