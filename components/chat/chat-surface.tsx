@@ -25,6 +25,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { ChatUsageSummary } from "@/components/chat/token-usage-menu";
 import { Button } from "@/components/ui/button";
+import { useSessionStream } from "@/lib/hooks/use-session-stream";
 import type { SkillCatalogEntry } from "@/lib/skills/catalog";
 import { parsePartialSkillCommand, parseSkillCommand } from "@/lib/skills/slash-command";
 import {
@@ -64,30 +65,31 @@ export function ChatSurface({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Keyed by sessionId at the call site, so a session switch remounts this
   // component and useChat re-seeds from the new id + initialMessages.
-  const { messages, sendMessage, status, error, stop, regenerate } = useChat<ChatMessage>({
-    id: sessionId,
-    messages: initialMessages,
-    // Server-authoritative + append-only: send only the newest message, not the
-    // whole transcript. The server reconstructs history from the durable store
-    // and appends, so the scheduled-task worker can write the same session
-    // without the client clobbering it on the next turn. On regenerate the SDK
-    // has already sliced its local array to the fork, so its last message tells
-    // the server where to truncate.
-    transport: new DefaultChatTransport<ChatMessage>({
-      api: "/api/chat",
-      prepareSendMessagesRequest: ({ id, messages: outgoing, trigger, messageId }) => ({
-        body: { id, trigger, messageId, message: outgoing[outgoing.length - 1] },
+  const { messages, sendMessage, setMessages, status, error, stop, regenerate } =
+    useChat<ChatMessage>({
+      id: sessionId,
+      messages: initialMessages,
+      // Server-authoritative + append-only: send only the newest message, not the
+      // whole transcript. The server reconstructs history from the durable store
+      // and appends, so the scheduled-task worker can write the same session
+      // without the client clobbering it on the next turn. On regenerate the SDK
+      // has already sliced its local array to the fork, so its last message tells
+      // the server where to truncate.
+      transport: new DefaultChatTransport<ChatMessage>({
+        api: "/api/chat",
+        prepareSendMessagesRequest: ({ id, messages: outgoing, trigger, messageId }) => ({
+          body: { id, trigger, messageId, message: outgoing[outgoing.length - 1] },
+        }),
       }),
-    }),
-    // onFinish fires on success, abort, AND error. The server only persists a
-    // clean finish (route skips isAborted / finishReason === "error"), so only
-    // refresh the sidebar when there is something new to show.
-    onFinish: ({ isAbort, isError }) => {
-      if (!isAbort && !isError) {
-        onConversationUpdated();
-      }
-    },
-  });
+      // onFinish fires on success, abort, AND error. The server only persists a
+      // clean finish (route skips isAborted / finishReason === "error"), so only
+      // refresh the sidebar when there is something new to show.
+      onFinish: ({ isAbort, isError }) => {
+        if (!isAbort && !isError) {
+          onConversationUpdated();
+        }
+      },
+    });
   const [skillCatalog, setSkillCatalog] = useState<SkillCatalogEntry[]>([]);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
@@ -138,6 +140,26 @@ export function ChatSurface({
       inputElement.setSelectionRange(inputElement.value.length, inputElement.value.length);
     });
   }, []);
+
+  // Live updates (Phase 3.2): turns appended to this session by the other writer
+  // — the scheduled-task worker — arrive via SSE and are merged in. Dedupe by id
+  // because the tab already holds its own turns locally (and a NOTIFY re-drain
+  // can re-deliver one). Returning the same array reference when nothing is new
+  // lets React bail out of the re-render.
+  const applyLiveMessages = useCallback(
+    (incoming: ChatMessage[]) => {
+      if (incoming.length === 0) {
+        return;
+      }
+      setMessages((current) => {
+        const seen = new Set(current.map((message) => message.id));
+        const additions = incoming.filter((message) => message.id && !seen.has(message.id));
+        return additions.length === 0 ? current : [...current, ...additions];
+      });
+    },
+    [setMessages],
+  );
+  useSessionStream(sessionId, applyLiveMessages);
 
   // Mirror the streaming state up so the shell can block session switches.
   useEffect(() => {
