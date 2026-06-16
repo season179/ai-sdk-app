@@ -8,7 +8,7 @@ import { agentChatMessages, agentChatSessions } from "@/db/schema";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
 
-type ChatUIMessage = UIMessage<ChatMessageMetadata>;
+export type ChatUIMessage = UIMessage<ChatMessageMetadata>;
 
 const MAX_TITLE_LENGTH = 200;
 

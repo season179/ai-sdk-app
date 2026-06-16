@@ -2,6 +2,7 @@ import "@/lib/scheduler/load-env";
 
 import type { Job } from "pg-boss";
 
+import { appendSessionMessages, type ChatUIMessage } from "@/lib/chat/sessions";
 import { getBoss, stopBoss, TASK_QUEUE_NAME, taskSendOptions } from "@/lib/scheduler/boss";
 import { recoverMissedRuns } from "@/lib/scheduler/catchup";
 import { closePool } from "@/lib/scheduler/db";
@@ -98,10 +99,13 @@ async function processInstructionJob(
   await markRunStarted(task.id, job.id);
 
   let verdict: InstructionVerdict | null = null;
+  let roundMessages: ChatUIMessage[] = [];
 
   try {
     const previousOutput = await getLatestCompletedRunOutput(task.id);
-    verdict = await runInstructionRound({ task, payload, previousOutput });
+    const round = await runInstructionRound({ task, payload, previousOutput });
+    verdict = round.verdict;
+    roundMessages = round.messages;
     await markRunCompleted(job.id, { round: payload.round, ...verdict });
     console.log(
       `Instruction round ${payload.round}/${payload.maxRounds} completed for task ${task.id} (job ${job.id}).`,
@@ -112,6 +116,22 @@ async function processInstructionJob(
     console.error(
       `Instruction round ${payload.round} failed for task ${task.id} (job ${job.id}): ${message}`,
     );
+  }
+
+  // Append the round's turn into the task's home session, fail-soft: the round
+  // is already durably recorded in agent_scheduled_task_runs, so a transcript
+  // error must never stall the chain (advanceInstructionChain is isolated
+  // below). homeSessionId is null only for legacy tasks predating session
+  // provenance; deterministic ids keep a catch-up re-run idempotent.
+  if (verdict && task.homeSessionId && roundMessages.length > 0) {
+    try {
+      await appendSessionMessages(task.homeSessionId, roundMessages);
+    } catch (error) {
+      console.error(
+        `Appending round ${payload.round} for task ${task.id} to session ${task.homeSessionId} failed`,
+        error,
+      );
+    }
   }
 
   try {
