@@ -30,12 +30,6 @@ export type ChatSessionWithMessages = {
   messages: ChatUIMessage[];
 };
 
-export type SaveChatSessionInput = {
-  sessionId: string;
-  messages: ChatUIMessage[];
-  agentId?: string;
-};
-
 export class ChatSessionInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -131,60 +125,6 @@ export async function getChatSession(
     },
     messages: validation.success ? validation.data : stored,
   };
-}
-
-/**
- * Persist the whole transcript in one transaction via delete-all-then-insert:
- * deterministic, correct for edit/regenerate truncation, and free of the
- * ordinal-shift collisions a per-row upsert would hit. Refuses soft-deleted
- * sessions so a stale tab can't resurrect or hidden-append to one.
- */
-export async function saveChatSession({
-  sessionId,
-  messages,
-  agentId = DEFAULT_AGENT_ID,
-}: SaveChatSessionInput): Promise<void> {
-  // The composite PK (sessionId, id) would make the bulk insert throw on a
-  // duplicate id, so reject it up front with a typed error.
-  const uniqueIds = new Set(messages.map((message) => message.id));
-  if (uniqueIds.size !== messages.length) {
-    throw new ChatSessionInputError("Chat messages must have unique ids within a session.");
-  }
-
-  await getDb().transaction(async (tx) => {
-    const existing = await tx
-      .select({ deletedAt: agentChatSessions.deletedAt })
-      .from(agentChatSessions)
-      .where(eq(agentChatSessions.id, sessionId));
-
-    if (existing[0]?.deletedAt) {
-      throw new ChatSessionInputError(`Chat session '${sessionId}' was deleted; refusing to save.`);
-    }
-
-    // Create on first save; bump activity + updated timestamps thereafter.
-    await tx
-      .insert(agentChatSessions)
-      .values({ id: sessionId, agentId, lastMessageAt: sql`now()` })
-      .onConflictDoUpdate({
-        target: agentChatSessions.id,
-        set: { lastMessageAt: sql`now()`, updatedAt: sql`now()` },
-      });
-
-    await tx.delete(agentChatMessages).where(eq(agentChatMessages.sessionId, sessionId));
-
-    if (messages.length > 0) {
-      await tx.insert(agentChatMessages).values(
-        messages.map((message, index) => ({
-          id: message.id,
-          sessionId,
-          role: message.role,
-          parts: message.parts,
-          metadata: message.metadata ?? null,
-          ordinal: index,
-        })),
-      );
-    }
-  });
 }
 
 /**
@@ -293,6 +233,24 @@ export async function truncateConversationAfter(
   await getDb()
     .delete(agentChatMessages)
     .where(and(...conds));
+}
+
+/**
+ * Map a message id to its ordinal within a session — the fork point the chat
+ * route needs to drive truncateConversationAfter on edit/regenerate. Returns
+ * null when the id isn't in the session (e.g. a turn that errored before it was
+ * ever persisted), in which case the caller skips truncation and re-runs as-is.
+ */
+export async function getMessageOrdinal(
+  sessionId: string,
+  messageId: string,
+): Promise<number | null> {
+  const rows = await getDb()
+    .select({ ordinal: agentChatMessages.ordinal })
+    .from(agentChatMessages)
+    .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
+
+  return rows[0]?.ordinal ?? null;
 }
 
 /** User-initiated rename — unconditional (always overwrites), unlike the auto-title path. */

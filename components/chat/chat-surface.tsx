@@ -67,7 +67,18 @@ export function ChatSurface({
   const { messages, sendMessage, status, error, stop, regenerate } = useChat<ChatMessage>({
     id: sessionId,
     messages: initialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    // Server-authoritative + append-only: send only the newest message, not the
+    // whole transcript. The server reconstructs history from the durable store
+    // and appends, so the scheduled-task worker can write the same session
+    // without the client clobbering it on the next turn. On regenerate the SDK
+    // has already sliced its local array to the fork, so its last message tells
+    // the server where to truncate.
+    transport: new DefaultChatTransport<ChatMessage>({
+      api: "/api/chat",
+      prepareSendMessagesRequest: ({ id, messages: outgoing, trigger, messageId }) => ({
+        body: { id, trigger, messageId, message: outgoing[outgoing.length - 1] },
+      }),
+    }),
     // onFinish fires on success, abort, AND error. The server only persists a
     // clean finish (route skips isAborted / finishReason === "error"), so only
     // refresh the sidebar when there is something new to show.
