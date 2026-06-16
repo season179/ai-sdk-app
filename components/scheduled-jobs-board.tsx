@@ -2,58 +2,59 @@
 
 import { AlertCircle, CalendarClock, RefreshCw } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
 import { SiteHeader, SiteHeaderStatus } from "@/components/site-header";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { POLL_FAST_MS, POLL_IDLE_MS, useSmartPoll } from "@/lib/hooks/use-smart-poll";
 import { extractStatusUpdate, formatTimestamp } from "@/lib/scheduler/display";
 import type {
   ScheduledJobRun,
   ScheduledJobsOverview,
   UpcomingScheduledJob,
 } from "@/lib/scheduler/overview";
-import { cn } from "@/lib/utils";
+import { cn, fetchJson } from "@/lib/utils";
 
-const REFRESH_INTERVAL_MS = 10_000;
-
-type BoardState = {
-  overview: ScheduledJobsOverview | null;
-  loading: boolean;
-  error: string | null;
-};
+/** An upcoming fire this close keeps the fast cadence. */
+const POLL_SOON_MS = 30_000;
 
 export function ScheduledJobsBoard() {
-  const [state, setState] = useState<BoardState>({ overview: null, loading: true, error: null });
+  const fetchOverview = useCallback(
+    () =>
+      fetchJson<ScheduledJobsOverview>(
+        "/api/scheduled-tasks/overview",
+        "overview",
+        "Failed to load scheduled jobs.",
+      ),
+    [],
+  );
 
-  const refresh = useCallback(async () => {
-    setState((current) => ({ ...current, loading: true }));
-
-    try {
-      const response = await fetch("/api/scheduled-tasks/overview");
-      const body: { overview?: ScheduledJobsOverview; error?: string } = await response.json();
-
-      if (!response.ok || !body.overview) {
-        throw new Error(body.error ?? "Failed to load scheduled jobs.");
-      }
-
-      setState({ overview: body.overview, loading: false, error: null });
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        loading: false,
-        error: error instanceof Error ? error.message : "Failed to load scheduled jobs.",
-      }));
+  // Poll fast while a run is live or about to fire; otherwise drop to the idle
+  // heartbeat. The hook also pauses entirely while the tab is hidden.
+  const getDelay = useCallback((data: ScheduledJobsOverview | null) => {
+    if (!data) {
+      return POLL_FAST_MS;
     }
+
+    const active =
+      data.running.length > 0 ||
+      data.upcoming.some(
+        (job) => job.nextRunAt && new Date(job.nextRunAt).getTime() - Date.now() < POLL_SOON_MS,
+      );
+
+    return active ? POLL_FAST_MS : POLL_IDLE_MS;
   }, []);
 
-  useEffect(() => {
-    void refresh();
-    const interval = setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [refresh]);
-
-  const { overview } = state;
+  const {
+    data: overview,
+    loading,
+    error,
+    refresh,
+  } = useSmartPoll({
+    fetcher: fetchOverview,
+    getDelayMs: getDelay,
+    errorMessage: "Failed to load scheduled jobs.",
+  });
   const isEmpty =
     overview !== null &&
     overview.running.length === 0 &&
@@ -67,31 +68,26 @@ export function ScheduledJobsBoard() {
         actions={
           <Button
             aria-label="Refresh scheduled jobs"
-            disabled={state.loading}
+            disabled={loading}
             onClick={() => void refresh()}
             size="sm"
             type="button"
             variant="ghost"
           >
-            <RefreshCw
-              aria-hidden="true"
-              className={`size-3.5 ${state.loading ? "animate-spin" : ""}`}
-            />
+            <RefreshCw aria-hidden="true" className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
           </Button>
         }
-        status={
-          <SiteHeaderStatus>Live · refreshes every {REFRESH_INTERVAL_MS / 1000}s</SiteHeaderStatus>
-        }
+        status={<SiteHeaderStatus>Live · auto-refreshing</SiteHeaderStatus>}
       />
 
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-8 lg:px-10 lg:py-8">
-        {state.error ? (
+        {error ? (
           <div
             className="mb-6 flex items-start gap-3 rounded-lg border border-destructive/30 bg-background px-4 py-3 text-sm text-destructive"
             role="alert"
           >
             <AlertCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-            <p className="min-w-0 flex-1 break-words">{state.error}</p>
+            <p className="min-w-0 flex-1 break-words">{error}</p>
             <Button onClick={() => void refresh()} size="sm" type="button" variant="outline">
               Retry
             </Button>
@@ -99,7 +95,7 @@ export function ScheduledJobsBoard() {
         ) : null}
 
         {overview === null ? (
-          state.error ? null : (
+          error ? null : (
             <BoardSkeleton />
           )
         ) : isEmpty ? (
