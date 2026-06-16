@@ -26,6 +26,9 @@ export type ScheduledTaskStatus = "active" | "paused" | "completed" | "cancelled
 export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "skipped";
 export type SkillType = "skill" | "reference";
 export type ChatMessageRole = "user" | "assistant" | "system";
+// A session is either a normal chat or a dedicated home session a scheduled
+// task owns. The CHECK constraint on agent_chat_sessions is the DB-side backstop.
+export type ChatSessionOrigin = "chat" | "scheduled_task";
 
 export const agentScheduledTasks = pgTable(
   "agent_scheduled_tasks",
@@ -43,6 +46,10 @@ export const agentScheduledTasks = pgTable(
     queueName: text("queue_name").notNull(),
     scheduleKey: text("schedule_key"),
     jobId: uuid("job_id"),
+    // The chat that spawned this task, if any. Forward reference (thunk) because
+    // agentChatSessions is declared later and the two tables reference each
+    // other; both FK columns are nullable so no deferrable constraint is needed.
+    originSessionId: uuid("origin_session_id").references((): AnyPgColumn => agentChatSessions.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -138,6 +145,12 @@ export const agentChatSessions = pgTable(
     // useChat({ id }) before the first message is ever persisted.
     id: uuid("id").primaryKey(),
     agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    // 'chat' for normal conversations, 'scheduled_task' for a dedicated home
+    // session a task owns. CHECK below mirrors this enum.
+    origin: text("origin").$type<ChatSessionOrigin>().notNull().default("chat"),
+    // Set only on dedicated task sessions (origin = 'scheduled_task'); the task
+    // whose rounds land here. Partial-unique: one dedicated session per task.
+    taskId: uuid("task_id").references((): AnyPgColumn => agentScheduledTasks.id),
     // Null until the title model names it; the UI shows "New chat" meanwhile.
     title: text("title"),
     // Activity time for list ordering/grouping; distinct from updatedAt, which a
@@ -153,6 +166,12 @@ export const agentChatSessions = pgTable(
       "agent_chat_sessions_title_check",
       sql`${t.title} is null or char_length(${t.title}) between 1 and 200`,
     ),
+    check("agent_chat_sessions_origin_check", sql`${t.origin} in ('chat', 'scheduled_task')`),
+    // One dedicated session per task; partial so the many origin='chat' rows
+    // (taskId null) don't collide.
+    uniqueIndex("agent_chat_sessions_task_id_uniq")
+      .on(t.taskId)
+      .where(sql`${t.taskId} is not null`),
     // Sidebar list: an agent's live sessions. Ordering by
     // coalesce(last_message_at, created_at) desc happens in the query.
     index("agent_chat_sessions_list_idx").on(t.agentId).where(sql`${t.deletedAt} is null`),
