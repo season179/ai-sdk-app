@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { AlertCircle, Zap } from "lucide-react";
+import { AlertCircle, CalendarClock, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -254,6 +254,9 @@ export function ChatSurface({
               );
               const activatedSkill =
                 message.role === "user" ? message.metadata?.activatedSkill : undefined;
+              const isScheduled =
+                message.role === "assistant" && message.metadata?.origin === "scheduled";
+              const scheduledRound = isScheduled ? message.metadata?.scheduledRound : undefined;
 
               return (
                 <Message from={message.role} key={message.id}>
@@ -263,6 +266,16 @@ export function ChatSurface({
                         <span className="inline-flex items-center gap-1 rounded-full bg-primary-foreground/15 px-2 py-0.5 text-[11px] font-medium">
                           <Zap aria-hidden="true" className="size-3" />
                           {activatedSkill}
+                        </span>
+                      </div>
+                    ) : null}
+                    {isScheduled ? (
+                      <div className="mb-1.5">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                          <CalendarClock aria-hidden="true" className="size-3" />
+                          {typeof scheduledRound === "number"
+                            ? `Ran scheduled task · round ${scheduledRound}`
+                            : "Ran scheduled task"}
                         </span>
                       </div>
                     ) : null}
