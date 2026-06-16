@@ -1,5 +1,5 @@
 import { safeValidateUIMessages, type UIMessage } from "ai";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import { agentChatMessages, agentChatSessions } from "@/db/schema";
@@ -185,6 +185,114 @@ export async function saveChatSession({
       );
     }
   });
+}
+
+/**
+ * Append-only persistence shared by the chat route and the scheduled-task
+ * worker. Unlike saveChatSession (delete-all-then-insert), this never rewrites
+ * existing rows: ordinals continue from the current max, and the composite PK
+ * (sessionId, id) plus onConflictDoNothing make catch-up/retry inserts
+ * idempotent. Two writers therefore never clobber each other.
+ *
+ * createIfMissing mints a bare session (origin 'chat') on first write — used by
+ * the chat route so a brand-new conversation persists its opening turn. Dedicated
+ * task sessions are created up front by createTaskSession instead.
+ */
+export async function appendSessionMessages(
+  sessionId: string,
+  messages: ChatUIMessage[],
+  opts: { agentId?: string; createIfMissing?: boolean } = {},
+): Promise<void> {
+  if (messages.length === 0) {
+    return;
+  }
+
+  // The composite PK (sessionId, id) would make the bulk insert throw on a
+  // duplicate id within this batch, so reject it up front with a typed error.
+  const uniqueIds = new Set(messages.map((message) => message.id));
+  if (uniqueIds.size !== messages.length) {
+    throw new ChatSessionInputError("Chat messages must have unique ids within a batch.");
+  }
+
+  await getDb().transaction(async (tx) => {
+    const existing = await tx
+      .select({ deletedAt: agentChatSessions.deletedAt })
+      .from(agentChatSessions)
+      .where(eq(agentChatSessions.id, sessionId));
+
+    if (existing.length === 0) {
+      if (!opts.createIfMissing) {
+        throw new ChatSessionNotFoundError(sessionId);
+      }
+      await tx
+        .insert(agentChatSessions)
+        .values({
+          id: sessionId,
+          agentId: opts.agentId ?? DEFAULT_AGENT_ID,
+          lastMessageAt: sql`now()`,
+        })
+        .onConflictDoNothing();
+    } else if (existing[0]?.deletedAt) {
+      throw new ChatSessionInputError(
+        `Chat session '${sessionId}' was deleted; refusing to append.`,
+      );
+    }
+
+    // Continue ordinals from the current max. -1 + 1 = 0 for an empty session.
+    const [{ nextOrdinal }] = await tx
+      .select({
+        nextOrdinal: sql<number>`coalesce(max(${agentChatMessages.ordinal}), -1) + 1`,
+      })
+      .from(agentChatMessages)
+      .where(eq(agentChatMessages.sessionId, sessionId));
+
+    await tx
+      .insert(agentChatMessages)
+      .values(
+        messages.map((message, index) => ({
+          id: message.id,
+          sessionId,
+          role: message.role,
+          parts: message.parts,
+          metadata: message.metadata ?? null,
+          ordinal: Number(nextOrdinal) + index,
+        })),
+      )
+      .onConflictDoNothing();
+
+    await tx
+      .update(agentChatSessions)
+      .set({ lastMessageAt: sql`now()`, updatedAt: sql`now()` })
+      .where(eq(agentChatSessions.id, sessionId));
+  });
+}
+
+/**
+ * Explicit edit/regenerate truncation — what delete-all-then-insert used to do
+ * implicitly. Drops conversational turns after the fork ordinal so the agent
+ * re-runs on the forked history.
+ *
+ * With preserveScheduled (K3) it keeps worker turns (metadata.origin =
+ * 'scheduled') and removes only normal turns. The preserve predicate is isolated
+ * here so it can be reverted to plain truncation if the cross-edit context
+ * desync (see the plan's K3 note) proves problematic — scheduled output is never
+ * lost regardless, it lives in agent_scheduled_task_runs.
+ */
+export async function truncateConversationAfter(
+  sessionId: string,
+  ordinal: number,
+  opts: { preserveScheduled?: boolean } = {},
+): Promise<void> {
+  const conds = [
+    eq(agentChatMessages.sessionId, sessionId),
+    gt(agentChatMessages.ordinal, ordinal),
+  ];
+  if (opts.preserveScheduled) {
+    conds.push(sql`(${agentChatMessages.metadata} ->> 'origin') is distinct from 'scheduled'`);
+  }
+  await getDb()
+    .delete(agentChatMessages)
+    .where(and(...conds));
 }
 
 /** User-initiated rename — unconditional (always overwrites), unlike the auto-title path. */
