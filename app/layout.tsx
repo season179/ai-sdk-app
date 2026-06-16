@@ -14,7 +14,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>
+      {/* Browser extensions (e.g. Grammarly) inject attributes onto <body>
+          before hydration; suppress the resulting attribute mismatch here
+          only. It does not mask mismatches elsewhere in the tree. */}
+      <body suppressHydrationWarning>
         <AppShell>{children}</AppShell>
       </body>
     </html>
