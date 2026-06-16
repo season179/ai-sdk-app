@@ -17,6 +17,13 @@ export type ScheduledJobRun = {
   error: string | null;
   startedAt: string;
   completedAt: string | null;
+  /**
+   * The session a task's rounds are appended into: its originating chat
+   * (origin_session_id) or, for a standalone task, its dedicated session.
+   * Null for legacy tasks predating session provenance. Drives "View
+   * transcript".
+   */
+  homeSessionId: string | null;
 };
 
 export type UpcomingScheduledJob = {
@@ -34,6 +41,11 @@ export type UpcomingScheduledJob = {
   nextRunAt: string | null;
   /** True when the fire is a pending pg-boss job rather than a cron projection. */
   queued: boolean;
+  /**
+   * The session this task's rounds are appended into (see ScheduledJobRun).
+   * Null for legacy tasks predating session provenance.
+   */
+  homeSessionId: string | null;
 };
 
 export type ScheduledJobsOverview = {
@@ -63,14 +75,20 @@ type RunRow = {
   error: string | null;
   started_at: Date;
   completed_at: Date | null;
+  home_session_id: string | null;
 };
 
 async function listRuns(condition: string, limit: number) {
+  // Resolve the home session inline: the originating chat (origin_session_id)
+  // or the task's dedicated session (the live one joined on task_id). The
+  // partial-unique task_id index makes that join at most one row.
   const { rows } = await getPool().query<RunRow>(
     `select r.id, r.task_id, r.status, r.output, r.error, r.started_at, r.completed_at,
-            t.title as task_title, t.schedule_type, t.payload->>'kind' as payload_kind
+            t.title as task_title, t.schedule_type, t.payload->>'kind' as payload_kind,
+            coalesce(t.origin_session_id, s.id) as home_session_id
      from agent_scheduled_task_runs r
      join agent_scheduled_tasks t on t.id = r.task_id
+     left join agent_chat_sessions s on s.task_id = t.id and s.deleted_at is null
      where ${condition}
      order by r.started_at desc
      limit $1`,
@@ -89,6 +107,7 @@ async function listRuns(condition: string, limit: number) {
       error: row.error,
       startedAt: row.started_at.toISOString(),
       completedAt: row.completed_at?.toISOString() ?? null,
+      homeSessionId: row.home_session_id,
     }),
   );
 }
@@ -102,6 +121,7 @@ type UpcomingRow = {
   cron: string | null;
   timezone: string;
   queued_start_after: Date | null;
+  home_session_id: string | null;
   db_now: Date;
 };
 
@@ -113,8 +133,10 @@ async function listUpcomingJobs() {
   const { rows } = await getPool().query<UpcomingRow>(
     `select t.id, t.title, t.schedule_type, t.payload, t.run_at, t.cron, t.timezone,
             j.start_after as queued_start_after,
+            coalesce(t.origin_session_id, s.id) as home_session_id,
             now() as db_now
      from agent_scheduled_tasks t
+     left join agent_chat_sessions s on s.task_id = t.id and s.deleted_at is null
      left join lateral (
        select start_after
        from ${getPgBossSchema()}.job
@@ -140,6 +162,7 @@ async function listUpcomingJobs() {
       timezone: row.timezone,
       nextRunAt,
       queued,
+      homeSessionId: row.home_session_id,
     };
   });
 
