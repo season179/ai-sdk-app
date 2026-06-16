@@ -20,7 +20,7 @@ Real (non-mock) scheduler tools backed by pg-boss, in the same catalog the tool 
 
 ## Setup
 
-1. Use pnpm 11. This repo pins `packageManager` to `pnpm@11.5.1`.
+1. Use Node 24 and pnpm 11. `package.json` declares an `engines` range (`node >=24`, `pnpm >=11 <12`) and `.npmrc` enables `engine-strict`, so `pnpm install` fails fast on an unsupported runtime; `.nvmrc` and `.node-version` pin Node 24 for version managers. The repo pins `packageManager` to `pnpm@11.5.1`, and a `preinstall` hook (`only-allow pnpm`) rejects npm or yarn.
 2. Install dependencies:
 
    ```bash

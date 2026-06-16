@@ -1,59 +1,65 @@
 "use client";
 
 import { CalendarClock, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { POLL_FAST_MS, POLL_IDLE_MS, useSmartPoll } from "@/lib/hooks/use-smart-poll";
 import { extractStatusUpdate, formatTimestamp } from "@/lib/scheduler/display";
 import type { ScheduledTask } from "@/lib/scheduler/tasks";
+import { fetchJson } from "@/lib/utils";
 
-const REFRESH_INTERVAL_MS = 10_000;
-
-type PanelState = {
-  tasks: ScheduledTask[];
-  loading: boolean;
-  error: string | null;
-};
+/** A one-off fire this close keeps the fast cadence. */
+const POLL_SOON_MS = 30_000;
 
 export function TasksPanel() {
   const [open, setOpen] = useState(false);
-  const [state, setState] = useState<PanelState>({ tasks: [], loading: false, error: null });
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setState((current) => ({ ...current, loading: true }));
+  const fetchTasks = useCallback(
+    () =>
+      fetchJson<ScheduledTask[]>(
+        "/api/scheduled-tasks",
+        "tasks",
+        "Failed to load scheduled tasks.",
+      ),
+    [],
+  );
 
-    try {
-      const response = await fetch("/api/scheduled-tasks");
-      const body: { tasks?: ScheduledTask[]; error?: string } = await response.json();
-
-      if (!response.ok || !body.tasks) {
-        throw new Error(body.error ?? "Failed to load scheduled tasks.");
-      }
-
-      setState({ tasks: body.tasks, loading: false, error: null });
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        loading: false,
-        error: error instanceof Error ? error.message : "Failed to load scheduled tasks.",
-      }));
+  // Poll fast while a run is live or a one-off is about to fire; otherwise drop
+  // to the idle heartbeat. Gated on `open` so the loop only runs while the
+  // dropdown is expanded (and the tab is visible).
+  const getDelay = useCallback((data: ScheduledTask[] | null) => {
+    if (!data) {
+      return POLL_FAST_MS;
     }
+
+    const active = data.some(
+      (task) =>
+        task.lastRun?.status === "running" ||
+        (task.status === "active" &&
+          task.scheduleType === "once" &&
+          task.runAt !== null &&
+          new Date(task.runAt).getTime() - Date.now() < POLL_SOON_MS),
+    );
+
+    return active ? POLL_FAST_MS : POLL_IDLE_MS;
   }, []);
 
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
+  const { data, loading, error, refresh } = useSmartPoll({
+    fetcher: fetchTasks,
+    getDelayMs: getDelay,
+    enabled: open,
+    errorMessage: "Failed to load scheduled tasks.",
+  });
 
-    void refresh();
-    const interval = setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [open, refresh]);
+  const tasks = data ?? [];
+  const displayError = error ?? actionError;
 
   async function runTaskAction(task: ScheduledTask, action: "cancel" | "pause" | "resume") {
     setPendingTaskId(task.id);
+    setActionError(null);
 
     try {
       const init: RequestInit =
@@ -73,22 +79,29 @@ export function TasksPanel() {
 
       await refresh();
     } catch (error) {
-      setState((current) => ({
-        ...current,
-        error: error instanceof Error ? error.message : `Failed to ${action} the task.`,
-      }));
+      setActionError(error instanceof Error ? error.message : `Failed to ${action} the task.`);
     } finally {
       setPendingTaskId(null);
     }
   }
 
   return (
-    <details className="relative shrink-0" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details
+      className="relative shrink-0"
+      onToggle={(event) => {
+        const isOpen = event.currentTarget.open;
+        setOpen(isOpen);
+        // Drop a stale action-error banner so it doesn't linger across reopens.
+        if (isOpen) {
+          setActionError(null);
+        }
+      }}
+    >
       <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/30 [&::-webkit-details-marker]:hidden">
         <CalendarClock aria-hidden="true" className="size-3.5" />
         Tasks
         <span className="font-semibold tabular-nums text-foreground">
-          {state.tasks.filter((task) => task.status === "active").length}
+          {tasks.filter((task) => task.status === "active").length}
         </span>
       </summary>
 
@@ -102,29 +115,29 @@ export function TasksPanel() {
           </div>
           <Button
             aria-label="Refresh tasks"
-            disabled={state.loading}
+            disabled={loading}
             onClick={() => void refresh()}
             size="sm"
             type="button"
             variant="ghost"
           >
-            <RefreshCw className={`size-3.5 ${state.loading ? "animate-spin" : ""}`} />
+            <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
           </Button>
         </div>
 
-        {state.error ? (
+        {displayError ? (
           <p className="mt-3 rounded-md border border-destructive/30 px-3 py-2 text-xs text-destructive">
-            {state.error}
+            {displayError}
           </p>
         ) : null}
 
         <div className="mt-3 max-h-80 space-y-2 overflow-y-auto">
-          {state.tasks.length === 0 && !state.loading ? (
+          {tasks.length === 0 && !loading ? (
             <p className="px-1 py-2 text-xs text-muted-foreground">
               No scheduled tasks yet. Ask the agent to schedule one.
             </p>
           ) : (
-            state.tasks.map((task) => (
+            tasks.map((task) => (
               <TaskCard
                 key={task.id}
                 onAction={(action) => void runTaskAction(task, action)}
