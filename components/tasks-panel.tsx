@@ -9,6 +9,9 @@ import { extractStatusUpdate, formatTimestamp } from "@/lib/scheduler/display";
 import type { ScheduledTask } from "@/lib/scheduler/tasks";
 import { fetchJson } from "@/lib/utils";
 
+/** A one-off fire this close keeps the fast cadence. */
+const POLL_SOON_MS = 30_000;
+
 export function TasksPanel() {
   const [open, setOpen] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
@@ -24,13 +27,25 @@ export function TasksPanel() {
     [],
   );
 
-  // Poll fast while any task is active, otherwise idle. Gated on `open` so the
-  // loop only runs while the dropdown is expanded (and the tab is visible).
-  const getDelay = useCallback(
-    (data: ScheduledTask[] | null) =>
-      data?.some((task) => task.status === "active") ? POLL_FAST_MS : POLL_IDLE_MS,
-    [],
-  );
+  // Poll fast while a run is live or a one-off is about to fire; otherwise drop
+  // to the idle heartbeat. Gated on `open` so the loop only runs while the
+  // dropdown is expanded (and the tab is visible).
+  const getDelay = useCallback((data: ScheduledTask[] | null) => {
+    if (!data) {
+      return POLL_FAST_MS;
+    }
+
+    const active = data.some(
+      (task) =>
+        task.lastRun?.status === "running" ||
+        (task.status === "active" &&
+          task.scheduleType === "once" &&
+          task.runAt !== null &&
+          new Date(task.runAt).getTime() - Date.now() < POLL_SOON_MS),
+    );
+
+    return active ? POLL_FAST_MS : POLL_IDLE_MS;
+  }, []);
 
   const { data, loading, error, refresh } = useSmartPoll({
     fetcher: fetchTasks,
