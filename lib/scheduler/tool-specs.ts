@@ -149,7 +149,22 @@ export function isSchedulerToolName(name: string) {
   return schedulerSpecByName.has(name);
 }
 
-export async function executeSchedulerTool(name: string, input: RealisticToolInput) {
+/**
+ * Per-request context threaded into scheduler tool execution. `originSessionId`
+ * is the chat session the request runs in (null for ephemeral chats); a task
+ * created from a chat appends its rounds back into that chat instead of a
+ * dedicated session. Both tool-exposure paths (the direct `createSchedulerTools`
+ * toolset and the deferred `tool_call` path) carry this context through.
+ */
+export type SchedulerToolContext = { originSessionId: string | null };
+
+const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
+
+export async function executeSchedulerTool(
+  name: string,
+  input: RealisticToolInput,
+  ctx: SchedulerToolContext = NO_SCHEDULER_CONTEXT,
+) {
   try {
     switch (name) {
       case "scheduled_task_create": {
@@ -174,6 +189,9 @@ export async function executeSchedulerTool(name: string, input: RealisticToolInp
           runAt: asOptionalString(input.run_at),
           cron: asOptionalString(input.cron),
           timezone: asOptionalString(input.timezone),
+          // When the task is born in a chat, its rounds append back into that
+          // chat; otherwise createScheduledTask mints a dedicated home session.
+          originSessionId: ctx.originSessionId ?? undefined,
         });
 
         return {
@@ -249,8 +267,17 @@ export async function executeSchedulerTool(name: string, input: RealisticToolInp
   }
 }
 
-/** Real AI SDK tools, used when TOOL_EXPOSURE_MODE=all exposes every tool directly. */
-export const schedulerTools: ToolSet = buildSpecToolSet(schedulerToolSpecs, executeSchedulerTool);
+/**
+ * Real AI SDK tools, used when TOOL_EXPOSURE_MODE=all exposes every tool
+ * directly. A factory (not a static export) so each request closes over its own
+ * scheduler context — the chat route passes the session id so a task created in
+ * a chat appends its rounds back into that chat.
+ */
+export function createSchedulerTools(ctx: SchedulerToolContext = NO_SCHEDULER_CONTEXT): ToolSet {
+  return buildSpecToolSet(schedulerToolSpecs, (name, input) =>
+    executeSchedulerTool(name, input, ctx),
+  );
+}
 
 function formatTask(task: ScheduledTask) {
   return {

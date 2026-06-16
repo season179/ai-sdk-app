@@ -13,6 +13,7 @@ import {
   executeSchedulerTool,
   getSchedulerToolSpec,
   isSchedulerToolName,
+  type SchedulerToolContext,
   schedulerToolSpecs,
 } from "@/lib/scheduler/tool-specs";
 import {
@@ -62,6 +63,8 @@ const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 20;
 const TOKEN_RE = /[A-Za-z0-9]+/g;
 
+const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
+
 const catalogToolSpecs = [...mockToolSpecs, ...schedulerToolSpecs, ...skillToolSpecs];
 const catalog = catalogToolSpecs.map(buildCatalogEntry);
 const catalogStats = buildCatalogStats(catalog);
@@ -77,7 +80,10 @@ export function resolveToolExposureMode(value: string | undefined): ToolSearchMo
   return value?.trim().toLowerCase() === "all" ? "all" : "search";
 }
 
-export function createToolSearchTools(trace: ToolSearchTraceEvent[]): ToolSet {
+export function createToolSearchTools(
+  trace: ToolSearchTraceEvent[],
+  schedulerContext: SchedulerToolContext = NO_SCHEDULER_CONTEXT,
+): ToolSet {
   return {
     [TOOL_SEARCH_NAME]: tool<SearchInput, ReturnType<typeof runToolSearch>>({
       title: "Search deferred tools",
@@ -168,7 +174,7 @@ export function createToolSearchTools(trace: ToolSearchTraceEvent[]): ToolSet {
         additionalProperties: false,
       }),
       async execute(input) {
-        const result = await callDeferredTool(input);
+        const result = await callDeferredTool(input, schedulerContext);
         const spec = getCatalogToolSpec(result.name);
 
         trace.push({
@@ -267,7 +273,10 @@ function describeTool(input: DescribeInput) {
   };
 }
 
-async function callDeferredTool(input: DeferredCallInput) {
+async function callDeferredTool(
+  input: DeferredCallInput,
+  schedulerContext: SchedulerToolContext = NO_SCHEDULER_CONTEXT,
+) {
   const name = String(input.name ?? "").trim();
   const spec = getCatalogToolSpec(name);
 
@@ -276,7 +285,7 @@ async function callDeferredTool(input: DeferredCallInput) {
   }
 
   const output = isSchedulerToolName(name)
-    ? await executeSchedulerTool(name, toRecord(input.arguments))
+    ? await executeSchedulerTool(name, toRecord(input.arguments), schedulerContext)
     : isSkillToolName(name)
       ? await executeSkillTool(name, toRecord(input.arguments))
       : executeMockTool(name, toRecord(input.arguments));

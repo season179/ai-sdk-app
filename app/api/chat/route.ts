@@ -18,7 +18,7 @@ import {
 } from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
-import { schedulerTools } from "@/lib/scheduler/tool-specs";
+import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -234,10 +234,15 @@ export async function POST(req: Request) {
       loadSkillCatalogBlock(),
       injectUserActivatedSkills(fullMessages),
     ]);
+    // Bind the originating chat into scheduler tools so a task created here
+    // appends its rounds back into this session (Phase 2.3). Carried through
+    // both exposure paths: the direct toolset (mode=all) and the deferred
+    // tool_call path (default search mode).
+    const schedulerContext = { originSessionId: sessionId };
     const tools = {
       ...(toolExposureMode === "all"
-        ? { ...mockTools, ...schedulerTools }
-        : createToolSearchTools(toolSearchTrace)),
+        ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
+        : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
     };
     const instructions = [
