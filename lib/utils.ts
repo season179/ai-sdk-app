@@ -20,7 +20,8 @@ export function isUuid(value: string): boolean {
  */
 export async function fetchJson<T>(url: string, key: string, fallbackError: string): Promise<T> {
   const response = await fetch(url);
-  const body = (await response.json().catch(() => ({}))) as Record<string, unknown> & {
+  const parsed = (await response.json().catch(() => null)) as unknown;
+  const body = (parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown> & {
     error?: string;
   };
   const value = body[key];
