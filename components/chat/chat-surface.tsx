@@ -144,27 +144,6 @@ export function ChatSurface({
   // whenever the content is unchanged so the effect only fires on a real change.
   const usageRef = useRef<ChatUsageSummary>({ sessionUsage: {} });
   const usageSignatureRef = useRef<string>("");
-  const tokenUsageSummary = useMemo<ChatUsageSummary>(() => {
-    const assistantMessages = messages.filter((message) => message.role === "assistant");
-    const latestAssistantMessage = assistantMessages.at(-1);
-
-    const next: ChatUsageSummary = {
-      latestBreakdown: getTokenUsageBreakdown(latestAssistantMessage?.metadata),
-      latestToolSearch: getToolSearchMetadata(latestAssistantMessage?.metadata),
-      latestUsage: getTokenUsage(latestAssistantMessage?.metadata),
-      sessionUsage: sumTokenUsages(
-        assistantMessages.map((message) => getTokenUsage(message.metadata)),
-      ),
-    };
-
-    const signature = JSON.stringify(next);
-    if (signature === usageSignatureRef.current) {
-      return usageRef.current;
-    }
-    usageSignatureRef.current = signature;
-    usageRef.current = next;
-    return next;
-  }, [messages]);
 
   // Two async writers feed useChat's message list: the SDK's own streaming and
   // the SSE/poll live-merge (applyLiveMessages). When a scheduled round lands
@@ -183,6 +162,28 @@ export function ChatSurface({
       return true;
     });
   }, [messages]);
+
+  const tokenUsageSummary = useMemo<ChatUsageSummary>(() => {
+    const assistantMessages = renderedMessages.filter((message) => message.role === "assistant");
+    const latestAssistantMessage = assistantMessages.at(-1);
+
+    const next: ChatUsageSummary = {
+      latestBreakdown: getTokenUsageBreakdown(latestAssistantMessage?.metadata),
+      latestToolSearch: getToolSearchMetadata(latestAssistantMessage?.metadata),
+      latestUsage: getTokenUsage(latestAssistantMessage?.metadata),
+      sessionUsage: sumTokenUsages(
+        assistantMessages.map((message) => getTokenUsage(message.metadata)),
+      ),
+    };
+
+    const signature = JSON.stringify(next);
+    if (signature === usageSignatureRef.current) {
+      return usageRef.current;
+    }
+    usageSignatureRef.current = signature;
+    usageRef.current = next;
+    return next;
+  }, [renderedMessages]);
 
   const focusInput = useCallback(() => {
     requestAnimationFrame(() => {
