@@ -55,16 +55,6 @@ export const skillToolSpecs: RealisticToolSpec[] = [
   },
 ];
 
-const skillSpecByName = new Map(skillToolSpecs.map((spec) => [spec.name, spec]));
-
-export function getSkillToolSpec(name: string) {
-  return skillSpecByName.get(name);
-}
-
-export function isSkillToolName(name: string) {
-  return skillSpecByName.has(name);
-}
-
 export async function executeSkillTool(name: string, input: RealisticToolInput) {
   try {
     switch (name) {

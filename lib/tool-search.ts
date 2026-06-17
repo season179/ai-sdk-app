@@ -1,27 +1,12 @@
 import { jsonSchema, type ToolSet, tool } from "ai";
 
 import {
-  executeMockTool,
   getMockToolFunctionSchema,
   getMockToolParameterSchema,
-  getMockToolSpec,
-  mockToolSpecs,
   type RealisticToolInput,
   type RealisticToolSpec,
 } from "@/lib/mock-tools";
-import {
-  executeSchedulerTool,
-  getSchedulerToolSpec,
-  isSchedulerToolName,
-  type SchedulerToolContext,
-  schedulerToolSpecs,
-} from "@/lib/scheduler/tool-specs";
-import {
-  executeSkillTool,
-  getSkillToolSpec,
-  isSkillToolName,
-  skillToolSpecs,
-} from "@/lib/skills/tool-specs";
+import type { SchedulerToolContext } from "@/lib/scheduler/tool-specs";
 import {
   estimateTokensFromChars,
   type RequestTokenEstimate,
@@ -29,6 +14,7 @@ import {
   type ToolSearchMode,
   type ToolSearchTraceEvent,
 } from "@/lib/token-usage";
+import { toolRegistry } from "@/lib/tools/registry";
 
 type SearchInput = {
   query: string;
@@ -65,7 +51,7 @@ const TOKEN_RE = /[A-Za-z0-9]+/g;
 
 const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
 
-const catalogToolSpecs = [...mockToolSpecs, ...schedulerToolSpecs, ...skillToolSpecs];
+const catalogToolSpecs = toolRegistry.specs;
 const catalog = catalogToolSpecs.map(buildCatalogEntry);
 const catalogStats = buildCatalogStats(catalog);
 const catalogSchemaChars = JSON.stringify(catalogToolSpecs.map(getMockToolFunctionSchema)).length;
@@ -73,7 +59,7 @@ const catalogSchemaChars = JSON.stringify(catalogToolSpecs.map(getMockToolFuncti
 export const catalogToolCount = catalogToolSpecs.length;
 
 function getCatalogToolSpec(name: string) {
-  return getSchedulerToolSpec(name) ?? getSkillToolSpec(name) ?? getMockToolSpec(name);
+  return toolRegistry.getSpec(name);
 }
 
 export function resolveToolExposureMode(value: string | undefined): ToolSearchMode {
@@ -284,11 +270,7 @@ async function callDeferredTool(
     return deferredToolNotFound(name);
   }
 
-  const output = isSchedulerToolName(name)
-    ? await executeSchedulerTool(name, toRecord(input.arguments), schedulerContext)
-    : isSkillToolName(name)
-      ? await executeSkillTool(name, toRecord(input.arguments))
-      : executeMockTool(name, toRecord(input.arguments));
+  const output = await toolRegistry.execute(name, toRecord(input.arguments), schedulerContext);
 
   if (!output) {
     return deferredToolNotFound(name);

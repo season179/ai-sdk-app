@@ -139,16 +139,6 @@ export const schedulerToolSpecs: RealisticToolSpec[] = [
   },
 ];
 
-const schedulerSpecByName = new Map(schedulerToolSpecs.map((spec) => [spec.name, spec]));
-
-export function getSchedulerToolSpec(name: string) {
-  return schedulerSpecByName.get(name);
-}
-
-export function isSchedulerToolName(name: string) {
-  return schedulerSpecByName.has(name);
-}
-
 /**
  * Per-request context threaded into scheduler tool execution. `originSessionId`
  * is the chat session the request runs in (null for ephemeral chats); a task
