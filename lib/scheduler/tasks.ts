@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 
-import { CronExpressionParser } from "cron-parser";
 import { and, desc, eq, getTableColumns, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
@@ -12,6 +11,7 @@ import {
   taskScheduleOptions,
   taskSendOptions,
 } from "@/lib/scheduler/boss";
+import { parseCronExpression } from "@/lib/scheduler/cron";
 import { getDefaultScheduleTimezone } from "@/lib/scheduler/env";
 import {
   clampChainDelaySeconds,
@@ -545,7 +545,7 @@ function parseCron(cron: string, timezone: string) {
   try {
     // Same parser and options pg-boss validates with, so anything accepted
     // here is also accepted by boss.schedule and the catch-up reconciler.
-    CronExpressionParser.parse(cron, { tz: timezone });
+    parseCronExpression(cron, timezone);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new SchedulerInputError(`Invalid cron expression '${cron}': ${message}`);
