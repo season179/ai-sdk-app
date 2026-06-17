@@ -104,6 +104,8 @@ export type ToolSearchMetadata = {
 export type ChatMessageMetadata = {
   /** Set by the composer on user messages that start with a /skill-name command. */
   activatedSkill?: string;
+  /** OpenRouter model id that produced this assistant turn. */
+  modelId?: string;
   tokenUsage?: TokenUsage;
   tokenUsageBreakdown?: TokenUsageBreakdown;
   toolSearch?: ToolSearchMetadata;

@@ -18,6 +18,7 @@ import {
 } from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
+import { resolveChatModel } from "@/lib/models/openrouter";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
@@ -170,6 +171,9 @@ export async function POST(req: Request) {
   // Absent => ephemeral (no persistence). Malformed => 400.
   let sessionId: string | null = null;
   let trigger: ChatTrigger = "submit-message";
+  // The model the composer's picker chose for this turn. Validated server-side
+  // against the account's allow-set below; missing/invalid => env default.
+  let requestedModel: string | null = null;
 
   try {
     const body: {
@@ -177,6 +181,7 @@ export async function POST(req: Request) {
       message?: unknown;
       trigger?: unknown;
       messageId?: unknown;
+      model?: unknown;
     } = await req.json();
 
     if (typeof body.id === "string") {
@@ -201,6 +206,10 @@ export async function POST(req: Request) {
       incomingMessage = body.message as ChatUIMessage;
     }
 
+    if (typeof body.model === "string" && body.model.trim().length > 0) {
+      requestedModel = body.model.trim();
+    }
+
     if (trigger === "submit-message" && !incomingMessage) {
       return Response.json(
         { error: "Request body must include the new message." },
@@ -217,7 +226,15 @@ export async function POST(req: Request) {
 
   try {
     const apiKey = requireEnv("OPENROUTER_API_KEY");
-    const model = requireEnv("OPENROUTER_DEFAULT_MODEL");
+    const defaultModel = requireEnv("OPENROUTER_DEFAULT_MODEL");
+    // Honor the picker's choice only if it's a model this account can call;
+    // otherwise fall back to the default. Cached, so it reuses the list route's
+    // upstream fetch.
+    const model = await resolveChatModel({
+      requested: requestedModel,
+      apiKey,
+      fallback: defaultModel,
+    });
     const openrouter = createOpenRouter({ apiKey });
     const toolExposureMode = resolveToolExposureMode(process.env.TOOL_EXPOSURE_MODE);
     const toolSearchTrace: ToolSearchTraceEvent[] = [];
@@ -289,6 +306,7 @@ export async function POST(req: Request) {
         }
 
         return {
+          modelId: model,
           tokenUsage: toTokenUsage(part.totalUsage),
           tokenUsageBreakdown: toTokenUsageBreakdown(part.totalUsage, requestEstimates),
           toolSearch: buildToolSearchMetadata({

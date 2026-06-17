@@ -23,9 +23,11 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
+import { ModelPicker } from "@/components/chat/model-picker";
 import type { ChatUsageSummary } from "@/components/chat/token-usage-menu";
 import { Button } from "@/components/ui/button";
 import { useSessionStream } from "@/lib/hooks/use-session-stream";
+import type { OpenRouterModelSummary } from "@/lib/models/openrouter";
 import type { SkillCatalogEntry } from "@/lib/skills/catalog";
 import { parsePartialSkillCommand, parseSkillCommand } from "@/lib/skills/slash-command";
 import {
@@ -37,6 +39,8 @@ import {
 } from "@/lib/token-usage";
 
 const BUSY_STATUSES = new Set(["submitted", "streaming"]);
+/** Persists the composer's model choice across reloads (per browser, MVP). */
+const MODEL_STORAGE_KEY = "chat:selected-model";
 // Shared horizontal framing for the conversation and composer: same centered
 // column and gutters the rest of the app uses (max-w-7xl + px-4/8/10).
 const SHELL_COLUMN = "mx-auto w-full max-w-7xl px-4 sm:px-8 lg:px-10";
@@ -63,6 +67,10 @@ export function ChatSurface({
   const [input, setInput] = useState("");
   const contentRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Holds the latest picked model so the once-constructed transport closure
+  // below reads a fresh value on submit AND regenerate (a per-call sendMessage
+  // body is dropped on regenerate; this ref is the single source of truth).
+  const modelRef = useRef<string | null>(null);
   // Keyed by sessionId at the call site, so a session switch remounts this
   // component and useChat re-seeds from the new id + initialMessages.
   const { messages, sendMessage, setMessages, status, error, stop, regenerate } =
@@ -78,7 +86,13 @@ export function ChatSurface({
       transport: new DefaultChatTransport<ChatMessage>({
         api: "/api/chat",
         prepareSendMessagesRequest: ({ id, messages: outgoing, trigger, messageId }) => ({
-          body: { id, trigger, messageId, message: outgoing[outgoing.length - 1] },
+          body: {
+            id,
+            trigger,
+            messageId,
+            message: outgoing[outgoing.length - 1],
+            model: modelRef.current ?? undefined,
+          },
         }),
       }),
       // onFinish fires on success, abort, AND error. The server only persists a
@@ -95,6 +109,12 @@ export function ChatSurface({
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
   const [lastSkillQuery, setLastSkillQuery] = useState<string | null>(null);
   const skillCatalogRequested = useRef(false);
+
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [models, setModels] = useState<OpenRouterModelSummary[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const modelsRequested = useRef(false);
 
   const isBusy = BUSY_STATUSES.has(status);
   const canSubmit = input.trim().length > 0 && !isBusy;
@@ -216,6 +236,60 @@ export function ChatSurface({
     },
     [focusInput],
   );
+
+  // Restore the previously picked model on mount (per-browser MVP persistence).
+  useEffect(() => {
+    const stored = window.localStorage.getItem(MODEL_STORAGE_KEY);
+    if (stored) {
+      setSelectedModel(stored);
+    }
+  }, []);
+
+  // Mirror the picked model into the ref the transport reads (see modelRef).
+  // An effect (not a render-phase write) so it only runs on committed renders.
+  useEffect(() => {
+    modelRef.current = selectedModel;
+  }, [selectedModel]);
+
+  // The catalog is large and only needed once the picker opens, so fetch it
+  // lazily on first open. Best-effort: the picker falls back to the default.
+  const loadModels = useCallback(() => {
+    if (modelsRequested.current) {
+      return;
+    }
+
+    modelsRequested.current = true;
+    setModelsLoading(true);
+    fetch("/api/models")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Models request failed with status ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((data: { models?: OpenRouterModelSummary[]; defaultModel?: string | null }) => {
+        if (Array.isArray(data?.models)) {
+          setModels(data.models);
+        }
+        if (data?.defaultModel) {
+          setDefaultModel(data.defaultModel);
+        }
+      })
+      .catch(() => {
+        // Best-effort: allow a later open to retry after a transient failure.
+        modelsRequested.current = false;
+      })
+      .finally(() => setModelsLoading(false));
+  }, []);
+
+  const handleModelChange = useCallback((modelId: string) => {
+    setSelectedModel(modelId);
+    try {
+      window.localStorage.setItem(MODEL_STORAGE_KEY, modelId);
+    } catch {
+      // localStorage can be unavailable (private mode); selection still applies.
+    }
+  }, []);
 
   function handleSubmit(message: PromptInputMessage) {
     const text = message.text.trim();
@@ -366,6 +440,7 @@ export function ChatSurface({
           <PromptInput onSubmit={handleSubmit}>
             <PromptInputTextarea
               aria-label="Message"
+              className="pb-12"
               disabled={isBusy}
               ref={inputRef}
               onKeyDown={(event) => {
@@ -401,6 +476,16 @@ export function ChatSurface({
               placeholder="Send a message... (/skill-name to activate a skill)"
               value={input}
             />
+            <div className="absolute bottom-3 left-3">
+              <ModelPicker
+                defaultModel={defaultModel}
+                loading={modelsLoading}
+                models={models}
+                onChange={handleModelChange}
+                onOpen={loadModels}
+                value={selectedModel}
+              />
+            </div>
             <PromptInputSubmit disabled={!canSubmit} onStop={stop} status={status} />
           </PromptInput>
         </div>
