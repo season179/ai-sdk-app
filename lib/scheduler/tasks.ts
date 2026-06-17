@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { CronExpressionParser } from "cron-parser";
-import { and, desc, eq, getTableColumns, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import { agentChatSessions, agentScheduledTaskRuns, agentScheduledTasks } from "@/db/schema";
@@ -315,7 +315,13 @@ export async function listScheduledTasks() {
       lastRunError: latestRun.error,
     })
     .from(agentScheduledTasks)
-    .leftJoin(agentChatSessions, eq(agentChatSessions.taskId, agentScheduledTasks.id))
+    .leftJoin(
+      agentChatSessions,
+      and(
+        eq(agentChatSessions.taskId, agentScheduledTasks.id),
+        isNull(agentChatSessions.deletedAt),
+      ),
+    )
     .leftJoinLateral(latestRun, sql`true`)
     .orderBy(desc(agentScheduledTasks.createdAt))
     .limit(100);
@@ -330,7 +336,13 @@ export async function getScheduledTaskById(id: string) {
       dedicatedSessionId: agentChatSessions.id,
     })
     .from(agentScheduledTasks)
-    .leftJoin(agentChatSessions, eq(agentChatSessions.taskId, agentScheduledTasks.id))
+    .leftJoin(
+      agentChatSessions,
+      and(
+        eq(agentChatSessions.taskId, agentScheduledTasks.id),
+        isNull(agentChatSessions.deletedAt),
+      ),
+    )
     .where(eq(agentScheduledTasks.id, id));
 
   return rows[0] ? mapTaskRow(rows[0]) : null;
