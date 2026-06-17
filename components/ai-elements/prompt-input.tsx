@@ -19,7 +19,7 @@ export function PromptInput({ className, onSubmit, ...props }: PromptInputProps)
   return (
     <form
       className={cn(
-        "relative rounded-xl border border-border/80 bg-card/95 p-2 shadow-[0_18px_55px_-34px_rgba(15,23,42,0.55)] transition-shadow focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/10",
+        "relative rounded-xl border border-border/80 bg-card/95 p-2 shadow-[var(--shadow-pop)] transition-shadow focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/10",
         className,
       )}
       onSubmit={(event) => {

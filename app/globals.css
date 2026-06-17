@@ -22,6 +22,7 @@
 }
 
 :root {
+  color-scheme: light;
   --background: oklch(0.995 0 0);
   --foreground: oklch(0.18 0.012 245);
   --card: oklch(0.985 0.003 245);
@@ -34,7 +35,44 @@
   --primary-foreground: oklch(1 0 0);
   --destructive: oklch(0.49 0.17 27);
   --destructive-foreground: oklch(1 0 0);
+  /* Categorical data-viz. Tuned for >=3:1 on the muted bar track and on the
+     body/card where the legend dots sit; the light track demands deeper colors. */
+  --chart-tools: oklch(0.7 0.165 60);
+  --chart-messages: oklch(0.55 0.17 240);
+  --chart-system: oklch(0.5 0.21 305);
   --radius: 0.5rem;
+  /* Floating surfaces (popovers, menus). A faint, warm-neutral drop that reads
+     as elevation on the near-white body. Kept soft on purpose; paired with the
+     1px border that already frames these surfaces. */
+  --shadow-pop: 0 18px 55px -34px oklch(0.28 0.02 245 / 0.45);
+}
+
+/* Dark theme mirrors the light ramp's hues (245° blue-gray neutrals, 178° teal,
+   25° destructive) so the brand reads as the same product in a darker room.
+   Luminance is tuned for contrast: body text >=4.5:1 on background and card,
+   muted-foreground >=4.5:1 for timestamps/labels, primary-as-text >=3:1. */
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.165 0.008 245);
+  --foreground: oklch(0.93 0.008 245);
+  --card: oklch(0.205 0.01 245);
+  --card-foreground: oklch(0.93 0.008 245);
+  --muted: oklch(0.26 0.012 245);
+  --muted-foreground: oklch(0.775 0.016 245);
+  --border: oklch(0.33 0.014 245);
+  --input: oklch(0.3 0.014 245);
+  --primary: oklch(0.74 0.13 178);
+  --primary-foreground: oklch(0.155 0.02 245);
+  --destructive: oklch(0.68 0.19 25);
+  --destructive-foreground: oklch(1 0 0);
+  /* Categorical data-viz. The dark muted track needs brighter colors than the
+     light track to clear 3:1. Same hues, lifted in lightness. */
+  --chart-tools: oklch(0.8 0.16 80);
+  --chart-messages: oklch(0.78 0.14 225);
+  --chart-system: oklch(0.72 0.17 300);
+  /* On a dark body, the light-theme slate shadow would glow. Drop to a black
+     base so the elevation reads as depth, not haze. */
+  --shadow-pop: 0 18px 55px -30px oklch(0 0 0 / 0.6);
 }
 
 * {
@@ -73,7 +111,7 @@ p {
 }
 
 ::selection {
-  background: oklch(0.86 0.07 178);
+  background: color-mix(in oklch, var(--primary) 24%, transparent);
   color: var(--foreground);
 }
 

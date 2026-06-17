@@ -29,7 +29,7 @@ export function TokenUsageMenu({
           {formatTokenCount(sessionUsage.totalTokens)}
         </span>
       </summary>
-      <div className="absolute right-0 top-full z-20 mt-3 w-[min(calc(100vw-2rem),34rem)] rounded-lg border border-border bg-background p-4 text-left shadow-[0_24px_70px_-36px_rgba(15,23,42,0.45)]">
+      <div className="absolute right-0 top-full z-20 mt-3 w-[min(calc(100vw-2rem),34rem)] rounded-lg border border-border bg-background p-4 text-left shadow-[var(--shadow-pop)]">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-sm font-semibold text-foreground">Last request</p>
@@ -333,21 +333,21 @@ function getBreakdownCategoryCopy(
 function getBreakdownBarColor(id: TokenUsageBreakdown["categories"][number]["id"]) {
   switch (id) {
     case "tools":
-      return "bg-amber-500";
+      return "bg-[var(--chart-tools)]";
     case "messages":
-      return "bg-sky-500";
+      return "bg-[var(--chart-messages)]";
     case "systemPrompt":
-      return "bg-violet-500";
+      return "bg-[var(--chart-system)]";
   }
 }
 
 function getBreakdownDotColor(id: TokenUsageBreakdown["categories"][number]["id"]) {
   switch (id) {
     case "tools":
-      return "bg-amber-500";
+      return "bg-[var(--chart-tools)]";
     case "messages":
-      return "bg-sky-500";
+      return "bg-[var(--chart-messages)]";
     case "systemPrompt":
-      return "bg-violet-500";
+      return "bg-[var(--chart-system)]";
   }
 }

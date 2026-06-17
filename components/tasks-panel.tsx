@@ -105,7 +105,7 @@ export function TasksPanel() {
         </span>
       </summary>
 
-      <div className="absolute right-0 top-full z-20 mt-3 w-[min(calc(100vw-2rem),26rem)] rounded-lg border border-border bg-background p-4 text-left shadow-[0_24px_70px_-36px_rgba(15,23,42,0.45)]">
+      <div className="absolute right-0 top-full z-20 mt-3 w-[min(calc(100vw-2rem),26rem)] rounded-lg border border-border bg-background p-4 text-left shadow-[var(--shadow-pop)]">
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-sm font-semibold text-foreground">Scheduled tasks</p>
@@ -250,13 +250,15 @@ function TaskCard({
 }
 
 function getStatusClasses(status: ScheduledTask["status"]) {
+  // Mirrors the live ScheduledJobsBoard: semantic tokens that resolve correctly
+  // in both themes rather than fixed palette colors that fail in dark mode.
   switch (status) {
     case "active":
-      return "bg-emerald-500/15 text-emerald-600";
+      return "bg-primary/10 text-primary";
     case "paused":
-      return "bg-amber-500/15 text-amber-600";
+      return "bg-muted text-muted-foreground";
     case "completed":
-      return "bg-sky-500/15 text-sky-600";
+      return "bg-primary/10 text-primary";
     case "cancelled":
       return "bg-muted text-muted-foreground";
   }

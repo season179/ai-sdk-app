@@ -16,6 +16,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useChatShell } from "@/components/chat/chat-shell-context";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import type { ChatSessionSummary } from "@/lib/chat/sessions";
 import { cn } from "@/lib/utils";
@@ -150,7 +151,7 @@ export function AppSidebar() {
 
           <div className="mx-3 my-2 border-t border-border/70" />
 
-          <div className="px-2 pb-2">
+          <div className={cn("px-2 pb-2", open && "space-y-1")}>
             <Button
               aria-label="New chat"
               className={open ? "w-full justify-start gap-2" : "mx-auto size-9"}
@@ -164,6 +165,7 @@ export function AppSidebar() {
               <Plus className="size-4" />
               {open ? "New chat" : null}
             </Button>
+            <ThemeToggle withLabel={open} />
           </div>
 
           {/* The session list only earns its room in the full panel; the rail
