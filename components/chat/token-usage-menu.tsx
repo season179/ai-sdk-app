@@ -123,10 +123,11 @@ function ToolSearchTrace({ trace }: { trace: ToolSearchTraceEvent[] }) {
         </span>
       </summary>
       <div className="mt-2 space-y-2">
-        {visibleTrace.map((event) => (
+        {visibleTrace.map((event, index) => (
           <div
             className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-2 text-[11px]"
-            key={`${event.kind}-${getToolSearchEventDetail(event)}`}
+            // biome-ignore lint/suspicious/noArrayIndexKey: read-only, append-only "last 5" slice of stateless rows; events carry no id and identical (kind, detail) pairs are legitimate (e.g. the same tool invoked twice), so list position is the only stable discriminator.
+            key={`${index}-${event.kind}-${getToolSearchEventDetail(event)}`}
           >
             <span className="font-medium text-foreground">{getToolSearchEventLabel(event)}</span>
             <span className="min-w-0 text-muted-foreground">{getToolSearchEventDetail(event)}</span>

@@ -20,8 +20,9 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "dev": "portless",
+    "dev": "concurrently --names app,worker --prefix-colors blue,magenta \"portless\" \"pnpm run worker:scheduled-tasks\"",
     "dev:app": "next dev",
+    "dev:tunnel": "portless",
     "build": "next build",
     "lint": "biome check .",
     "format": "biome check --write .",
@@ -54,6 +55,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "19.2.16",
     "@types/react-dom": "19.2.3",
+    "concurrently": "^10.0.3",
     "drizzle-kit": "^0.31.10",
     "tailwindcss": "4.3.0",
     "tsx": "^4.22.4",

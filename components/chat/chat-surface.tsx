@@ -134,11 +134,21 @@ export function ChatSurface({
     setSkillMenuDismissed(false);
     setActiveSkillIndex(0);
   }
+  // useChat hands back a new `messages` array reference on essentially every
+  // render during streaming, so memoizing on `messages` alone produces a fresh
+  // summary object each time — even though the token numbers only move when a
+  // turn finishes (that's when usage lands in metadata). A fresh object identity
+  // made the "surface usage" effect below call onUsageChange → re-render the
+  // shell → re-render us → recompute → call again …, an infinite loop React
+  // aborts with "Maximum update depth exceeded". Preserve the prior identity
+  // whenever the content is unchanged so the effect only fires on a real change.
+  const usageRef = useRef<ChatUsageSummary>({ sessionUsage: {} });
+  const usageSignatureRef = useRef<string>("");
   const tokenUsageSummary = useMemo<ChatUsageSummary>(() => {
     const assistantMessages = messages.filter((message) => message.role === "assistant");
     const latestAssistantMessage = assistantMessages.at(-1);
 
-    return {
+    const next: ChatUsageSummary = {
       latestBreakdown: getTokenUsageBreakdown(latestAssistantMessage?.metadata),
       latestToolSearch: getToolSearchMetadata(latestAssistantMessage?.metadata),
       latestUsage: getTokenUsage(latestAssistantMessage?.metadata),
@@ -146,6 +156,32 @@ export function ChatSurface({
         assistantMessages.map((message) => getTokenUsage(message.metadata)),
       ),
     };
+
+    const signature = JSON.stringify(next);
+    if (signature === usageSignatureRef.current) {
+      return usageRef.current;
+    }
+    usageSignatureRef.current = signature;
+    usageRef.current = next;
+    return next;
+  }, [messages]);
+
+  // Two async writers feed useChat's message list: the SDK's own streaming and
+  // the SSE/poll live-merge (applyLiveMessages). When a scheduled round lands
+  // mid-turn (e.g. the user asks to stop while a round is firing), the same
+  // assistant turn can briefly appear from both writers before they reconcile.
+  // Dedupe by id here — the single read boundary — so React always sees unique
+  // keys (a duplicate key crashes the list render). First occurrence wins to
+  // keep each message at the position where it first appeared.
+  const renderedMessages = useMemo<ChatMessage[]>(() => {
+    const seen = new Set<string>();
+    return messages.filter((message) => {
+      if (seen.has(message.id)) {
+        return false;
+      }
+      seen.add(message.id);
+      return true;
+    });
   }, [messages]);
 
   const focusInput = useCallback(() => {
@@ -309,10 +345,10 @@ export function ChatSurface({
     <div className="flex min-h-0 flex-1 flex-col">
       <Conversation className="min-h-0 flex-1">
         <ConversationContent className={`${SHELL_COLUMN} py-6 sm:py-10`} ref={contentRef}>
-          {messages.length === 0 ? (
+          {renderedMessages.length === 0 ? (
             <ConversationEmptyState title="How can I help?" />
           ) : (
-            messages.map((message) => {
+            renderedMessages.map((message) => {
               const reasoningText = message.parts
                 .filter((part) => part.type === "reasoning")
                 .map((part) => part.text.trim())
@@ -381,7 +417,7 @@ export function ChatSurface({
           ) : null}
         </ConversationContent>
 
-        {messages.length > 2 ? (
+        {renderedMessages.length > 2 ? (
           <ConversationScrollButton
             className="bottom-4"
             onClick={() => {
