@@ -154,3 +154,4 @@ graphify-out/
 .codex/
 .codedb/
 codedb.snapshot
+.lavish/
