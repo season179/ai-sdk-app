@@ -155,3 +155,6 @@ graphify-out/
 .codedb/
 codedb.snapshot
 .lavish/
+
+# Next.js auto-generated types
+next-env.d.ts
