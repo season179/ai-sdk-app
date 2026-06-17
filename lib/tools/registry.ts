@@ -42,7 +42,6 @@ export type ToolRegistry = {
   /** Every registered spec, preserving provider registration order. */
   specs: RealisticToolSpec[];
   getSpec: (name: string) => RealisticToolSpec | undefined;
-  has: (name: string) => boolean;
   execute: (
     name: string,
     input: RealisticToolInput,
@@ -68,7 +67,12 @@ export function createToolRegistry(providers: ToolProvider[]): ToolRegistry {
         throw new Error(`Duplicate tool name '${spec.name}' registered in the tool registry.`);
       }
 
-      const handler = provider.handlers[spec.name];
+      // Read with Object.hasOwn so a spec named after an inherited member
+      // (e.g. "constructor", "toString") can't resolve to an Object.prototype
+      // method and silently bypass the missing-handler guard below.
+      const handler = Object.hasOwn(provider.handlers, spec.name)
+        ? provider.handlers[spec.name]
+        : undefined;
 
       if (!handler) {
         throw new Error(`Tool '${spec.name}' has a spec but no registered handler.`);
@@ -83,7 +87,6 @@ export function createToolRegistry(providers: ToolProvider[]): ToolRegistry {
   return {
     specs,
     getSpec: (name) => specByName.get(name),
-    has: (name) => specByName.has(name),
     execute: (name, input, ctx) => executeByName.get(name)?.(input, ctx),
   };
 }

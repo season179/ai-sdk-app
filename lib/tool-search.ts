@@ -6,7 +6,7 @@ import {
   type RealisticToolInput,
   type RealisticToolSpec,
 } from "@/lib/mock-tools";
-import type { SchedulerToolContext } from "@/lib/scheduler/tool-specs";
+import { NO_SCHEDULER_CONTEXT, type SchedulerToolContext } from "@/lib/scheduler/tool-specs";
 import {
   estimateTokensFromChars,
   type RequestTokenEstimate,
@@ -48,8 +48,6 @@ export const TOOL_CALL_NAME = "tool_call";
 const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 20;
 const TOKEN_RE = /[A-Za-z0-9]+/g;
-
-const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
 
 const catalogToolSpecs = toolRegistry.specs;
 const catalog = catalogToolSpecs.map(buildCatalogEntry);

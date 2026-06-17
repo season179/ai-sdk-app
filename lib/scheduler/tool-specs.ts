@@ -148,7 +148,7 @@ export const schedulerToolSpecs: RealisticToolSpec[] = [
  */
 export type SchedulerToolContext = { originSessionId: string | null };
 
-const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
+export const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
 
 type SchedulerToolHandler = (
   input: RealisticToolInput,
