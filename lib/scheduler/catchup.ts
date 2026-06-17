@@ -1,4 +1,3 @@
-import { CronExpressionParser } from "cron-parser";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { PgBoss } from "pg-boss";
 
@@ -10,6 +9,7 @@ import {
   taskScheduleOptions,
   taskSendOptions,
 } from "@/lib/scheduler/boss";
+import { prevCronFire } from "@/lib/scheduler/cron";
 import { getPool } from "@/lib/scheduler/db";
 import { getPgBossSchema } from "@/lib/scheduler/env";
 
@@ -107,12 +107,7 @@ export async function recoverMissedCronRuns() {
 
   for (const row of reasserted) {
     try {
-      const lastDueFire = CronExpressionParser.parse(row.cron, {
-        tz: row.timezone,
-        currentDate: row.dbNow,
-      })
-        .prev()
-        .toDate();
+      const lastDueFire = prevCronFire(row.cron, row.timezone, row.dbNow);
 
       if (lastDueFire <= row.baseline) {
         continue;

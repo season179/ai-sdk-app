@@ -139,16 +139,6 @@ export const schedulerToolSpecs: RealisticToolSpec[] = [
   },
 ];
 
-const schedulerSpecByName = new Map(schedulerToolSpecs.map((spec) => [spec.name, spec]));
-
-export function getSchedulerToolSpec(name: string) {
-  return schedulerSpecByName.get(name);
-}
-
-export function isSchedulerToolName(name: string) {
-  return schedulerSpecByName.has(name);
-}
-
 /**
  * Per-request context threaded into scheduler tool execution. `originSessionId`
  * is the chat session the request runs in (null for ephemeral chats); a task
@@ -158,113 +148,141 @@ export function isSchedulerToolName(name: string) {
  */
 export type SchedulerToolContext = { originSessionId: string | null };
 
-const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
+export const NO_SCHEDULER_CONTEXT: SchedulerToolContext = { originSessionId: null };
+
+type SchedulerToolHandler = (
+  input: RealisticToolInput,
+  ctx: SchedulerToolContext,
+) => Promise<unknown>;
+
+/**
+ * Per-tool handler bodies — the self-registering replacement for the former
+ * switch(name) dispatch. Each entry runs one scheduler action; the shared
+ * error mapping is applied once when the bodies are wrapped below.
+ */
+const schedulerToolBodies: Record<string, SchedulerToolHandler> = {
+  scheduled_task_create: async (input, ctx) => {
+    const scheduleType = input.schedule_type === "cron" ? "cron" : "once";
+    const payload =
+      input.kind === "instruction"
+        ? {
+            kind: "instruction",
+            instruction: input.instruction,
+            maxRounds: input.max_rounds,
+            cadenceSeconds: input.cadence_seconds,
+          }
+        : {
+            kind: "tool_call",
+            toolName: input.tool_name,
+            arguments: input.tool_arguments ?? {},
+          };
+    const task = await createScheduledTask({
+      title: String(input.title ?? ""),
+      payload,
+      scheduleType,
+      runAt: asOptionalString(input.run_at),
+      cron: asOptionalString(input.cron),
+      timezone: asOptionalString(input.timezone),
+      // When the task is born in a chat, its rounds append back into that
+      // chat; otherwise createScheduledTask mints a dedicated home session.
+      originSessionId: ctx.originSessionId ?? undefined,
+    });
+
+    return {
+      success: true,
+      task: formatTask(task),
+      note: `${task.scheduleType === "once" ? "One-off" : "Recurring"} task created. ${describeSchedule(task)}`,
+    };
+  },
+  scheduled_task_list: async () => {
+    const tasks = await listScheduledTasks();
+
+    return {
+      success: true,
+      count: tasks.length,
+      tasks: tasks.map(formatTask),
+    };
+  },
+  scheduled_task_cancel: async (input) => {
+    const task = await cancelScheduledTask(requireTaskId(input));
+
+    return {
+      success: true,
+      task: formatTask(task),
+      note: "Task cancelled. No further runs will be created.",
+    };
+  },
+  scheduled_task_pause: async (input) => {
+    const task = await pauseScheduledTask(requireTaskId(input));
+
+    return {
+      success: true,
+      task: formatTask(task),
+      note: "Task paused. Resume it to schedule runs again.",
+    };
+  },
+  scheduled_task_resume: async (input) => {
+    const task = await resumeScheduledTask(requireTaskId(input));
+
+    return {
+      success: true,
+      task: formatTask(task),
+      note: `Task resumed. ${describeSchedule(task)}`,
+    };
+  },
+  scheduled_task_get_runs: async (input) => {
+    const taskId = requireTaskId(input);
+    const runs = await getScheduledTaskRuns(taskId);
+
+    return {
+      success: true,
+      taskId,
+      count: runs.length,
+      runs,
+    };
+  },
+};
+
+/**
+ * The scheduler bodies wrapped in the shared error mapping (was the switch's
+ * surrounding try/catch): scheduler validation errors surface their message,
+ * anything else logs and returns a generic unavailable note. This wrapped map
+ * is what the central tool registry registers per tool name.
+ */
+export const schedulerToolHandlers: Record<string, SchedulerToolHandler> = Object.fromEntries(
+  Object.entries(schedulerToolBodies).map(([name, body]) => [
+    name,
+    async (input: RealisticToolInput, ctx: SchedulerToolContext) => {
+      try {
+        return await body(input, ctx);
+      } catch (error) {
+        if (error instanceof SchedulerInputError || error instanceof ScheduledPayloadError) {
+          return { success: false, error: error.message };
+        }
+
+        console.error(`Scheduler tool ${name} failed`, error);
+        return {
+          success: false,
+          error:
+            "The scheduler is unavailable. Check that Postgres is running and DATABASE_URL is set.",
+        };
+      }
+    },
+  ]),
+);
 
 export async function executeSchedulerTool(
   name: string,
   input: RealisticToolInput,
   ctx: SchedulerToolContext = NO_SCHEDULER_CONTEXT,
 ) {
-  try {
-    switch (name) {
-      case "scheduled_task_create": {
-        const scheduleType = input.schedule_type === "cron" ? "cron" : "once";
-        const payload =
-          input.kind === "instruction"
-            ? {
-                kind: "instruction",
-                instruction: input.instruction,
-                maxRounds: input.max_rounds,
-                cadenceSeconds: input.cadence_seconds,
-              }
-            : {
-                kind: "tool_call",
-                toolName: input.tool_name,
-                arguments: input.tool_arguments ?? {},
-              };
-        const task = await createScheduledTask({
-          title: String(input.title ?? ""),
-          payload,
-          scheduleType,
-          runAt: asOptionalString(input.run_at),
-          cron: asOptionalString(input.cron),
-          timezone: asOptionalString(input.timezone),
-          // When the task is born in a chat, its rounds append back into that
-          // chat; otherwise createScheduledTask mints a dedicated home session.
-          originSessionId: ctx.originSessionId ?? undefined,
-        });
+  const handler = schedulerToolHandlers[name];
 
-        return {
-          success: true,
-          task: formatTask(task),
-          note: `${task.scheduleType === "once" ? "One-off" : "Recurring"} task created. ${describeSchedule(task)}`,
-        };
-      }
-      case "scheduled_task_list": {
-        const tasks = await listScheduledTasks();
-
-        return {
-          success: true,
-          count: tasks.length,
-          tasks: tasks.map(formatTask),
-        };
-      }
-      case "scheduled_task_cancel": {
-        const task = await cancelScheduledTask(requireTaskId(input));
-
-        return {
-          success: true,
-          task: formatTask(task),
-          note: "Task cancelled. No further runs will be created.",
-        };
-      }
-      case "scheduled_task_pause": {
-        const task = await pauseScheduledTask(requireTaskId(input));
-
-        return {
-          success: true,
-          task: formatTask(task),
-          note: "Task paused. Resume it to schedule runs again.",
-        };
-      }
-      case "scheduled_task_resume": {
-        const task = await resumeScheduledTask(requireTaskId(input));
-
-        return {
-          success: true,
-          task: formatTask(task),
-          note: `Task resumed. ${describeSchedule(task)}`,
-        };
-      }
-      case "scheduled_task_get_runs": {
-        const taskId = requireTaskId(input);
-        const runs = await getScheduledTaskRuns(taskId);
-
-        return {
-          success: true,
-          taskId,
-          count: runs.length,
-          runs,
-        };
-      }
-      default:
-        return {
-          success: false,
-          error: `'${name}' is not a scheduler tool.`,
-        };
-    }
-  } catch (error) {
-    if (error instanceof SchedulerInputError || error instanceof ScheduledPayloadError) {
-      return { success: false, error: error.message };
-    }
-
-    console.error(`Scheduler tool ${name} failed`, error);
-    return {
-      success: false,
-      error:
-        "The scheduler is unavailable. Check that Postgres is running and DATABASE_URL is set.",
-    };
+  if (!handler) {
+    return { success: false, error: `'${name}' is not a scheduler tool.` };
   }
+
+  return handler(input, ctx);
 }
 
 /**

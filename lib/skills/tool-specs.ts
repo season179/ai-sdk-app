@@ -55,76 +55,93 @@ export const skillToolSpecs: RealisticToolSpec[] = [
   },
 ];
 
-const skillSpecByName = new Map(skillToolSpecs.map((spec) => [spec.name, spec]));
+type SkillToolHandler = (input: RealisticToolInput) => Promise<unknown>;
 
-export function getSkillToolSpec(name: string) {
-  return skillSpecByName.get(name);
-}
+/**
+ * Per-tool handler bodies — the self-registering replacement for the former
+ * switch(name) dispatch. The shared "skills unavailable" error mapping is
+ * applied once when the bodies are wrapped below.
+ */
+const skillToolBodies: Record<string, SkillToolHandler> = {
+  skill_search: async (input) => {
+    const query = typeof input.query === "string" ? input.query.trim() : "";
 
-export function isSkillToolName(name: string) {
-  return skillSpecByName.has(name);
-}
+    if (!query) {
+      return { success: false, error: "query is required." };
+    }
+
+    const limit = clampLimit(input.limit);
+    const matches = await searchSkillsByDescription(query, DEFAULT_AGENT_ID, limit);
+
+    return {
+      success: true,
+      query,
+      count: matches.length,
+      matches,
+      note:
+        matches.length === 0
+          ? "No skill descriptions matched. Try broader keywords."
+          : "Call skill_get_content with a match id to load its content.",
+    };
+  },
+  skill_get_content: async (input) => {
+    // Postgres renders uuids lowercase; normalize so case-insensitive ids
+    // survive the exact string comparisons in the lookup layer.
+    const id = typeof input.id === "string" ? input.id.trim().toLowerCase() : "";
+
+    if (!id) {
+      return { success: false, error: "id is required." };
+    }
+
+    if (!isUuid(id)) {
+      return {
+        success: false,
+        error: `'${id}' is not a valid skill id. Ids are UUIDs from the <available_skills> catalog, skill_search results, or a skill's <skill_references> list.`,
+      };
+    }
+
+    const content =
+      (await activateSkill(id, DEFAULT_AGENT_ID)) ??
+      (await loadSkillReference(id, DEFAULT_AGENT_ID));
+
+    if (!content) {
+      return {
+        success: false,
+        error: `No enabled skill or reference with id '${id}' was found. It may have been disabled or deleted; use skill_search or the <available_skills> catalog to find a current id.`,
+      };
+    }
+
+    return { success: true, id, content };
+  },
+};
+
+/**
+ * The skill bodies wrapped in the shared error mapping (was the switch's
+ * surrounding try/catch): any failure logs and returns the skills-unavailable
+ * message. This wrapped map is what the central tool registry registers.
+ */
+export const skillToolHandlers: Record<string, SkillToolHandler> = Object.fromEntries(
+  Object.entries(skillToolBodies).map(([name, body]) => [
+    name,
+    async (input: RealisticToolInput) => {
+      try {
+        return await body(input);
+      } catch (error) {
+        console.error(`Skill tool ${name} failed`, error);
+        return { success: false, error: SKILLS_UNAVAILABLE_MESSAGE };
+      }
+    },
+  ]),
+);
 
 export async function executeSkillTool(name: string, input: RealisticToolInput) {
-  try {
-    switch (name) {
-      case "skill_search": {
-        const query = typeof input.query === "string" ? input.query.trim() : "";
+  const handler = skillToolHandlers[name];
 
-        if (!query) {
-          return { success: false, error: "query is required." };
-        }
-
-        const limit = clampLimit(input.limit);
-        const matches = await searchSkillsByDescription(query, DEFAULT_AGENT_ID, limit);
-
-        return {
-          success: true,
-          query,
-          count: matches.length,
-          matches,
-          note:
-            matches.length === 0
-              ? "No skill descriptions matched. Try broader keywords."
-              : "Call skill_get_content with a match id to load its content.",
-        };
-      }
-      case "skill_get_content": {
-        // Postgres renders uuids lowercase; normalize so case-insensitive ids
-        // survive the exact string comparisons in the lookup layer.
-        const id = typeof input.id === "string" ? input.id.trim().toLowerCase() : "";
-
-        if (!id) {
-          return { success: false, error: "id is required." };
-        }
-
-        if (!isUuid(id)) {
-          return {
-            success: false,
-            error: `'${id}' is not a valid skill id. Ids are UUIDs from the <available_skills> catalog, skill_search results, or a skill's <skill_references> list.`,
-          };
-        }
-
-        const content =
-          (await activateSkill(id, DEFAULT_AGENT_ID)) ??
-          (await loadSkillReference(id, DEFAULT_AGENT_ID));
-
-        if (!content) {
-          return {
-            success: false,
-            error: `No enabled skill or reference with id '${id}' was found. It may have been disabled or deleted; use skill_search or the <available_skills> catalog to find a current id.`,
-          };
-        }
-
-        return { success: true, id, content };
-      }
-      default:
-        return { success: false, error: `'${name}' is not a skill tool.` };
-    }
-  } catch (error) {
-    console.error(`Skill tool ${name} failed`, error);
-    return { success: false, error: SKILLS_UNAVAILABLE_MESSAGE };
+  if (!handler) {
+    return { success: false, error: `'${name}' is not a skill tool.` };
   }
+
+  return handler(input);
 }
 
 /** Real AI SDK tools, exposed directly whenever the agent has enabled skills. */

@@ -26,6 +26,7 @@ import {
 import { ModelPicker } from "@/components/chat/model-picker";
 import type { ChatUsageSummary } from "@/components/chat/token-usage-menu";
 import { Button } from "@/components/ui/button";
+import { appendNewMessagesById, dedupeMessagesById } from "@/lib/chat/messages";
 import { useSessionStream } from "@/lib/hooks/use-session-stream";
 import type { OpenRouterModelSummary } from "@/lib/models/openrouter";
 import type { SkillCatalogEntry } from "@/lib/skills/catalog";
@@ -150,18 +151,8 @@ export function ChatSurface({
   // mid-turn (e.g. the user asks to stop while a round is firing), the same
   // assistant turn can briefly appear from both writers before they reconcile.
   // Dedupe by id here — the single read boundary — so React always sees unique
-  // keys (a duplicate key crashes the list render). First occurrence wins to
-  // keep each message at the position where it first appeared.
-  const renderedMessages = useMemo<ChatMessage[]>(() => {
-    const seen = new Set<string>();
-    return messages.filter((message) => {
-      if (seen.has(message.id)) {
-        return false;
-      }
-      seen.add(message.id);
-      return true;
-    });
-  }, [messages]);
+  // keys (a duplicate key crashes the list render).
+  const renderedMessages = useMemo<ChatMessage[]>(() => dedupeMessagesById(messages), [messages]);
 
   const tokenUsageSummary = useMemo<ChatUsageSummary>(() => {
     const assistantMessages = renderedMessages.filter((message) => message.role === "assistant");
@@ -208,11 +199,7 @@ export function ChatSurface({
       if (incoming.length === 0) {
         return;
       }
-      setMessages((current) => {
-        const seen = new Set(current.map((message) => message.id));
-        const additions = incoming.filter((message) => message.id && !seen.has(message.id));
-        return additions.length === 0 ? current : [...current, ...additions];
-      });
+      setMessages((current) => appendNewMessagesById(current, incoming));
     },
     [setMessages],
   );

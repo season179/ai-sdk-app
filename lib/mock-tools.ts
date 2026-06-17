@@ -3188,4 +3188,19 @@ export const mockTools: ToolSet = buildSpecToolSet(toolSpecs, executeMockTool);
 
 export const mockToolSpecs = toolSpecs;
 
+/**
+ * Per-tool-name handlers for the central tool registry. Mock tools have no
+ * per-tool error handling — each handler just runs the shared mock executor
+ * bound to its tool name, mirroring the registry's flat dispatch surface.
+ */
+export const mockToolHandlers: Record<
+  string,
+  (input: RealisticToolInput) => RealisticToolOutput | undefined
+> = Object.fromEntries(
+  toolSpecs.map((spec) => [
+    spec.name,
+    (input: RealisticToolInput) => executeMockTool(spec.name, input),
+  ]),
+);
+
 export const mockToolCount = toolSpecs.length;

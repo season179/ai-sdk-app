@@ -1,6 +1,5 @@
-import { CronExpressionParser } from "cron-parser";
-
 import { TASK_QUEUE_NAME } from "@/lib/scheduler/boss";
+import { nextCronFire } from "@/lib/scheduler/cron";
 import { getPool } from "@/lib/scheduler/db";
 import { getPgBossSchema } from "@/lib/scheduler/env";
 import type { ScheduledTaskPayload } from "@/lib/scheduler/execute";
@@ -182,12 +181,7 @@ function resolveNextRun(row: UpcomingRow): Pick<UpcomingScheduledJob, "nextRunAt
 
   if (row.schedule_type === "cron" && row.cron) {
     try {
-      const next = CronExpressionParser.parse(row.cron, {
-        tz: row.timezone,
-        currentDate: row.db_now,
-      })
-        .next()
-        .toDate();
+      const next = nextCronFire(row.cron, row.timezone, row.db_now);
 
       return { nextRunAt: next.toISOString(), queued: false };
     } catch {
