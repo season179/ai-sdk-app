@@ -2,10 +2,13 @@ import "@/lib/scheduler/load-env";
 
 import type { Job } from "pg-boss";
 
+import { notifySessionAppended } from "@/lib/chat/notify";
+import { appendSessionMessages, type ChatUIMessage } from "@/lib/chat/sessions";
 import { getBoss, stopBoss, TASK_QUEUE_NAME, taskSendOptions } from "@/lib/scheduler/boss";
 import { recoverMissedRuns } from "@/lib/scheduler/catchup";
 import { closePool } from "@/lib/scheduler/db";
 import {
+  buildToolCallMessages,
   clampChainDelaySeconds,
   executeScheduledTaskPayload,
   type InstructionTaskPayload,
@@ -73,6 +76,26 @@ async function processJob(job: Job<TaskJobData>) {
       await markTaskCompleted(task.id);
     }
 
+    // Append the tool-call result into the task's home session, fail-soft.
+    // Same contract as the instruction path: the run is already durable in
+    // agent_scheduled_task_runs, so a transcript error must never escape to the
+    // outer catch (which rethrows and triggers a pg-boss retry → double-fire).
+    // homeSessionId is null only for legacy tasks predating session provenance.
+    if (task.homeSessionId) {
+      try {
+        await appendSessionMessages(
+          task.homeSessionId,
+          buildToolCallMessages(task.id, job.id, output),
+        );
+        await notifySessionAppended(task.homeSessionId);
+      } catch (appendError) {
+        console.error(
+          `Appending tool-call turn for task ${task.id} (job ${job.id}) to session ${task.homeSessionId} failed`,
+          appendError,
+        );
+      }
+    }
+
     console.log(`Completed run for task ${task.id} (job ${job.id}).`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -98,10 +121,13 @@ async function processInstructionJob(
   await markRunStarted(task.id, job.id);
 
   let verdict: InstructionVerdict | null = null;
+  let roundMessages: ChatUIMessage[] = [];
 
   try {
     const previousOutput = await getLatestCompletedRunOutput(task.id);
-    verdict = await runInstructionRound({ task, payload, previousOutput });
+    const round = await runInstructionRound({ task, payload, previousOutput });
+    verdict = round.verdict;
+    roundMessages = round.messages;
     await markRunCompleted(job.id, { round: payload.round, ...verdict });
     console.log(
       `Instruction round ${payload.round}/${payload.maxRounds} completed for task ${task.id} (job ${job.id}).`,
@@ -112,6 +138,26 @@ async function processInstructionJob(
     console.error(
       `Instruction round ${payload.round} failed for task ${task.id} (job ${job.id}): ${message}`,
     );
+  }
+
+  // Append the round's turn into the task's home session, fail-soft: the round
+  // is already durably recorded in agent_scheduled_task_runs, so a transcript
+  // error must never stall the chain (advanceInstructionChain is isolated
+  // below). homeSessionId is null only for legacy tasks predating session
+  // provenance; deterministic ids keep a catch-up re-run idempotent.
+  if (verdict && task.homeSessionId && roundMessages.length > 0) {
+    try {
+      await appendSessionMessages(task.homeSessionId, roundMessages);
+      // Push the new turn to any open tab on this session (K2). Fail-soft and
+      // inside the same try: a missed NOTIFY only delays the live update until
+      // the next reload, the turn is already durably appended.
+      await notifySessionAppended(task.homeSessionId);
+    } catch (error) {
+      console.error(
+        `Appending round ${payload.round} for task ${task.id} to session ${task.homeSessionId} failed`,
+        error,
+      );
+    }
   }
 
   try {

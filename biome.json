@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!pnpm-lock.yaml", "!db/drizzle/**"]
+    "includes": ["**", "!pnpm-lock.yaml", "!db/drizzle", "!.gnhf"]
   },
   "formatter": {
     "enabled": true,

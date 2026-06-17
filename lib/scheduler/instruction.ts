@@ -1,6 +1,7 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { jsonSchema, Output, ToolLoopAgent } from "ai";
 
+import type { ChatUIMessage } from "@/lib/chat/sessions";
 import { mockTools } from "@/lib/mock-tools";
 import { type InstructionTaskPayload, MIN_CHAIN_DELAY_SECONDS } from "@/lib/scheduler/execute";
 import type { ScheduledTask } from "@/lib/scheduler/tasks";
@@ -84,7 +85,7 @@ export async function runInstructionRound({
   task: ScheduledTask;
   payload: InstructionTaskPayload;
   previousOutput: unknown;
-}): Promise<InstructionVerdict> {
+}): Promise<{ verdict: InstructionVerdict; messages: ChatUIMessage[] }> {
   const { apiKey, model } = requireInstructionRunnerEnv();
   const openrouter = createOpenRouter({ apiKey });
 
@@ -101,7 +102,41 @@ export async function runInstructionRound({
     throw new Error("Instruction run ended without a usable verdict.");
   }
 
-  return result.output;
+  const verdict = result.output;
+
+  return { verdict, messages: buildRoundMessages(task, payload, verdict) };
+}
+
+/**
+ * Map one completed instruction round into the home-session transcript: a
+ * single assistant turn whose visible text is the round's statusUpdate, tagged
+ * with metadata.origin='scheduled' so the chat UI can render it distinctly and
+ * edit-truncation can preserve it (K3). The id is deterministic
+ * (`task-<id>-r<round>`) so a catch-up re-run is idempotent under the composite
+ * PK + onConflictDoNothing in appendSessionMessages.
+ *
+ * Deliberately minimal: ai@6 has no ModelMessage→UIMessage converter, so the
+ * agent's tool calls (result.steps) are not hand-mapped here yet — statusUpdate
+ * is the user-facing summary of the round. Enrich from steps later if the
+ * transcript needs to show the underlying tool activity.
+ */
+export function buildRoundMessages(
+  task: ScheduledTask,
+  payload: InstructionTaskPayload,
+  verdict: InstructionVerdict,
+): ChatUIMessage[] {
+  return [
+    {
+      id: `task-${task.id}-r${payload.round}`,
+      role: "assistant",
+      parts: [{ type: "text", text: verdict.statusUpdate }],
+      metadata: {
+        origin: "scheduled",
+        scheduledRound: payload.round,
+        taskId: task.id,
+      },
+    },
+  ];
 }
 
 function buildRoundPrompt(

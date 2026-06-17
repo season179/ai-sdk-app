@@ -4,6 +4,7 @@ import { AlertCircle, CalendarClock, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback } from "react";
 
+import { useChatShell } from "@/components/chat/chat-shell-context";
 import { SiteHeader, SiteHeaderStatus } from "@/components/site-header";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { POLL_FAST_MS, POLL_IDLE_MS, useSmartPoll } from "@/lib/hooks/use-smart-poll";
@@ -17,6 +18,32 @@ import { cn, fetchJson } from "@/lib/utils";
 
 /** An upcoming fire this close keeps the fast cadence. */
 const POLL_SOON_MS = 30_000;
+
+/**
+ * Opens a task's home session in the chat view. Uses selectSession (router
+ * push + transcript fetch) rather than a <Link href="/?c=…">: the shell only
+ * resolves ?c= during its one-time boot, so a post-boot link wouldn't switch
+ * sessions. Renders nothing for legacy tasks with no resolved home session.
+ */
+function TranscriptButton({ homeSessionId }: { homeSessionId: string | null }) {
+  const { selectSession } = useChatShell();
+
+  if (!homeSessionId) {
+    return null;
+  }
+
+  return (
+    <Button
+      className="h-7 px-2 text-[11px]"
+      onClick={() => selectSession(homeSessionId)}
+      size="sm"
+      type="button"
+      variant="ghost"
+    >
+      View transcript
+    </Button>
+  );
+}
 
 export function ScheduledJobsBoard() {
   const fetchOverview = useCallback(
@@ -142,6 +169,7 @@ function RunningSection({ runs }: { runs: ScheduledJobRun[] }) {
               <span className="text-[11px] tabular-nums text-muted-foreground">
                 started {formatTimestamp(run.startedAt)} · {formatRelative(run.startedAt)}
               </span>
+              <TranscriptButton homeSessionId={run.homeSessionId} />
             </div>
           ))}
         </div>
@@ -165,6 +193,7 @@ function UpcomingSection({ jobs }: { jobs: UpcomingScheduledJob[] }) {
                 <th className="px-3 py-2 font-medium">Task</th>
                 <th className="px-3 py-2 font-medium">Schedule</th>
                 <th className="px-3 py-2 font-medium">Next run</th>
+                <th className="px-3 py-2 font-medium">Transcript</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -196,6 +225,9 @@ function UpcomingSection({ jobs }: { jobs: UpcomingScheduledJob[] }) {
                       </>
                     )}
                   </td>
+                  <td className="px-3 py-2">
+                    <TranscriptButton homeSessionId={job.homeSessionId} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -223,6 +255,7 @@ function PastSection({ runs }: { runs: ScheduledJobRun[] }) {
                 <th className="px-3 py-2 font-medium">Started</th>
                 <th className="px-3 py-2 font-medium">Duration</th>
                 <th className="px-3 py-2 font-medium">Result</th>
+                <th className="px-3 py-2 font-medium">Transcript</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -251,6 +284,9 @@ function PastSection({ runs }: { runs: ScheduledJobRun[] }) {
                     <span className="line-clamp-2" title={getRunResult(run) ?? undefined}>
                       {getRunResult(run) ?? "—"}
                     </span>
+                  </td>
+                  <td className="px-3 py-2">
+                    <TranscriptButton homeSessionId={run.homeSessionId} />
                   </td>
                 </tr>
               ))}

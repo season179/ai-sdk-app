@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import { CronExpressionParser } from "cron-parser";
-import { and, desc, eq, getTableColumns, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
-import { agentScheduledTaskRuns, agentScheduledTasks } from "@/db/schema";
+import { agentChatSessions, agentScheduledTaskRuns, agentScheduledTasks } from "@/db/schema";
+import { createTaskSession } from "@/lib/chat/sessions";
 import {
   getBoss,
   TASK_QUEUE_NAME,
@@ -40,6 +41,14 @@ export type ScheduledTask = {
   timezone: string;
   status: ScheduledTaskStatus;
   jobId: string | null;
+  /** The chat that spawned this task, if any (null for standalone tasks). */
+  originSessionId: string | null;
+  /**
+   * Where this task's rounds are appended: the originating chat if it has one,
+   * else the dedicated session the task owns. Null only for legacy tasks created
+   * before sessions existed (no origin and no dedicated session).
+   */
+  homeSessionId: string | null;
   createdAt: string;
   updatedAt: string;
   lastRun: ScheduledTaskLastRun | null;
@@ -65,6 +74,11 @@ export type CreateScheduledTaskInput = {
   cron?: string;
   /** IANA timezone for cron evaluation. Defaults to DEFAULT_SCHEDULE_TIMEZONE. */
   timezone?: string;
+  /**
+   * The chat session that spawned this task. When set, rounds append into that
+   * chat; when omitted, createScheduledTask mints a dedicated home session.
+   */
+  originSessionId?: string;
 };
 
 export class SchedulerInputError extends Error {
@@ -83,7 +97,11 @@ export class ScheduledTaskNotFoundError extends SchedulerInputError {
 
 // Table columns come from $inferSelect; the last-run fields are joined in by
 // listScheduledTasks (and absent on the single-row reads, hence optional).
+// dedicatedSessionId is the id of the session the task owns (origin =
+// 'scheduled_task'), left-joined on every read so mapTaskRow can resolve the
+// home session without a second query.
 type TaskRow = typeof agentScheduledTasks.$inferSelect & {
+  dedicatedSessionId?: string | null;
   lastRunStatus?: ScheduledTaskRunStatus | null;
   lastRunStartedAt?: Date | null;
   lastRunCompletedAt?: Date | null;
@@ -115,6 +133,7 @@ export async function createScheduledTask(input: CreateScheduledTaskInput) {
       timezone: "UTC",
       status: "active",
       queueName: TASK_QUEUE_NAME,
+      originSessionId: input.originSessionId ?? null,
     });
 
     try {
@@ -157,6 +176,7 @@ export async function createScheduledTask(input: CreateScheduledTaskInput) {
       status: "active",
       queueName: TASK_QUEUE_NAME,
       scheduleKey: id,
+      originSessionId: input.originSessionId ?? null,
     });
 
     try {
@@ -167,6 +187,14 @@ export async function createScheduledTask(input: CreateScheduledTaskInput) {
     }
   } else {
     throw new SchedulerInputError("scheduleType must be 'once' or 'cron'.");
+  }
+
+  // A task spawned from a chat lives in that chat; a standalone task (API / tasks
+  // UI) gets its own dedicated home session. Created after the boss job is wired
+  // so a scheduling failure (which deletes the task) never strands a session
+  // whose FK would block the rollback delete.
+  if (!input.originSessionId) {
+    await createTaskSession(id, title);
   }
 
   return requireScheduledTask(id);
@@ -279,6 +307,7 @@ export async function listScheduledTasks() {
   const rows = await db
     .select({
       ...getTableColumns(agentScheduledTasks),
+      dedicatedSessionId: agentChatSessions.id,
       lastRunStatus: latestRun.status,
       lastRunStartedAt: latestRun.startedAt,
       lastRunCompletedAt: latestRun.completedAt,
@@ -286,6 +315,13 @@ export async function listScheduledTasks() {
       lastRunError: latestRun.error,
     })
     .from(agentScheduledTasks)
+    .leftJoin(
+      agentChatSessions,
+      and(
+        eq(agentChatSessions.taskId, agentScheduledTasks.id),
+        isNull(agentChatSessions.deletedAt),
+      ),
+    )
     .leftJoinLateral(latestRun, sql`true`)
     .orderBy(desc(agentScheduledTasks.createdAt))
     .limit(100);
@@ -295,8 +331,18 @@ export async function listScheduledTasks() {
 
 export async function getScheduledTaskById(id: string) {
   const rows = await getDb()
-    .select()
+    .select({
+      ...getTableColumns(agentScheduledTasks),
+      dedicatedSessionId: agentChatSessions.id,
+    })
     .from(agentScheduledTasks)
+    .leftJoin(
+      agentChatSessions,
+      and(
+        eq(agentChatSessions.taskId, agentScheduledTasks.id),
+        isNull(agentChatSessions.deletedAt),
+      ),
+    )
     .where(eq(agentScheduledTasks.id, id));
 
   return rows[0] ? mapTaskRow(rows[0]) : null;
@@ -519,6 +565,11 @@ function parseTimezone(value: string | undefined) {
 }
 
 function mapTaskRow(row: TaskRow): ScheduledTask {
+  // Home = the originating chat if there is one, else the task's dedicated
+  // session (left-joined on read). Standalone tasks always have the latter from
+  // createScheduledTask; only legacy rows predating sessions resolve to null.
+  const homeSessionId = row.originSessionId ?? row.dedicatedSessionId ?? null;
+
   return {
     id: row.id,
     title: row.title,
@@ -529,6 +580,8 @@ function mapTaskRow(row: TaskRow): ScheduledTask {
     timezone: row.timezone,
     status: row.status,
     jobId: row.jobId,
+    originSessionId: row.originSessionId ?? null,
+    homeSessionId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     lastRun: row.lastRunStatus

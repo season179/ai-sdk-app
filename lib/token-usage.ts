@@ -107,6 +107,15 @@ export type ChatMessageMetadata = {
   tokenUsage?: TokenUsage;
   tokenUsageBreakdown?: TokenUsageBreakdown;
   toolSearch?: ToolSearchMetadata;
+  /**
+   * Marks a turn appended by the scheduled-task worker (vs. a normal chat turn).
+   * The UI renders these distinctly and edit-truncation can preserve them (K3).
+   */
+  origin?: "scheduled";
+  /** 1-based round number that produced this scheduled turn. */
+  scheduledRound?: number;
+  /** The scheduled task that produced this turn. */
+  taskId?: string;
 };
 
 export function toTokenUsage(usage: LanguageModelUsage): TokenUsage {

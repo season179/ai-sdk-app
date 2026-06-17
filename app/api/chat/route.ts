@@ -7,11 +7,18 @@ import {
   ToolLoopAgent,
   type UIMessage,
 } from "ai";
-
-import { saveChatSession, sessionNeedsTitle, setSessionTitleIfUnset } from "@/lib/chat/sessions";
+import { notifySessionAppended } from "@/lib/chat/notify";
+import {
+  appendSessionMessages,
+  getChatSession,
+  getMessageOrdinal,
+  sessionNeedsTitle,
+  setSessionTitleIfUnset,
+  truncateConversationAfter,
+} from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
-import { schedulerTools } from "@/lib/scheduler/tool-specs";
+import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -33,8 +40,13 @@ import { isUuid } from "@/lib/utils";
 
 export const maxDuration = 30;
 
+type ChatUIMessage = UIMessage<ChatMessageMetadata>;
+
+/** The submit/regenerate triggers useChat sends in ai@6 (verify per SDK version). */
+type ChatTrigger = "submit-message" | "regenerate-message";
+
 /** Concatenated visible text of a UI message; used to seed the title model. */
-function messageText(message: UIMessage<ChatMessageMetadata> | undefined): string {
+function messageText(message: ChatUIMessage | undefined): string {
   if (!message) {
     return "";
   }
@@ -98,23 +110,74 @@ function configErrorResponse(error: MissingEnvironmentVariableError) {
   );
 }
 
-export async function POST(req: Request) {
-  let messages: UIMessage<ChatMessageMetadata>[];
-  // The persisted chat session id. useChat({ id }) sends it in the default
-  // transport body. Absent => ephemeral (no persistence). Malformed => 400.
-  let sessionId: string | null = null;
+/**
+ * Reconstruct the agent's run input from the durable transcript (the client now
+ * sends only the newest message). Two shapes:
+ *
+ * - submit-message: persist the new user turn up front so it survives a failed
+ *   stream, then run over history + that turn. The assistant reply is appended
+ *   later in onFinish.
+ * - regenerate-message: fork off the client's last kept message — the SDK has
+ *   already sliced everything from the regenerated turn onward — by truncating
+ *   the transcript strictly after that message's ordinal, then re-run on the
+ *   surviving history. preserveScheduled (K3) keeps interleaved worker turns.
+ *
+ * Without a sessionId (ephemeral chat) there's no transcript to load, so the
+ * single incoming message is the whole run input.
+ */
+async function buildRunMessages({
+  sessionId,
+  trigger,
+  incomingMessage,
+}: {
+  sessionId: string | null;
+  trigger: ChatTrigger;
+  incomingMessage: ChatUIMessage | null;
+}): Promise<ChatUIMessage[]> {
+  if (!sessionId) {
+    return incomingMessage ? [incomingMessage] : [];
+  }
 
-  try {
-    const body: { messages?: UIMessage<ChatMessageMetadata>[]; id?: unknown } = await req.json();
-
-    if (!Array.isArray(body.messages)) {
-      return Response.json(
-        { error: "Request body must include a messages array." },
-        { status: 400 },
-      );
+  if (trigger === "regenerate-message") {
+    if (incomingMessage) {
+      const forkOrdinal = await getMessageOrdinal(sessionId, incomingMessage.id);
+      if (forkOrdinal != null) {
+        await truncateConversationAfter(sessionId, forkOrdinal, { preserveScheduled: true });
+      }
     }
 
-    messages = body.messages;
+    const history = (await getChatSession(sessionId))?.messages ?? [];
+    return history.length > 0 ? history : incomingMessage ? [incomingMessage] : [];
+  }
+
+  const priorHistory = (await getChatSession(sessionId))?.messages ?? [];
+
+  if (incomingMessage) {
+    await appendSessionMessages(sessionId, [incomingMessage], { createIfMissing: true });
+    return [...priorHistory, incomingMessage];
+  }
+
+  return priorHistory;
+}
+
+export async function POST(req: Request) {
+  // The contract is server-authoritative + append-only: the client sends only
+  // the newest message (plus the session id, trigger, and — on regenerate — the
+  // fork message id). The server reconstructs history from the durable
+  // transcript and appends, so a second writer (the scheduler) never clobbers.
+  let incomingMessage: ChatUIMessage | null = null;
+  // The persisted chat session id. useChat({ id }) sends it via the transport.
+  // Absent => ephemeral (no persistence). Malformed => 400.
+  let sessionId: string | null = null;
+  let trigger: ChatTrigger = "submit-message";
+
+  try {
+    const body: {
+      id?: unknown;
+      message?: unknown;
+      trigger?: unknown;
+      messageId?: unknown;
+    } = await req.json();
 
     if (typeof body.id === "string") {
       if (!isUuid(body.id)) {
@@ -127,6 +190,27 @@ export async function POST(req: Request) {
     } else {
       console.warn("Chat request has no session id; streaming without persistence.");
     }
+
+    if (body.trigger === "regenerate-message") {
+      trigger = "regenerate-message";
+    } else if (body.trigger != null && body.trigger !== "submit-message") {
+      return Response.json({ error: "Unknown chat trigger." }, { status: 400 });
+    }
+
+    if (body.message && typeof body.message === "object") {
+      incomingMessage = body.message as ChatUIMessage;
+    }
+
+    if (trigger === "submit-message" && !incomingMessage) {
+      return Response.json(
+        { error: "Request body must include the new message." },
+        { status: 400 },
+      );
+    }
+
+    // body.messageId (the regenerate target) is accepted but unused: useChat
+    // leaves it undefined when regenerating the last turn, so we fork off the
+    // client's last kept message (incomingMessage) instead, which is always set.
   } catch {
     return Response.json({ error: "Request body must be valid JSON." }, { status: 400 });
   }
@@ -138,18 +222,27 @@ export async function POST(req: Request) {
     const toolExposureMode = resolveToolExposureMode(process.env.TOOL_EXPOSURE_MODE);
     const toolSearchTrace: ToolSearchTraceEvent[] = [];
     const requestEstimates: RequestTokenEstimate[] = [];
+
+    // Reconstruct the run input server-side from the durable transcript.
+    const fullMessages = await buildRunMessages({ sessionId, trigger, incomingMessage });
+
     // Skill tools and the skills prompt ship together: both come from the same
     // catalog load, so the model never sees tools without their context.
-    // User-activated skills are injected per request because the client resends
-    // the raw transcript; injectUserActivatedSkills fails soft like the catalog.
+    // User-activated skills are injected per request over the reconstructed
+    // transcript; injectUserActivatedSkills is pure and fails soft like the catalog.
     const [skillCatalogBlock, uiMessages] = await Promise.all([
       loadSkillCatalogBlock(),
-      injectUserActivatedSkills(messages),
+      injectUserActivatedSkills(fullMessages),
     ]);
+    // Bind the originating chat into scheduler tools so a task created here
+    // appends its rounds back into this session (Phase 2.3). Carried through
+    // both exposure paths: the direct toolset (mode=all) and the deferred
+    // tool_call path (default search mode).
+    const schedulerContext = { originSessionId: sessionId };
     const tools = {
       ...(toolExposureMode === "all"
-        ? { ...mockTools, ...schedulerTools }
-        : createToolSearchTools(toolSearchTrace)),
+        ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
+        : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
     };
     const instructions = [
@@ -214,23 +307,27 @@ export async function POST(req: Request) {
         }
 
         try {
-          // Persist the RAW transcript (not the skill-injected uiMessages) plus
-          // the assistant reply. injectUserActivatedSkills is pure, so `messages`
-          // is still the clean, user-visible array. responseMessage carries its
-          // generateMessageId id and the messageMetadata token usage.
-          const persisted = [...messages, responseMessage];
-          await saveChatSession({ sessionId, messages: persisted });
+          // Append-only: the user turn was already persisted before the stream
+          // (submit) or already lives in the transcript (regenerate), so only
+          // the assistant reply is new. responseMessage carries its
+          // generateMessageId id and the messageMetadata token usage; the
+          // composite-PK onConflictDoNothing makes a re-run idempotent.
+          await appendSessionMessages(sessionId, [responseMessage]);
+          // Push the assistant turn to any other open tab on this session (K2).
+          // The tab that submitted already has it locally and dedupes by id.
+          await notifySessionAppended(sessionId);
 
           // Title only the first completed assistant reply, and only while the
-          // session is still untitled. The sessionNeedsTitle precheck skips the
-          // paid, stream-blocking title-model call on regenerate (where
-          // assistantCount is still 1 but a title already exists);
+          // session is still untitled. assistantCount = assistants already in the
+          // run input + this new reply. The sessionNeedsTitle precheck skips the
+          // paid, stream-blocking title-model call once a title exists;
           // setSessionTitleIfUnset remains the atomic write-time guard.
-          const assistantCount = persisted.filter((message) => message.role === "assistant").length;
+          const assistantCount =
+            fullMessages.filter((message) => message.role === "assistant").length + 1;
 
           if (assistantCount === 1 && (await sessionNeedsTitle(sessionId))) {
             const title = await generateSessionTitle({
-              firstUserText: messageText(persisted.find((message) => message.role === "user")),
+              firstUserText: messageText(fullMessages.find((message) => message.role === "user")),
               firstAssistantText: messageText(responseMessage),
             });
 

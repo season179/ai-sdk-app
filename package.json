@@ -8,8 +8,16 @@
     "pnpm": ">=11 <12"
   },
   "devEngines": {
-    "runtime": { "name": "node", "version": ">=24", "onFail": "error" },
-    "packageManager": { "name": "pnpm", "version": ">=11 <12", "onFail": "error" }
+    "runtime": {
+      "name": "node",
+      "version": ">=24",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "pnpm",
+      "version": ">=11 <12",
+      "onFail": "error"
+    }
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
