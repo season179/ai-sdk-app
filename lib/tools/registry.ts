@@ -1,15 +1,15 @@
 import {
-  executeMockTool,
+  mockToolHandlers,
   mockToolSpecs,
   type RealisticToolInput,
   type RealisticToolSpec,
 } from "@/lib/mock-tools";
 import {
-  executeSchedulerTool,
   type SchedulerToolContext,
+  schedulerToolHandlers,
   schedulerToolSpecs,
 } from "@/lib/scheduler/tool-specs";
-import { executeSkillTool, skillToolSpecs } from "@/lib/skills/tool-specs";
+import { skillToolHandlers, skillToolSpecs } from "@/lib/skills/tool-specs";
 
 /**
  * Context threaded through tool execution. Only scheduler tools consume it
@@ -19,17 +19,23 @@ import { executeSkillTool, skillToolSpecs } from "@/lib/skills/tool-specs";
 export type ToolExecutionContext = SchedulerToolContext;
 
 /**
- * A tool provider contributes its specs plus a single executor that dispatches
- * by tool name. Each provider keeps its own internal name dispatch and error
- * handling; the registry only needs the spec list and the entry point.
+ * A single tool's executor, dispatched by the registry once a tool name has
+ * been resolved. Each provider supplies one handler per tool name; the handler
+ * already owns the provider's per-tool error handling.
+ */
+export type ToolHandler = (
+  input: RealisticToolInput,
+  ctx: ToolExecutionContext,
+) => unknown | Promise<unknown>;
+
+/**
+ * A tool provider contributes its specs plus a handler map keyed by tool name.
+ * The registry folds the specs and handlers into one flat per-tool dispatch
+ * surface — no per-provider re-dispatch.
  */
 export type ToolProvider = {
   specs: RealisticToolSpec[];
-  execute: (
-    name: string,
-    input: RealisticToolInput,
-    ctx: ToolExecutionContext,
-  ) => unknown | Promise<unknown>;
+  handlers: Record<string, ToolHandler>;
 };
 
 export type ToolRegistry = {
@@ -45,15 +51,16 @@ export type ToolRegistry = {
 };
 
 /**
- * Folds the providers into one lookup/execute surface so callers route by tool
- * name through a single registry instead of a per-provider fallback chain. Tool
- * names are unique across providers; a collision is a wiring bug and throws at
- * module load rather than silently shadowing one provider with another.
+ * Folds the providers into one flat per-tool dispatch surface so callers route
+ * by tool name through a single registry instead of a per-provider fallback
+ * chain. Tool names are unique across providers; a collision — or a spec with
+ * no registered handler — is a wiring bug and throws at module load rather than
+ * silently shadowing or dropping a tool.
  */
 export function createToolRegistry(providers: ToolProvider[]): ToolRegistry {
   const specs: RealisticToolSpec[] = [];
   const specByName = new Map<string, RealisticToolSpec>();
-  const executeByName = new Map<string, ToolProvider["execute"]>();
+  const executeByName = new Map<string, ToolHandler>();
 
   for (const provider of providers) {
     for (const spec of provider.specs) {
@@ -61,9 +68,15 @@ export function createToolRegistry(providers: ToolProvider[]): ToolRegistry {
         throw new Error(`Duplicate tool name '${spec.name}' registered in the tool registry.`);
       }
 
+      const handler = provider.handlers[spec.name];
+
+      if (!handler) {
+        throw new Error(`Tool '${spec.name}' has a spec but no registered handler.`);
+      }
+
       specs.push(spec);
       specByName.set(spec.name, spec);
-      executeByName.set(spec.name, provider.execute);
+      executeByName.set(spec.name, handler);
     }
   }
 
@@ -71,7 +84,7 @@ export function createToolRegistry(providers: ToolProvider[]): ToolRegistry {
     specs,
     getSpec: (name) => specByName.get(name),
     has: (name) => specByName.has(name),
-    execute: (name, input, ctx) => executeByName.get(name)?.(name, input, ctx),
+    execute: (name, input, ctx) => executeByName.get(name)?.(input, ctx),
   };
 }
 
@@ -81,12 +94,9 @@ export function createToolRegistry(providers: ToolProvider[]): ToolRegistry {
  * ordering.
  */
 const toolProviders: ToolProvider[] = [
-  { specs: mockToolSpecs, execute: (name, input) => executeMockTool(name, input) },
-  {
-    specs: schedulerToolSpecs,
-    execute: (name, input, ctx) => executeSchedulerTool(name, input, ctx),
-  },
-  { specs: skillToolSpecs, execute: (name, input) => executeSkillTool(name, input) },
+  { specs: mockToolSpecs, handlers: mockToolHandlers },
+  { specs: schedulerToolSpecs, handlers: schedulerToolHandlers },
+  { specs: skillToolSpecs, handlers: skillToolHandlers },
 ];
 
 /** Single registry the deferred tool_call path dispatches through. */
