@@ -16,7 +16,7 @@ const noFlashScript = `(() => {
   try {
     const stored = localStorage.getItem("theme");
     const system = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const dark = stored ? stored === "dark" : system;
+    const dark = stored === "dark" || (stored !== "light" && system);
     document.documentElement.classList.toggle("dark", dark);
   } catch {}
 })();`;
