@@ -342,7 +342,7 @@ No streaming endpoint exists under `app/api/sessions/` today (only GET/PATCH/DEL
 **3.3 — Distinct rendering + entry points.**
 
 - Render `metadata.origin === 'scheduled'` turns with a visible marker ("Ran scheduled task · round N") in the chat message renderer (`components/ai-elements/message.tsx` or wherever turns render).
-- On the tasks board (`components/scheduled-jobs-board.tsx` / `components/tasks-panel.tsx`), add **"View transcript"** → open the home session via `selectSession(task.homeSessionId)` (`components/app-shell.tsx:169`) or navigate to `/?c=${task.homeSessionId}` (the `?c=` param is handled at `app-shell.tsx:114`).
+- On the tasks board (`components/scheduled-jobs-board.tsx`), add **"View transcript"** → open the home session via `selectSession(task.homeSessionId)` (`components/app-shell.tsx:169`) or navigate to `/?c=${task.homeSessionId}` (the `?c=` param is handled at `app-shell.tsx:114`).
 
 ---
 
@@ -385,5 +385,5 @@ No streaming endpoint exists under `app/api/sessions/` today (only GET/PATCH/DEL
 - `lib/scheduler/tool-specs.ts` — `schedulerTools` → `createSchedulerTools(ctx)` factory; thread `originSessionId` into `createScheduledTask`.
 - `workers/scheduled-tasks.ts` — append round turns fail-soft; `notifySessionAppended`; recurring bound.
 - `app/api/sessions/[id]/stream/route.ts` — **new** SSE endpoint (LISTEN/NOTIFY).
-- `components/scheduled-jobs-board.tsx` / `components/tasks-panel.tsx` — "View transcript" → `selectSession(homeSessionId)`.
+- `components/scheduled-jobs-board.tsx` — "View transcript" → `selectSession(homeSessionId)`.
 - `components/ai-elements/message.tsx` (or chat renderer) — distinct rendering for `metadata.origin === 'scheduled'`.
