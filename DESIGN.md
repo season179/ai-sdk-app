@@ -7,7 +7,11 @@ serves the task; familiarity and consistency beat novelty. Calm, precise, eviden
 
 Tokens live in `app/globals.css` as OKLCH custom properties, mapped to Tailwind via `@theme inline`.
 Strategy: **restrained** — tinted cool neutrals plus one teal accent used only for primary actions,
-selection, and live-state indicators. Never decorative color.
+selection, and live-state indicators. Never decorative color. Every token has a light value in
+`:root` and a contrast-tuned dark value under `.dark`; the toggle in the sidebar
+(`components/theme-toggle.tsx`) cycles light → dark → system, and next-themes persists the choice
+under the `theme` localStorage key. A pre-paint script in `layout.tsx` sets the `.dark` class from
+the stored preference (or the OS setting on first visit) so the correct theme renders without a flash.
 
 | Token | Value | Use |
 | --- | --- | --- |
@@ -20,6 +24,16 @@ selection, and live-state indicators. Never decorative color.
 | `--input` | `oklch(0.83 0.012 245)` | Form control borders (darker than `--border`) |
 | `--primary` | `oklch(0.55 0.115 178)` | Teal accent: primary buttons, enabled dots, focus rings |
 | `--destructive` | `oklch(0.49 0.17 27)` | Delete actions, error text and borders |
+| `--chart-tools` | `oklch(0.7 0.165 60)` | Categorical data-viz: "tools" bars and legend dots |
+| `--chart-messages` | `oklch(0.55 0.17 240)` | Categorical data-viz: "messages" bars and legend dots |
+| `--chart-system` | `oklch(0.5 0.21 305)` | Categorical data-viz: "system prompt" bars and legend dots |
+| `--shadow-pop` | `0 18px 55px -34px oklch(0.28 0.02 245 / 0.45)` | Drop shadow for floating layers (popovers, menus) |
+
+Dark values mirror the light ramp's hues (245° blue-gray neutrals, 178° teal, 25° destructive) but
+re-tune luminance for contrast — body and `muted-foreground` text both clear 4.5:1 on the dark
+`--background`/`--card`. The categorical chart colors and `--shadow-pop` are re-tuned per theme too:
+the dark muted track needs brighter categories to clear 3:1, and the slate shadow switches to a
+black base so it reads as depth rather than haze. The table above lists the light `:root` values.
 
 Rules:
 
@@ -75,8 +89,9 @@ generous between sections (`mt-6`–`mt-10`, `gap-10` between panes).
 
 `--radius: 0.5rem`. `rounded-md` for controls and list rows, `rounded-lg` for panels, `rounded-full`
 for badges and dots only. Elevation is borders-first: hairline `border-border` separates surfaces;
-shadows are reserved for floating layers (menus, scroll-to-bottom button). Never border + large
-shadow on the same element.
+shadows are reserved for floating layers (menus, scroll-to-bottom button), applied via the
+`shadow-[var(--shadow-pop)]` token so they re-tune per theme. Never border + large shadow on the
+same element.
 
 ## Components
 
@@ -93,6 +108,9 @@ Source of truth: `components/ui/button.tsx` (cva variants), `components/site-hea
   `components/site-nav.tsx`.
 - **Header status** (`SiteHeaderStatus`): teal dot + short runtime text in the header right
   cluster; the dot pulses (`animate-pulse`) while the page is actively working.
+- **Theme toggle** (`components/theme-toggle.tsx`): sidebar footer button that cycles
+  light → dark → system, showing Sun/Moon/Monitor plus a label. It renders a neutral placeholder
+  until mount so server/client markup stays identical and the icon never flashes the wrong glyph.
 - **Field**: label + optional hint + control + optional counter (top-right, `tabular-nums`) +
   inline error (`text-[11px] text-destructive`, `role="alert"`) below the control.
 - **Badge**: `rounded-full px-2 py-0.5 text-[10px] font-medium`, tinted per state.
