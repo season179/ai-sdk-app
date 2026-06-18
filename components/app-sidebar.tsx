@@ -151,7 +151,7 @@ export function AppSidebar() {
 
           <div className="mx-3 my-2 border-t border-border/70" />
 
-          <div className={cn("px-2 pb-2", open && "space-y-1")}>
+          <div className="px-2 pb-2">
             <Button
               aria-label="New chat"
               className={open ? "w-full justify-start gap-2" : "mx-auto size-9"}
@@ -165,7 +165,6 @@ export function AppSidebar() {
               <Plus className="size-4" />
               {open ? "New chat" : null}
             </Button>
-            <ThemeToggle withLabel={open} />
           </div>
 
           {/* The session list only earns its room in the full panel; the rail
@@ -201,7 +200,19 @@ export function AppSidebar() {
                 ))
               )}
             </nav>
-          ) : null}
+          ) : (
+            // Docked rail still needs something to take the flex space the chat
+            // list occupies when expanded, so the theme control stays pinned to
+            // the bottom rather than floating up under "New chat".
+            <div className="min-h-0 flex-1" />
+          )}
+
+          {/* Footer control. Pinned to the bottom by the flex-1 region above;
+              the segmented selector needs the full panel width, so the rail gets
+              the single cycling icon instead. */}
+          <div className="border-t border-border/70 px-2 py-2">
+            <ThemeToggle withLabel={open} />
+          </div>
         </aside>
       </div>
     </>

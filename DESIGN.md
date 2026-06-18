@@ -8,8 +8,8 @@ serves the task; familiarity and consistency beat novelty. Calm, precise, eviden
 Tokens live in `app/globals.css` as OKLCH custom properties, mapped to Tailwind via `@theme inline`.
 Strategy: **restrained** — tinted cool neutrals plus one teal accent used only for primary actions,
 selection, and live-state indicators. Never decorative color. Every token has a light value in
-`:root` and a contrast-tuned dark value under `.dark`; the toggle in the sidebar
-(`components/theme-toggle.tsx`) cycles light → dark → system, and next-themes persists the choice
+`:root` and a contrast-tuned dark value under `.dark`; the segmented selector in the sidebar
+(`components/theme-toggle.tsx`) picks Light / Dark / System, and next-themes persists the choice
 under the `theme` localStorage key. A pre-paint script in `layout.tsx` sets the `.dark` class from
 the stored preference (or the OS setting on first visit) so the correct theme renders without a flash.
 
@@ -108,8 +108,10 @@ Source of truth: `components/ui/button.tsx` (cva variants), `components/site-hea
   `components/site-nav.tsx`.
 - **Header status** (`SiteHeaderStatus`): teal dot + short runtime text in the header right
   cluster; the dot pulses (`animate-pulse`) while the page is actively working.
-- **Theme toggle** (`components/theme-toggle.tsx`): sidebar footer button that cycles
-  light → dark → system, showing Sun/Moon/Monitor plus a label. It renders a neutral placeholder
+- **Theme selector** (`components/theme-toggle.tsx`): segmented `Light | Dark | System` control in
+  the sidebar footer — the active segment reads as selection (solid `bg-background` on the muted
+  track) rather than a cycling mystery button, so every option is one tap. Collapses to a single
+  cycling icon when the rail is docked (too narrow for three segments). Renders a neutral placeholder
   until mount so server/client markup stays identical and the icon never flashes the wrong glyph.
 - **Field**: label + optional hint + control + optional counter (top-right, `tabular-nums`) +
   inline error (`text-[11px] text-destructive`, `role="alert"`) below the control.
