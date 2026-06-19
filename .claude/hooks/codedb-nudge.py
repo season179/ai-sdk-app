@@ -21,9 +21,7 @@ NUDGE = (
     "codedb is the primary code-intelligence tool here. Before grepping/finding "
     "raw files, use codedb MCP tools: `codedb_search` (trigram full-text/regex), "
     "`codedb_word` (identifier lookup), `codedb_symbol` (definitions), "
-    "`codedb_callers`. Use graphify (`graphify query/path/explain`) only for "
-    "architecture or cross-cutting/conceptual questions. Grep raw files only to "
-    "modify/debug specific lines."
+    "`codedb_callers`. Grep raw files only to modify/debug specific lines."
 )
 
 

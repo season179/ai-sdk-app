@@ -1,7 +1,7 @@
 ## Code intelligence
 
 This project uses **codedb** (MCP server) as the primary tool for navigating and searching the
-codebase, and **graphify** (knowledge graph at graphify-out/) for architecture-level questions.
+codebase.
 
 ### codedb — default for all code lookups
 Use codedb MCP tools first; they are sub-millisecond and token-cheap:
@@ -15,16 +15,6 @@ Use codedb MCP tools first; they are sub-millisecond and token-cheap:
 - `codedb_tree`, `codedb_ls`, `codedb_glob`, `codedb_read` — navigation and reading
 
 Reach for raw `Read`/`grep` only to modify or debug specific lines after codedb has located them.
-
-### graphify — architecture and cross-cutting questions only
-Use graphify when the question is conceptual/architectural rather than a precise lookup
-(e.g. "what are the major subsystems", "how does auth relate to billing", surprising cross-file
-connections):
-- `graphify query "<question>"` — scoped subgraph
-- `graphify path "<A>" "<B>"` — relationship between two concepts
-- `graphify explain "<concept>"` — plain-language explanation of a node
-- Read graphify-out/GRAPH_REPORT.md only for a broad architecture review.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
 ## Database
 
