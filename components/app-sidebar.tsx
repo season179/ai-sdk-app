@@ -25,6 +25,8 @@ const NAV_ITEMS = [
   { href: "/", icon: MessageSquare, label: "Chat" },
   { href: "/tasks", icon: CalendarClock, label: "Scheduled tasks" },
   { href: "/skills", icon: BookOpen, label: "Skills" },
+  { href: "/proposals", icon: Check, label: "Review proposals" },
+  { href: "/memories", icon: Pencil, label: "Memories" },
 ] as const;
 
 const MOBILE_QUERY = "(max-width: 639px)";

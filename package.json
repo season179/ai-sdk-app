@@ -20,7 +20,7 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "dev": "concurrently --names app,worker --prefix-colors blue,magenta \"portless\" \"pnpm run worker:scheduled-tasks\"",
+    "dev": "concurrently --names app,worker,review --prefix-colors blue,magenta,cyan \"portless\" \"pnpm run worker:scheduled-tasks\" \"pnpm run worker:turn-review\"",
     "dev:app": "next dev",
     "dev:tunnel": "portless",
     "build": "next build",
@@ -29,7 +29,8 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/db-migrate.ts",
-    "worker:scheduled-tasks": "tsx workers/scheduled-tasks.ts"
+    "worker:scheduled-tasks": "tsx workers/scheduled-tasks.ts",
+    "worker:turn-review": "tsx workers/turn-review.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "3.0.199",

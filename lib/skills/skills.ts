@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
-import { getDb } from "@/db";
+import { type AppDbClient, getDb } from "@/db";
 import { agentSkills } from "@/db/schema";
 import {
   validateDescription,
@@ -131,8 +131,12 @@ export async function listSkills(agentId: string = DEFAULT_AGENT_ID) {
   return skills;
 }
 
-export async function getSkillById(id: string, agentId: string = DEFAULT_AGENT_ID) {
-  const rows = await getDb()
+export async function getSkillById(
+  id: string,
+  agentId: string = DEFAULT_AGENT_ID,
+  db: AppDbClient = getDb(),
+) {
+  const rows = await db
     .select(skillColumns)
     .from(agentSkills)
     .where(
@@ -306,7 +310,7 @@ export async function searchSkillsByDescription(
   }));
 }
 
-export async function createSkill(input: CreateSkillInput) {
+export async function createSkill(input: CreateSkillInput, db: AppDbClient = getDb()) {
   const name = parseName(input.name);
   const description = parseDescription(input.description);
   const body = parseBody(input.body);
@@ -315,7 +319,7 @@ export async function createSkill(input: CreateSkillInput) {
   const id = randomUUID();
 
   try {
-    await getDb().transaction(async (tx) => {
+    await runInTransaction(db, async (tx) => {
       await tx.insert(agentSkills).values({
         id,
         agentId: DEFAULT_AGENT_ID,
@@ -341,11 +345,11 @@ export async function createSkill(input: CreateSkillInput) {
     throw translateDbError(error, name);
   }
 
-  return requireSkill(id);
+  return requireSkill(id, db);
 }
 
-export async function updateSkill(id: string, input: UpdateSkillInput) {
-  const existing = await requireSkill(id);
+export async function updateSkill(id: string, input: UpdateSkillInput, db: AppDbClient = getDb()) {
+  const existing = await requireSkill(id, db);
 
   const name = input.name === undefined ? existing.name : parseName(input.name);
   const description =
@@ -355,7 +359,7 @@ export async function updateSkill(id: string, input: UpdateSkillInput) {
   const references = input.references?.map(parseReferenceInput);
 
   try {
-    await getDb().transaction(async (tx) => {
+    await runInTransaction(db, async (tx) => {
       await tx
         .update(agentSkills)
         .set({ name, description, body, isEnabled, updatedAt: sql`now()` })
@@ -424,7 +428,7 @@ export async function updateSkill(id: string, input: UpdateSkillInput) {
     throw translateDbError(error, name);
   }
 
-  return requireSkill(id);
+  return requireSkill(id, db);
 }
 
 /** Soft delete only: stamps deleted_at on the skill and its live references. */
@@ -451,8 +455,20 @@ function escapeLikePattern(value: string) {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
 
-async function requireSkill(id: string) {
-  const skill = await getSkillById(id);
+async function runInTransaction(
+  db: AppDbClient,
+  fn: (tx: AppDbClient) => Promise<void>,
+): Promise<void> {
+  if (db === getDb()) {
+    await db.transaction(fn);
+    return;
+  }
+
+  await fn(db);
+}
+
+async function requireSkill(id: string, db: AppDbClient = getDb()) {
+  const skill = await getSkillById(id, DEFAULT_AGENT_ID, db);
 
   if (!skill) {
     throw new SkillNotFoundError(id);

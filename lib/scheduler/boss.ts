@@ -4,6 +4,8 @@ import { getPgBossSchema, requireDatabaseUrl } from "@/lib/scheduler/env";
 
 export const TASK_QUEUE_NAME = "agent-task-run";
 export const TASK_DLQ_NAME = "agent-task-run-dlq";
+export const TURN_REVIEW_QUEUE_NAME = "agent-turn-review";
+export const TURN_REVIEW_DLQ_NAME = "agent-turn-review-dlq";
 
 /**
  * Every job on the task queue must carry the task id as its singleton key.
@@ -18,6 +20,11 @@ export function taskSendOptions(taskId: string) {
 
 export function taskScheduleOptions(taskId: string, timezone: string) {
   return { key: taskId, tz: timezone, ...taskSendOptions(taskId) };
+}
+
+/** One pending review per session is enough; a later turn supersedes queued noise. */
+export function turnReviewSendOptions(sessionId: string) {
+  return { singletonKey: sessionId };
 }
 
 type BossGlobal = {
@@ -50,6 +57,9 @@ async function startAndPrepare(boss: PgBoss) {
   await boss.createQueue(TASK_DLQ_NAME, {
     retentionSeconds: 14 * 24 * 60 * 60,
   });
+  await boss.createQueue(TURN_REVIEW_DLQ_NAME, {
+    retentionSeconds: 14 * 24 * 60 * 60,
+  });
   // Queues created before this option existed keep 'standard' (createQueue
   // is ON CONFLICT DO NOTHING); the worker's catch-up reconciler migrates
   // them once their schedules carry singleton keys.
@@ -60,6 +70,14 @@ async function startAndPrepare(boss: PgBoss) {
     retryBackoff: true,
     retryDelay: 5,
     retryLimit: 2,
+  });
+  await boss.createQueue(TURN_REVIEW_QUEUE_NAME, {
+    deadLetter: TURN_REVIEW_DLQ_NAME,
+    expireInSeconds: 5 * 60,
+    policy: "stately",
+    retryBackoff: true,
+    retryDelay: 5,
+    retryLimit: 1,
   });
 
   return boss;

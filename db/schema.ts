@@ -26,6 +26,18 @@ export type ScheduledTaskStatus = "active" | "paused" | "completed" | "cancelled
 export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "skipped";
 export type SkillType = "skill" | "reference";
 export type ChatMessageRole = "user" | "assistant" | "system";
+export type MemoryKind = "preference" | "fact" | "correction" | "persona";
+export type MemorySource = "user" | "review" | "curated";
+export type MemoryStatus = "approved" | "archived";
+export type ReviewProposalKind =
+  | "memory_create"
+  | "memory_edit"
+  | "memory_archive"
+  | "skill_create"
+  | "skill_edit"
+  | "skill_toggle";
+export type ReviewProposalStatus = "pending" | "rejected" | "applied" | "failed";
+export type ReviewProposalPayload = Record<string, unknown>;
 // A session is either a normal chat or a dedicated home session a scheduled
 // task owns. The CHECK constraint on agent_chat_sessions is the DB-side backstop.
 export type ChatSessionOrigin = "chat" | "scheduled_task";
@@ -207,6 +219,98 @@ export const agentChatMessages = pgTable(
   ],
 );
 
+export const agentMemories = pgTable(
+  "agent_memories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    kind: text("kind").$type<MemoryKind>().notNull(),
+    content: text("content").notNull(),
+    source: text("source").$type<MemorySource>().notNull(),
+    // 0..100 keeps confidence sortable and avoids provider-specific float quirks.
+    confidence: integer("confidence").notNull().default(100),
+    // Human-approved memory proposals become live immediately; archive is the rollback path.
+    status: text("status").$type<MemoryStatus>().notNull().default("approved"),
+    sessionId: uuid("session_id").references(() => agentChatSessions.id, { onDelete: "set null" }),
+    reviewProposalId: uuid("review_proposal_id").references(
+      (): AnyPgColumn => agentReviewProposals.id,
+      { onDelete: "set null" },
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    check(
+      "agent_memories_kind_check",
+      sql`${t.kind} in ('preference', 'fact', 'correction', 'persona')`,
+    ),
+    check("agent_memories_source_check", sql`${t.source} in ('user', 'review', 'curated')`),
+    check("agent_memories_status_check", sql`${t.status} in ('approved', 'archived')`),
+    check("agent_memories_content_check", sql`char_length(${t.content}) between 1 and 2000`),
+    check("agent_memories_confidence_check", sql`${t.confidence} between 0 and 100`),
+    index("agent_memories_prompt_idx")
+      .on(t.agentId, t.kind, t.createdAt)
+      .where(sql`${t.status} = 'approved' and ${t.deletedAt} is null`),
+  ],
+);
+
+export const agentReviewProposals = pgTable(
+  "agent_review_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    sessionId: uuid("session_id").references(() => agentChatSessions.id, { onDelete: "set null" }),
+    triggerMessageId: text("trigger_message_id"),
+    kind: text("kind").$type<ReviewProposalKind>().notNull(),
+    payload: jsonb("payload").$type<ReviewProposalPayload>().notNull(),
+    rationale: text("rationale").notNull(),
+    status: text("status").$type<ReviewProposalStatus>().notNull().default("pending"),
+    reviewerModel: text("reviewer_model"),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_review_proposals_kind_check",
+      sql`${t.kind} in ('memory_create', 'memory_edit', 'memory_archive', 'skill_create', 'skill_edit', 'skill_toggle')`,
+    ),
+    check(
+      "agent_review_proposals_status_check",
+      sql`${t.status} in ('pending', 'rejected', 'applied', 'failed')`,
+    ),
+    check(
+      "agent_review_proposals_rationale_check",
+      sql`char_length(${t.rationale}) between 1 and 2000`,
+    ),
+    index("agent_review_proposals_pending_idx")
+      .on(t.agentId, t.createdAt)
+      .where(sql`${t.status} = 'pending'`),
+    index("agent_review_proposals_session_idx").on(t.sessionId, t.createdAt),
+  ],
+);
+
+export const agentReviewStates = pgTable(
+  "agent_review_states",
+  {
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentChatSessions.id, { onDelete: "cascade" }),
+    turnsSinceMemoryReview: integer("turns_since_memory_review").notNull().default(0),
+    lastReviewedMessageId: text("last_reviewed_message_id"),
+    lastReviewedAt: timestamp("last_reviewed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.sessionId] }),
+    check("agent_review_states_turns_check", sql`${t.turnsSinceMemoryReview} >= 0`),
+  ],
+);
+
 export type AgentScheduledTask = typeof agentScheduledTasks.$inferSelect;
 export type NewAgentScheduledTask = typeof agentScheduledTasks.$inferInsert;
 export type AgentScheduledTaskRun = typeof agentScheduledTaskRuns.$inferSelect;
@@ -217,3 +321,9 @@ export type AgentChatSession = typeof agentChatSessions.$inferSelect;
 export type NewAgentChatSession = typeof agentChatSessions.$inferInsert;
 export type AgentChatMessage = typeof agentChatMessages.$inferSelect;
 export type NewAgentChatMessage = typeof agentChatMessages.$inferInsert;
+export type AgentMemory = typeof agentMemories.$inferSelect;
+export type NewAgentMemory = typeof agentMemories.$inferInsert;
+export type AgentReviewProposal = typeof agentReviewProposals.$inferSelect;
+export type NewAgentReviewProposal = typeof agentReviewProposals.$inferInsert;
+export type AgentReviewState = typeof agentReviewStates.$inferSelect;
+export type NewAgentReviewState = typeof agentReviewStates.$inferInsert;

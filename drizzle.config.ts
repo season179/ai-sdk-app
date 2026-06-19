@@ -11,5 +11,14 @@ export default defineConfig({
     url: process.env.DATABASE_URL ?? "",
   },
   schemaFilter: ["public"],
-  tablesFilter: ["agent_scheduled_tasks", "agent_scheduled_task_runs", "agent_skills"],
+  tablesFilter: [
+    "agent_scheduled_tasks",
+    "agent_scheduled_task_runs",
+    "agent_skills",
+    "agent_chat_sessions",
+    "agent_chat_messages",
+    "agent_memories",
+    "agent_review_proposals",
+    "agent_review_states",
+  ],
 });

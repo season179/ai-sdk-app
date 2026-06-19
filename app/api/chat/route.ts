@@ -20,6 +20,8 @@ import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
+import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
+import { loadMemoryBlock } from "@/lib/self-improvement/inject";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -247,8 +249,9 @@ export async function POST(req: Request) {
     // catalog load, so the model never sees tools without their context.
     // User-activated skills are injected per request over the reconstructed
     // transcript; injectUserActivatedSkills is pure and fails soft like the catalog.
-    const [skillCatalogBlock, uiMessages] = await Promise.all([
+    const [skillCatalogBlock, memoryBlock, uiMessages] = await Promise.all([
       loadSkillCatalogBlock(),
+      loadMemoryBlock(),
       injectUserActivatedSkills(fullMessages),
     ]);
     // Bind the originating chat into scheduler tools so a task created here
@@ -264,6 +267,7 @@ export async function POST(req: Request) {
     };
     const instructions = [
       SYSTEM_PROMPT,
+      ...(memoryBlock ? ["Use these approved durable memories when relevant:", memoryBlock] : []),
       ...(skillCatalogBlock ? [SKILLS_PROMPT, skillCatalogBlock] : []),
       `The current UTC time is ${new Date().toISOString()}.`,
     ].join("\n\n");
@@ -334,6 +338,12 @@ export async function POST(req: Request) {
           // Push the assistant turn to any other open tab on this session (K2).
           // The tab that submitted already has it locally and dedupes by id.
           await notifySessionAppended(sessionId);
+          void recordCompletedTurnAndMaybeEnqueueReview({
+            sessionId,
+            triggerMessageId: responseMessage.id,
+          }).catch((error) => {
+            console.error("Enqueuing self-improvement review failed", error);
+          });
 
           // Title only the first completed assistant reply, and only while the
           // session is still untitled. assistantCount = assistants already in the
