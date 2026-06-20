@@ -2,6 +2,7 @@
   "name": "ai-sdk-app",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=24",
     "pnpm": ">=11 <12"
@@ -10,11 +11,6 @@
     "runtime": {
       "name": "node",
       "version": ">=24",
-      "onFail": "error"
-    },
-    "packageManager": {
-      "name": "pnpm",
-      "version": ">=11 <12",
       "onFail": "error"
     }
   },
