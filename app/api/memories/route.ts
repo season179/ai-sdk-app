@@ -25,10 +25,13 @@ export async function POST(req: Request) {
   }
 
   try {
+    // §3a: the manual route always writes source='user' and ignores any client-
+    // supplied source. Internal proposal apply is the only path allowed to set
+    // non-user sources. The client cannot set source.
     const memory = await createMemory({
       kind: body.kind,
       content: body.content,
-      source: body.source,
+      source: "user",
       confidence: body.confidence,
     });
 

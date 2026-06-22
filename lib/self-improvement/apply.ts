@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
+import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   archiveMemory,
@@ -18,6 +19,7 @@ import {
   parseMemoryConfidence,
   parseMemoryContent,
   parseMemoryKind,
+  parseMemorySource,
   readOptionalString,
   readPayloadObject,
   readRequiredString,
@@ -57,31 +59,105 @@ export async function applyReviewProposal(id: string): Promise<ReviewProposal> {
     throw new Error("Review proposal apply completed without returning an updated proposal.");
   }
 
-  return applied;
+  const proposal: ReviewProposal = applied;
+
+  // Fire the applied event for the timeline (§3d). Fail-soft: recordMemoryEvent
+  // swallows its own errors so a logging miss never breaks the apply path.
+  await recordMemoryEvent({
+    eventType: "applied",
+    origin: eventOriginFor(proposal.proposerOrigin),
+    summary: `Applied ${proposal.kind} proposal (${proposal.proposerOrigin}).`,
+    proposalId: proposal.id,
+    detail: {
+      version: 1,
+      admissionMetadata: proposal.admissionMetadata ?? undefined,
+    },
+  });
+
+  return proposal;
+}
+
+/** Map a proposal's proposerOrigin onto a MemoryEventOrigin. */
+function eventOriginFor(
+  origin: ReviewProposal["proposerOrigin"],
+): "user" | "review" | "consolidation" | "curator" {
+  switch (origin) {
+    case "manual":
+      return "user";
+    case "turn_review":
+      return "review";
+    case "consolidation":
+      return "consolidation";
+    case "curator":
+      return "curator";
+  }
 }
 
 async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): Promise<void> {
   const payload = readPayloadObject(proposal.payload);
 
   switch (proposal.kind) {
-    case "memory_create":
+    case "memory_create": {
       if (await getMemoryByReviewProposalId(proposal.id, proposal.agentId, db)) {
         return;
       }
 
-      await createMemory(
-        {
-          agentId: proposal.agentId,
-          kind: parseMemoryKind(payload.memoryKind ?? payload.kind),
-          content: parseMemoryContent(payload.content),
-          confidence: parseMemoryConfidence(payload.confidence),
-          source: "review",
-          sessionId: proposal.sessionId,
-          reviewProposalId: proposal.id,
-        },
-        db,
-      );
+      // Derive the memory source from the proposal and guard the privileged
+      // `consolidated` source (§1.1): only consolidation proposals may mint a
+      // consolidated memory. Everything else lands as `review`.
+      const memorySource =
+        proposal.proposerOrigin === "consolidation"
+          ? parseMemorySource(payload.source, "consolidated")
+          : parseMemorySource(payload.source, "review");
+
+      if (memorySource === "consolidated" && proposal.proposerOrigin !== "consolidation") {
+        throw new SelfImprovementInputError(
+          "Only consolidation proposals may create consolidated memories.",
+        );
+      }
+
+      // Consolidation proposals carry a claim_hash in admission_metadata; stamp
+      // it on the memory so the agent_memories_claim_hash_uniq partial unique
+      // index makes auto-apply races safe (§4.4).
+      const claimHash = proposal.admissionMetadata?.claimHash ?? null;
+
+      try {
+        await createMemory(
+          {
+            agentId: proposal.agentId,
+            kind: parseMemoryKind(payload.memoryKind ?? payload.kind),
+            content: parseMemoryContent(payload.content),
+            confidence: parseMemoryConfidence(payload.confidence),
+            source: memorySource,
+            sessionId: proposal.sessionId,
+            reviewProposalId: proposal.id,
+            claimHash,
+          },
+          db,
+        );
+      } catch (error) {
+        // §4.4 race safety: a duplicate-key on agent_memories_claim_hash_uniq
+        // means a concurrent writer already minted this durable fact. Treat as
+        // already-applied / no-op and log duplicate_claim_hash. This keeps
+        // auto-apply additive-only and idempotent.
+        if (isDuplicateClaimHashError(error)) {
+          await recordMemoryEvent({
+            eventType: "applied",
+            origin: eventOriginFor(proposal.proposerOrigin),
+            summary: `Apply no-op: duplicate claim_hash for proposal ${proposal.id}.`,
+            proposalId: proposal.id,
+            detail: {
+              version: 1,
+              admissionMetadata: proposal.admissionMetadata ?? undefined,
+              reason: "duplicate_claim_hash",
+            },
+          }).catch(() => undefined);
+          return;
+        }
+        throw error;
+      }
       return;
+    }
 
     case "memory_edit":
       await updateMemory(
@@ -184,4 +260,20 @@ function readRequiredBoolean(payload: Record<string, unknown>, key: string): boo
   }
 
   return value;
+}
+
+/**
+ * Detect a Postgres unique-violation on agent_memories_claim_hash_uniq (§4.4
+ * race safety). pg error code 23505 with the constraint name; some drivers
+ * surface it only in the message string. Used by the memory_create branch to
+ * treat a duplicate as already-applied / no-op.
+ */
+export function isDuplicateClaimHashError(error: unknown): boolean {
+  if (error == null || typeof error !== "object") return false;
+  const e = error as { code?: string; constraint?: string };
+  if (e.code === "23505" && typeof e.constraint === "string") {
+    return e.constraint.includes("claim_hash");
+  }
+  const msg = (error as { message?: string }).message ?? "";
+  return msg.includes("agent_memories_claim_hash_uniq") || msg.includes("claim_hash_uniq");
 }

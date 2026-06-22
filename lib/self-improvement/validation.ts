@@ -6,8 +6,8 @@ export const MEMORY_CONFIDENCE_MIN = 0;
 export const MEMORY_CONFIDENCE_MAX = 100;
 export const REVIEW_PROPOSAL_PAYLOAD_MAX = 8192;
 
-const MEMORY_KINDS = ["preference", "fact", "correction", "persona"] as const;
-const MEMORY_SOURCES = ["user", "review", "curated"] as const;
+export const MEMORY_KINDS = ["preference", "fact", "correction", "persona"] as const;
+const MEMORY_SOURCES = ["user", "review", "curated", "consolidated"] as const;
 const REVIEW_PROPOSAL_KINDS = [
   "memory_create",
   "memory_edit",

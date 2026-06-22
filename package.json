@@ -16,17 +16,19 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "dev": "concurrently --names app,worker,review --prefix-colors blue,magenta,cyan \"portless\" \"pnpm run worker:scheduled-tasks\" \"pnpm run worker:turn-review\"",
+    "dev": "concurrently --names app,worker,review,consolidation --prefix-colors blue,magenta,cyan,green \"portless\" \"pnpm run worker:scheduled-tasks\" \"pnpm run worker:turn-review\" \"pnpm run worker:consolidation\"",
     "dev:app": "next dev",
     "dev:tunnel": "portless",
     "build": "next build",
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "worker:scheduled-tasks": "tsx workers/scheduled-tasks.ts",
-    "worker:turn-review": "tsx workers/turn-review.ts"
+    "worker:turn-review": "tsx workers/turn-review.ts",
+    "worker:consolidation": "tsx workers/consolidation.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "3.0.199",
@@ -57,6 +59,7 @@
     "drizzle-kit": "^0.31.10",
     "tailwindcss": "4.3.0",
     "tsx": "^4.22.4",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "^4.1.9"
   }
 }

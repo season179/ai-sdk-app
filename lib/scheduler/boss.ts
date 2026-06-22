@@ -6,6 +6,10 @@ export const TASK_QUEUE_NAME = "agent-task-run";
 export const TASK_DLQ_NAME = "agent-task-run-dlq";
 export const TURN_REVIEW_QUEUE_NAME = "agent-turn-review";
 export const TURN_REVIEW_DLQ_NAME = "agent-turn-review-dlq";
+// The consolidation sweep runs on its OWN internal queue — it is not the
+// user-facing agent-task-run queue and never appears as a user scheduled task.
+export const CONSOLIDATION_QUEUE_NAME = "agent-consolidation";
+export const CONSOLIDATION_DLQ_NAME = "agent-consolidation-dlq";
 
 /**
  * Every job on the task queue must carry the task id as its singleton key.
@@ -25,6 +29,16 @@ export function taskScheduleOptions(taskId: string, timezone: string) {
 /** One pending review per session is enough; a later turn supersedes queued noise. */
 export function turnReviewSendOptions(sessionId: string) {
   return { singletonKey: sessionId };
+}
+
+/**
+ * Every consolidation job carries the agent id as its singleton key. The
+ * 'stately' policy keeps at most one queued job per agent, which coalesces cron
+ * fires that stack up while no worker is consuming — so a sweep never runs
+ * twice concurrently for the same agent.
+ */
+export function consolidationSendOptions(agentId: string) {
+  return { singletonKey: agentId };
 }
 
 type BossGlobal = {
@@ -60,6 +74,10 @@ async function startAndPrepare(boss: PgBoss) {
   await boss.createQueue(TURN_REVIEW_DLQ_NAME, {
     retentionSeconds: 14 * 24 * 60 * 60,
   });
+  // Consolidation DLQ — created before the queue so deadLetter resolves.
+  await boss.createQueue(CONSOLIDATION_DLQ_NAME, {
+    retentionSeconds: 14 * 24 * 60 * 60,
+  });
   // Queues created before this option existed keep 'standard' (createQueue
   // is ON CONFLICT DO NOTHING); the worker's catch-up reconciler migrates
   // them once their schedules carry singleton keys.
@@ -77,6 +95,16 @@ async function startAndPrepare(boss: PgBoss) {
     policy: "stately",
     retryBackoff: true,
     retryDelay: 5,
+    retryLimit: 1,
+  });
+  // The consolidation sweep queue. 'stately' + singletonKey(agentId) keeps at
+  // most one queued sweep per agent. Not the user-facing task queue.
+  await boss.createQueue(CONSOLIDATION_QUEUE_NAME, {
+    deadLetter: CONSOLIDATION_DLQ_NAME,
+    expireInSeconds: 10 * 60,
+    policy: "stately",
+    retryBackoff: true,
+    retryDelay: 30,
     retryLimit: 1,
   });
 
