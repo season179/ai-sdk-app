@@ -44,12 +44,26 @@ export type RecallSignalRow = {
 /**
  * Group grounded observations into per-claim buckets keyed by claim_hash. Each
  * bucket becomes one recall signal. Observations with no content are skipped.
+ *
+ * Because runConsolidation scans the FULL observation set each sweep, a bucket
+ * fully determines its signal — so the derived fields (observationIds,
+ * recallCount, queryHashes, recallDays, conceptTags) are recomputed here from
+ * the complete bucket, not accumulated incrementally. This keeps the signal
+ * idempotent and reproducible across sweeps (§4.2 determinism).
+ *
+ * `queryHashes` / `uniqueQueryCount` derive cross-session diversity (§1.2): each
+ * distinct source session (chat) or source memory (memory_user) that contributed
+ * an observation counts as one "query". A claim seen in 3 separate sessions has
+ * uniqueQueryCount=3.
  */
 export function groupByClaim(observations: AgentGroundedObservation[]): {
   claimHash: string;
   claimKey: string;
   snippet: string;
   observationIds: string[];
+  queryHashes: string[];
+  uniqueQueryCount: number;
+  recallDays: string[];
   lastSeenAt: Date;
   firstSeenAt: Date;
   tags: string[];
@@ -60,6 +74,8 @@ export function groupByClaim(observations: AgentGroundedObservation[]): {
       claimKey: string;
       snippet: string;
       observationIds: string[];
+      queryKeys: Set<string>;
+      days: Set<string>;
       lastSeenAt: Date;
       firstSeenAt: Date;
       tags: Set<string>;
@@ -74,9 +90,17 @@ export function groupByClaim(observations: AgentGroundedObservation[]): {
     // claimHash is already computed/stored on the observation; recompute to be
     // safe (cheap, deterministic).
     const hash = claimHash(obs.content);
+    // The "query" identity: the session that produced a chat observation, or
+    // the source memory for a memory_user observation. Distinct values here are
+    // the cross-session diversity signal.
+    const queryKey = obs.sessionId ?? obs.sourceMemoryId ?? obs.id;
+    const day = obs.createdAt.toISOString().slice(0, 10);
+
     const bucket = buckets.get(hash);
     if (bucket) {
       bucket.observationIds.push(obs.id);
+      bucket.queryKeys.add(queryKey);
+      bucket.days.add(day);
       bucket.tags = new Set([...bucket.tags, ...conceptTags(obs.content)]);
       if (obs.createdAt > bucket.lastSeenAt) {
         bucket.lastSeenAt = obs.createdAt;
@@ -90,6 +114,8 @@ export function groupByClaim(observations: AgentGroundedObservation[]): {
         claimKey: key,
         snippet: obs.content.slice(0, 200),
         observationIds: [obs.id],
+        queryKeys: new Set([queryKey]),
+        days: new Set([day]),
         lastSeenAt: obs.createdAt,
         firstSeenAt: obs.createdAt,
         tags: new Set(conceptTags(obs.content)),
@@ -97,21 +123,30 @@ export function groupByClaim(observations: AgentGroundedObservation[]): {
     }
   }
 
-  return Array.from(buckets.entries()).map(([claimHash, b]) => ({
-    claimHash,
-    claimKey: b.claimKey,
-    snippet: b.snippet,
-    observationIds: b.observationIds,
-    lastSeenAt: b.lastSeenAt,
-    firstSeenAt: b.firstSeenAt,
-    tags: Array.from(b.tags),
-  }));
+  return Array.from(buckets.entries()).map(([claimHash, b]) => {
+    const queryHashes = Array.from(b.queryKeys);
+    return {
+      claimHash,
+      claimKey: b.claimKey,
+      snippet: b.snippet,
+      observationIds: b.observationIds,
+      queryHashes,
+      uniqueQueryCount: queryHashes.length,
+      recallDays: Array.from(b.days).sort(),
+      lastSeenAt: b.lastSeenAt,
+      firstSeenAt: b.firstSeenAt,
+      tags: Array.from(b.tags),
+    };
+  });
 }
 
 /**
  * Upsert a recall signal for one claim bucket. Idempotent via the
- * (agent_id, claim_hash) unique index: a re-run re-reads the existing row and
- * merges the new observation ids / day set rather than duplicating.
+ * (agent_id, claim_hash) unique index. Because runConsolidation scans the FULL
+ * observation set each sweep, the input bucket fully determines the signal, so
+ * the conflict path OVERWRITES the derived fields rather than accumulating
+ * them. This keeps recallCount/uniqueQueryCount/etc. stable across sweeps
+ * (§4.2 determinism) — additive accumulation would double-count every sweep.
  */
 export async function upsertRecallSignal(
   input: {
@@ -120,6 +155,9 @@ export async function upsertRecallSignal(
     claimHash: string;
     snippet: string;
     observationIds: string[];
+    queryHashes: string[];
+    uniqueQueryCount: number;
+    recallDays: string[];
     firstSeenAt: Date;
     lastSeenAt: Date;
     tags: string[];
@@ -127,9 +165,7 @@ export async function upsertRecallSignal(
   db: AppDbClient = getDb(),
 ): Promise<RecallSignalRow> {
   const agentId = input.agentId ?? DEFAULT_AGENT_ID;
-  const day = input.lastSeenAt.toISOString().slice(0, 10);
 
-  // Try insert first; on conflict, merge into the existing row.
   const value: NewAgentRecallSignal = {
     agentId,
     claimKey: input.claimKey,
@@ -137,9 +173,9 @@ export async function upsertRecallSignal(
     snippet: input.snippet,
     groundedObservationIds: input.observationIds,
     recallCount: input.observationIds.length,
-    uniqueQueryCount: 1,
-    queryHashes: [input.claimHash],
-    recallDays: [day],
+    uniqueQueryCount: input.uniqueQueryCount,
+    queryHashes: input.queryHashes,
+    recallDays: input.recallDays,
     conceptTags: input.tags,
     totalScoreBps: 0,
     maxScoreBps: 0,
@@ -147,35 +183,24 @@ export async function upsertRecallSignal(
     lastRecalledAt: input.lastSeenAt,
   };
 
+  // on conflict, OVERWRITE the derived fields with the freshly recomputed
+  // bucket (the full scan re-sees the same observations, so the values are
+  // identical or have grown by new observations only). Scores are reset to 0
+  // here and re-recorded by recordScore in the run loop.
   const inserted = await db
     .insert(agentRecallSignals)
     .values(value)
     .onConflictDoUpdate({
       target: [agentRecallSignals.agentId, agentRecallSignals.claimHash],
       set: {
-        // Union the observation ids (deduped) — repeated observations each count.
-        groundedObservationIds: sql`(
-          select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
-          from jsonb_array_elements(
-            ${agentRecallSignals.groundedObservationIds} ||
-            excluded.grounded_observation_ids
-          ) as x
-        )`,
-        recallCount: sql`${agentRecallSignals.recallCount} + excluded.recall_count`,
-        recallDays: sql`(
-          select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
-          from jsonb_array_elements(
-            ${agentRecallSignals.recallDays} || excluded.recall_days
-          ) as x
-        )`,
-        conceptTags: sql`(
-          select coalesce(jsonb_agg(distinct x), '[]'::jsonb)
-          from jsonb_array_elements(
-            ${agentRecallSignals.conceptTags} || excluded.concept_tags
-          ) as x
-        )`,
-        lastRecalledAt: sql`greatest(${agentRecallSignals.lastRecalledAt}, excluded.last_recalled_at)`,
-        firstRecalledAt: sql`least(${agentRecallSignals.firstRecalledAt}, excluded.first_recalled_at)`,
+        groundedObservationIds: sql`excluded.grounded_observation_ids`,
+        recallCount: sql`excluded.recall_count`,
+        uniqueQueryCount: sql`excluded.unique_query_count`,
+        queryHashes: sql`excluded.query_hashes`,
+        recallDays: sql`excluded.recall_days`,
+        conceptTags: sql`excluded.concept_tags`,
+        lastRecalledAt: sql`excluded.last_recalled_at`,
+        firstRecalledAt: sql`excluded.first_recalled_at`,
         snippet: excludedSnippet(),
         updatedAt: sql`now()`,
       },

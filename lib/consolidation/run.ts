@@ -8,8 +8,17 @@ import {
   type ConsolidationRunStatus,
   type ConsolidationTrigger,
 } from "@/db/schema";
-import { maybeAutoApplyConsolidation } from "@/lib/consolidation/auto-apply";
-import { getConsolidationConfig, isMemoryConsolidationDryRun } from "@/lib/consolidation/config";
+import {
+  evaluateAutoApply,
+  maybeAutoApplyConsolidation,
+  stampAutoApply,
+} from "@/lib/consolidation/auto-apply";
+import {
+  getConsolidationConfig,
+  isMemoryConsolidationAutoApply,
+  isMemoryConsolidationDryRun,
+  isMemoryConsolidationEnabled,
+} from "@/lib/consolidation/config";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { listGroundedObservations } from "@/lib/consolidation/observations";
 import { proposeCandidate } from "@/lib/consolidation/propose";
@@ -57,7 +66,11 @@ export async function runConsolidation(
     // 1. Scan grounded observations (the firewall tier — never derivative content).
     const observations = await listGroundedObservations(agentId, undefined, db);
 
-    // 2. Group into per-claim buckets and upsert recall signals.
+    // 2. Group into per-claim buckets and upsert recall signals. Because the
+    //    scan is full (not incremental), groupByClaim derives the complete
+    //    signal per claim — observationIds, queryHashes (distinct source
+    //    sessions/memories), recallDays (distinct UTC days) — so the upsert is
+    //    a deterministic recompute, not an accumulation.
     const buckets = groupByClaim(observations);
     for (const bucket of buckets) {
       await upsertRecallSignal(
@@ -67,6 +80,9 @@ export async function runConsolidation(
           claimHash: bucket.claimHash,
           snippet: bucket.snippet,
           observationIds: bucket.observationIds,
+          queryHashes: bucket.queryHashes,
+          uniqueQueryCount: bucket.uniqueQueryCount,
+          recallDays: bucket.recallDays,
           firstSeenAt: bucket.firstSeenAt,
           lastSeenAt: bucket.lastSeenAt,
           tags: bucket.tags,
@@ -164,6 +180,8 @@ export async function runConsolidation(
     // 5. For passed, non-dry-run candidates: create proposals and link them.
     let candidatesPassed = 0;
     let proposalsCreated = 0;
+    const globalEnabled = isMemoryConsolidationEnabled();
+    const globalAutoApply = isMemoryConsolidationAutoApply();
     for (let i = 0; i < scored.length; i++) {
       const s = scored[i];
       if (!s.passed || dryRun) {
@@ -171,12 +189,29 @@ export async function runConsolidation(
       }
       candidatesPassed += 1;
       const candidateId = insertedIds[i]?.id;
+      // Stamp the auto-apply eligibility (§4.4) onto the admission metadata so
+      // the review UI can show why a proposal will/won't auto-apply. This is a
+      // best-effort UI hint over the static clauses; the DB-backed clauses
+      // (existing claim_hash, protected) are re-checked authoritatively at apply
+      // time by maybeAutoApplyConsolidation. hasExistingClaimHash/isProtected
+      // default false here because they are unknown until apply.
+      const autoApplyDecision = evaluateAutoApply({
+        globalEnabled,
+        globalAutoApply,
+        perAgentAutoApplyEnabled: cfg.autoApplyEnabled,
+        admissionPolicy: "auto_apply_low_risk",
+        kind: "memory_create",
+        scoreBps: s.scoreBps,
+        hasExistingClaimHash: false,
+        isProtected: false,
+      });
+      const stampedMetadata = stampAutoApply({ ...s.metadata, candidateId }, autoApplyDecision);
       const proposal = await proposeCandidate(
         {
           agentId,
           claimKey: s.claimKey,
           snippet: s.snippet,
-          metadata: { ...s.metadata, candidateId },
+          metadata: stampedMetadata,
           runId: run.id,
         },
         db,

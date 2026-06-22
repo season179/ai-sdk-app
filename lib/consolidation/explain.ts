@@ -1,11 +1,13 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import {
+  type AdmissionMetadata,
   agentConsolidationCandidates,
   agentConsolidationRuns,
   agentGroundedObservations,
   agentMemoryEvents,
+  agentReviewProposals,
 } from "@/db/schema";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
@@ -68,17 +70,41 @@ export async function explainCandidate(
     .limit(1);
   const run = runRows[0];
 
-  // Resolve the backing observations from the gate metadata's evidence ids.
-  const gateResults = candidate.gateResults;
-  void gateResults;
-
-  // The candidate row itself doesn't carry groundedObservationIds (those live
-  // on the recall signal / admission metadata on the proposal). Fetch from the
-  // proposal's admissionMetadata if linked, else return empty.
-  const observations: CandidateExplanation["observations"] = [];
+  // The candidate row carries the score + gates, but the backing observation ids
+  // live on the linked proposal's admissionMetadata (§1.1). Resolve them so the
+  // "why did this promote" drawer can show the user-authored evidence.
+  let observations: CandidateExplanation["observations"] = [];
   if (candidate.proposalId) {
-    // Lightweight: pull observations via the proposal's admission metadata is
-    // a join too far for explain; the UI renders the metadata breakdown directly.
+    const proposalRows = await db
+      .select({ admissionMetadata: agentReviewProposals.admissionMetadata })
+      .from(agentReviewProposals)
+      .where(eq(agentReviewProposals.id, candidate.proposalId))
+      .limit(1);
+    const meta = proposalRows[0]?.admissionMetadata as AdmissionMetadata | null;
+    const obsIds = meta?.groundedObservationIds ?? [];
+    if (obsIds.length > 0) {
+      const obsRows = await db
+        .select({
+          id: agentGroundedObservations.id,
+          originKind: agentGroundedObservations.originKind,
+          content: agentGroundedObservations.content,
+          createdAt: agentGroundedObservations.createdAt,
+        })
+        .from(agentGroundedObservations)
+        .where(
+          and(
+            eq(agentGroundedObservations.agentId, agentId),
+            inArray(agentGroundedObservations.id, obsIds),
+          ),
+        )
+        .orderBy(desc(agentGroundedObservations.createdAt));
+      observations = obsRows.map((o) => ({
+        id: o.id,
+        originKind: o.originKind,
+        content: o.content,
+        createdAt: o.createdAt.toISOString(),
+      }));
+    }
   }
 
   return {
@@ -171,9 +197,6 @@ export async function listRecentEvents(agentId: string = DEFAULT_AGENT_ID, limit
     createdAt: e.createdAt.toISOString(),
   }));
 }
-
-// Re-export for the observations lookup helper above.
-export { agentGroundedObservations };
 
 function emptyGates() {
   return {

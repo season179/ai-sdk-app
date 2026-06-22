@@ -3,6 +3,7 @@ import type { AdmissionMetadata, AdmissionPolicy } from "@/db/schema";
 import {
   AUTO_APPLY_MIN_SCORE_BPS,
   isMemoryConsolidationAutoApply,
+  isMemoryConsolidationEnabled,
 } from "@/lib/consolidation/config";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { createReviewProposal, type ReviewProposal } from "@/lib/self-improvement/proposals";
@@ -69,13 +70,19 @@ export async function proposeCandidate(
 }
 
 /**
- * Admission lane for a candidate. 'auto_apply_low_risk' only when the score bar
- * (§4.4: ≥ 9000) is cleared AND the global auto-apply flag is on — otherwise the
- * proposal would land in the auto lane but never auto-apply, which is noise.
+ * Admission lane for a candidate. 'auto_apply_low_risk' only when BOTH switches
+ * are on (master + auto-apply, §4.4) AND the score bar (≥ 9000) is cleared —
+ * otherwise the proposal would land in the auto lane but never auto-apply, which
+ * is noise. The full predicate (per-agent flag, existing claim_hash, protected)
+ * is re-checked at apply time by maybeAutoApplyConsolidation.
  */
 function pickAdmissionPolicy(scoreBps: number | undefined): AdmissionPolicy {
   const score = scoreBps ?? 0;
-  if (score >= AUTO_APPLY_MIN_SCORE_BPS && isMemoryConsolidationAutoApply()) {
+  if (
+    score >= AUTO_APPLY_MIN_SCORE_BPS &&
+    isMemoryConsolidationEnabled() &&
+    isMemoryConsolidationAutoApply()
+  ) {
     return "auto_apply_low_risk";
   }
   return "human_review";

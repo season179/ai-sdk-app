@@ -1,5 +1,6 @@
 import type { ConsolidationWeights } from "@/db/schema";
 import { upsertConsolidationSettings } from "@/lib/consolidation/config";
+import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 
 /** PUT /api/consolidation/settings — edit weights + gates → per-agent settings row. */
 export async function PUT(req: Request) {
@@ -37,6 +38,9 @@ export async function PUT(req: Request) {
     });
     return Response.json({ settings: row });
   } catch (error) {
+    if (error instanceof SelfImprovementInputError) {
+      return Response.json({ error: error.message }, { status: 400 });
+    }
     console.error("Updating consolidation settings failed", error);
     return Response.json({ error: "Could not update consolidation settings." }, { status: 500 });
   }

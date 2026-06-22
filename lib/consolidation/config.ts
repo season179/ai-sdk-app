@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import { agentConsolidationSettings, type ConsolidationWeights } from "@/db/schema";
+import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
 // --- Env defaults (§5). All OFF / safe by default. ---
@@ -119,6 +120,64 @@ export async function getConsolidationConfig(
   };
 }
 
+/**
+ * Validate + normalize a weights object coming from the operator UI. Each
+ * weight is a number; relevance/frequency/diversity/recency/consistency/concept
+ * are bounded 0..1, phaseLightBoost/phaseRemBoost are caps 0..1, and
+ * recencyHalfLifeDays is a positive integer (scoring guards divide-by-0, but a
+ * garbage value would make every recency term = 1.0). A missing/invalid field
+ * falls back to the shipped default rather than producing a NaN in scoring.
+ */
+const WEIGHT_KEYS = [
+  "relevance",
+  "frequency",
+  "diversity",
+  "recency",
+  "consistency",
+  "concept",
+  "phaseLightBoost",
+  "phaseRemBoost",
+] as const;
+
+export function parseConsolidationWeights(value: unknown): ConsolidationWeights | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new SelfImprovementInputError("weights must be an object.");
+  }
+  const raw = value as Record<string, unknown>;
+  const out: ConsolidationWeights = { ...DEFAULT_WEIGHTS };
+
+  for (const key of WEIGHT_KEYS) {
+    const v = raw[key];
+    if (v == null) continue; // keep default
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n) || n < 0 || n > 1) {
+      throw new SelfImprovementInputError(`weights.${key} must be a number in 0..1.`);
+    }
+    out[key] = n;
+  }
+
+  // recencyHalfLifeDays: positive number (scoring clamps to ≥1, but reject 0/NaN).
+  const hl = raw.recencyHalfLifeDays;
+  if (hl != null) {
+    const n = typeof hl === "number" ? hl : Number(hl);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new SelfImprovementInputError("weights.recencyHalfLifeDays must be a positive number.");
+    }
+    out.recencyHalfLifeDays = n;
+  }
+
+  // Reject unknown keys so a typo doesn't silently round-trip.
+  const allowed = new Set<string>([...WEIGHT_KEYS, "recencyHalfLifeDays"]);
+  for (const k of Object.keys(raw)) {
+    if (!allowed.has(k)) {
+      throw new SelfImprovementInputError(`weights has an unknown key '${k}'.`);
+    }
+  }
+
+  return out;
+}
+
 /** Set / replace the per-agent settings row (upsert). */
 export async function upsertConsolidationSettings(
   input: {
@@ -136,6 +195,9 @@ export async function upsertConsolidationSettings(
   db: AppDbClient = getDb(),
 ) {
   const agentId = input.agentId ?? DEFAULT_AGENT_ID;
+  // Validate weights before persisting so a malformed object can't corrupt the
+  // scorer (a NaN weight zeros its component; a 0 half-life saturates recency).
+  const weights = parseConsolidationWeights(input.weights);
   const value = {
     agentId,
     enabled: input.enabled,
@@ -145,7 +207,7 @@ export async function upsertConsolidationSettings(
     minRecallCount: input.minRecallCount,
     minUniqueQueries: input.minUniqueQueries,
     maxAgeDays: input.maxAgeDays,
-    weights: input.weights,
+    weights,
     updatedAt: sql`now()`,
     updatedBy: input.updatedBy ?? null,
   };
