@@ -48,6 +48,16 @@ describe("parseConsolidationWeights", () => {
     );
   });
 
+  it("rejects values Number() would silently coerce (boolean, array, empty string)", () => {
+    // true→1, []→0, ""→0 would all pass a bare Number()+range check; each must throw.
+    expect(() => parseConsolidationWeights({ relevance: true })).toThrow(SelfImprovementInputError);
+    expect(() => parseConsolidationWeights({ relevance: [] })).toThrow(SelfImprovementInputError);
+    expect(() => parseConsolidationWeights({ relevance: "" })).toThrow(SelfImprovementInputError);
+    expect(() => parseConsolidationWeights({ recencyHalfLifeDays: true })).toThrow(
+      SelfImprovementInputError,
+    );
+  });
+
   it("rejects recencyHalfLifeDays ≤ 0", () => {
     expect(() => parseConsolidationWeights({ recencyHalfLifeDays: 0 })).toThrow(
       SelfImprovementInputError,

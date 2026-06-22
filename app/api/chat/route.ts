@@ -285,7 +285,7 @@ export async function POST(req: Request) {
     }
     const [skillCatalogBlock, memoryBlock, uiMessages] = await Promise.all([
       loadSkillCatalogBlock(),
-      loadMemoryBlock(sessionId ?? undefined),
+      loadMemoryBlock(DEFAULT_AGENT_ID, sessionId ?? undefined),
       injectUserActivatedSkills(fullMessages),
     ]);
     // Bind the originating chat into scheduler tools so a task created here

@@ -101,7 +101,9 @@ export function groupByClaim(observations: AgentGroundedObservation[]): {
       bucket.observationIds.push(obs.id);
       bucket.queryKeys.add(queryKey);
       bucket.days.add(day);
-      bucket.tags = new Set([...bucket.tags, ...conceptTags(obs.content)]);
+      for (const tag of conceptTags(obs.content)) {
+        bucket.tags.add(tag);
+      }
       if (obs.createdAt > bucket.lastSeenAt) {
         bucket.lastSeenAt = obs.createdAt;
         bucket.snippet = obs.content.slice(0, 200);

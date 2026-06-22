@@ -80,17 +80,24 @@ export async function ingestUserTurn(
 
   const rows: NewAgentGroundedObservation[] = [];
   for (const item of userTexts) {
-    for (const chunk of chunkText(item.text, OBSERVATION_CONTENT_MAX)) {
+    const chunks = chunkText(item.text, OBSERVATION_CONTENT_MAX);
+    chunks.forEach((chunk, index) => {
       rows.push({
         agentId,
         sessionId,
         originKind: "chat_user" as GroundedObservationOrigin,
-        sourceMessageId: item.messageId,
+        // Each chunk needs a DISTINCT source_message_id: the chat_uniq index is
+        // (agent_id, session_id, source_message_id), so chunks sharing one
+        // message id would collide and onConflictDoNothing would silently drop
+        // all but the first (losing the rest of an over-long turn). Suffix only
+        // when there is more than one chunk, so single-chunk messages keep their
+        // original id and re-ingest stays idempotent.
+        sourceMessageId: chunks.length > 1 ? `${item.messageId}#${index}` : item.messageId,
         sourceMemoryId: null,
         content: chunk,
         contentHash: contentHash(chunk),
       });
-    }
+    });
   }
 
   if (rows.length === 0) {

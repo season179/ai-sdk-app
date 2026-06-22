@@ -5,11 +5,9 @@ import {
   type RealisticToolInput,
   type RealisticToolSpec,
 } from "@/lib/mock-tools";
-import {
-  SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE,
-  SelfImprovementInputError,
-} from "@/lib/self-improvement/errors";
+import { SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE } from "@/lib/self-improvement/errors";
 import { searchMemories } from "@/lib/self-improvement/memories";
+import { MEMORY_KINDS, parseMemoryKind } from "@/lib/self-improvement/validation";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
 /**
@@ -28,7 +26,6 @@ import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
  * MEMORY_SEARCH_ENABLED.
  */
 
-const MEMORY_KINDS = ["preference", "fact", "correction", "persona"] as const;
 const SEARCH_LIMIT_DEFAULT = 10;
 const SEARCH_LIMIT_MAX = 20;
 
@@ -116,13 +113,11 @@ export async function executeMemoryTool(name: string, input: RealisticToolInput)
 export const memoryTools: ToolSet = buildSpecToolSet(memoryToolSpecs, executeMemoryTool);
 
 function parseKind(value: unknown): MemoryKind | undefined {
+  // Optional filter: absent → no kind constraint. Otherwise reuse the canonical
+  // validator (it throws SelfImprovementInputError, which the handler wrapper
+  // maps to the unavailable message).
   if (value == null) return undefined;
-  if (typeof value === "string" && (MEMORY_KINDS as readonly string[]).includes(value)) {
-    return value as MemoryKind;
-  }
-  throw new SelfImprovementInputError(
-    `memory_search kind must be one of: ${MEMORY_KINDS.join(", ")}.`,
-  );
+  return parseMemoryKind(value);
 }
 
 function clampLimit(value: unknown) {

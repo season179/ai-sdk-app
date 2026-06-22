@@ -16,7 +16,6 @@ import {
 import {
   getConsolidationConfig,
   isMemoryConsolidationAutoApply,
-  isMemoryConsolidationDryRun,
   isMemoryConsolidationEnabled,
 } from "@/lib/consolidation/config";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
@@ -94,7 +93,10 @@ export async function runConsolidation(
     // 3. Re-read recall signals (now merged) + phase signals, then score + gate.
     const signals = await listRecallSignals(agentId, db);
     const phase = await listPhaseSignals(agentId, db);
-    const dryRun = isMemoryConsolidationDryRun();
+    // Use the resolved per-agent config, not the raw env flag: getConsolidationConfig
+    // merges the agent_consolidation_settings row over the env default, so an
+    // operator toggling dryRun in the settings UI actually takes effect.
+    const dryRun = cfg.dryRun;
     const now = new Date();
 
     // 4. Insert ALL candidates first (passed or not), proposalId null. The

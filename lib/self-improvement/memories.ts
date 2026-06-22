@@ -196,9 +196,15 @@ export async function updateMemory(
     throw new SelfImprovementInputError("Memory status must be approved or archived.");
   }
 
-  // Editing a protected row is forbidden unless this call is itself a protection
-  // toggle (§9.3). Consolidation/curator must never archive/edit a protected row.
-  if (existing.isProtected && input.isProtected === undefined && input.status !== "approved") {
+  const isContentEdit =
+    input.kind !== undefined || input.content !== undefined || input.confidence !== undefined;
+
+  // A protected row may not be content-edited or archived (§9.3). Protection
+  // toggles go through setMemoryProtection, never here; a pure re-approval
+  // (status only, no content change) stays allowed. The gate keys off the ACTION
+  // (edit/archive), not the status field — the old `status !== "approved"` form
+  // let a content edit slip through by sending status:"approved" alongside it.
+  if (existing.isProtected && (isContentEdit || nextStatus === "archived")) {
     throw new SelfImprovementInputError("A protected memory cannot be edited or archived.");
   }
 
@@ -206,8 +212,6 @@ export async function updateMemory(
   // so the human's correction is ground truth and consolidation won't re-
   // archive/"correct" it. A content/kind/confidence edit on a consolidated row
   // is treated as a human correction.
-  const isContentEdit =
-    input.kind !== undefined || input.content !== undefined || input.confidence !== undefined;
   const sourceBefore = existing.source;
   const nextSource =
     input.source !== undefined

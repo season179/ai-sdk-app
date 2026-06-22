@@ -150,7 +150,13 @@ export function parseConsolidationWeights(value: unknown): ConsolidationWeights 
   for (const key of WEIGHT_KEYS) {
     const v = raw[key];
     if (v == null) continue; // keep default
-    const n = typeof v === "number" ? v : Number(v);
+    // Accept only real numbers or non-empty numeric strings. Reject booleans,
+    // arrays, and ""/whitespace, which Number() would silently coerce to a
+    // valid weight (true→1, ""→0, []→0) and corrupt the scorer.
+    if (typeof v !== "number" && typeof v !== "string") {
+      throw new SelfImprovementInputError(`weights.${key} must be a number in 0..1.`);
+    }
+    const n = typeof v === "number" ? v : v.trim() === "" ? Number.NaN : Number(v);
     if (!Number.isFinite(n) || n < 0 || n > 1) {
       throw new SelfImprovementInputError(`weights.${key} must be a number in 0..1.`);
     }
@@ -160,7 +166,10 @@ export function parseConsolidationWeights(value: unknown): ConsolidationWeights 
   // recencyHalfLifeDays: positive number (scoring clamps to ≥1, but reject 0/NaN).
   const hl = raw.recencyHalfLifeDays;
   if (hl != null) {
-    const n = typeof hl === "number" ? hl : Number(hl);
+    if (typeof hl !== "number" && typeof hl !== "string") {
+      throw new SelfImprovementInputError("weights.recencyHalfLifeDays must be a positive number.");
+    }
+    const n = typeof hl === "number" ? hl : hl.trim() === "" ? Number.NaN : Number(hl);
     if (!Number.isFinite(n) || n <= 0) {
       throw new SelfImprovementInputError("weights.recencyHalfLifeDays must be a positive number.");
     }

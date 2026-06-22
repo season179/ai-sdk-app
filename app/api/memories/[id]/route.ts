@@ -1,5 +1,5 @@
 import { memoryErrorResponse } from "@/app/api/memories/_errors";
-import { archiveMemory, updateMemory } from "@/lib/self-improvement/memories";
+import { archiveMemory, setMemoryProtection, updateMemory } from "@/lib/self-improvement/memories";
 import { isUuid } from "@/lib/utils";
 
 type RouteContext = {
@@ -23,6 +23,7 @@ export async function PATCH(req: Request, context: RouteContext) {
     source?: unknown;
     confidence?: unknown;
     status?: "approved" | "archived";
+    isProtected?: boolean;
   };
 
   try {
@@ -32,7 +33,15 @@ export async function PATCH(req: Request, context: RouteContext) {
   }
 
   try {
-    const memory = await updateMemory(id, body);
+    // A protection toggle is its own path (§9.3): setMemoryProtection persists
+    // is_protected/protected_at/protected_by and fires the protected/unprotected
+    // event. updateMemory never writes protection, so isProtected must be
+    // dispatched here rather than passed through (otherwise the pin is a silent
+    // no-op that also logs a misleading "edited" event).
+    const memory =
+      typeof body.isProtected === "boolean"
+        ? await setMemoryProtection(id, body.isProtected)
+        : await updateMemory(id, body);
     return Response.json({ memory });
   } catch (error) {
     return memoryErrorResponse(error);

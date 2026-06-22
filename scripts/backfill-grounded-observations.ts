@@ -10,6 +10,7 @@ import {
   ingestUserTurn,
 } from "@/lib/consolidation/observations";
 import { closePool } from "@/lib/scheduler/db";
+import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
 /**
  * Backfill grounded observations from existing chat + memory history (§8.3).
@@ -112,7 +113,7 @@ async function main() {
     const lastChat = chatRows[chatRows.length - 1];
     const lastMemory = memoryRows[memoryRows.length - 1];
     await advanceCheckpoint(
-      "00000000-0000-0000-0000-000000000001",
+      DEFAULT_AGENT_ID,
       {
         lastChatMessageCreatedAt: lastChat?.createdAt ?? null,
         lastChatSessionId: lastChat?.sessionId ?? null,
