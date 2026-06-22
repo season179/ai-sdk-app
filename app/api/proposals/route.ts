@@ -61,6 +61,7 @@ export async function POST(req: Request) {
       sessionId,
       triggerMessageId,
       reviewerModel: "manual",
+      proposerOrigin: "manual",
     });
 
     return Response.json({ proposal }, { status: 201 });

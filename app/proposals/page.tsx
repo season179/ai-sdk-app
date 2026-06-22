@@ -5,8 +5,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { SiteHeader, SiteHeaderStatus } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
-import type { ReviewProposalKind, ReviewProposalPayload, ReviewProposalStatus } from "@/db/schema";
+import type {
+  AdmissionMetadata,
+  AdmissionPolicy,
+  ReviewProposalKind,
+  ReviewProposalPayload,
+  ReviewProposalStatus,
+} from "@/db/schema";
 import { cn } from "@/lib/utils";
+
+type ReviewProposalOrigin = "manual" | "turn_review" | "consolidation" | "curator";
 
 type ReviewProposal = {
   id: string;
@@ -17,10 +25,26 @@ type ReviewProposal = {
   rationale: string;
   status: ReviewProposalStatus;
   reviewerModel: string | null;
+  proposerOrigin: ReviewProposalOrigin;
+  admissionPolicy: AdmissionPolicy;
+  admissionMetadata: AdmissionMetadata | null;
   appliedAt: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+const ORIGIN_LABELS: Record<ReviewProposalOrigin, string> = {
+  manual: "Manual",
+  turn_review: "Turn review",
+  consolidation: "Consolidation",
+  curator: "Curator",
+};
+
+const POLICY_LABELS: Record<AdmissionPolicy, string> = {
+  human_review: "Awaiting review",
+  auto_apply_low_risk: "Auto-applied",
+  dry_run_only: "Dry-run only",
 };
 
 async function readApiError(response: Response) {
@@ -146,9 +170,16 @@ export default function ProposalsPage() {
                   type="button"
                 >
                   <span className="block truncate font-medium">{proposal.kind}</span>
-                  <span className="mt-1 block truncate text-xs text-muted-foreground">
-                    {proposal.status} · {formatDate(proposal.createdAt)}
+                  <span className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                    <span className="truncate">
+                      {proposal.status} · {formatDate(proposal.createdAt)}
+                    </span>
                   </span>
+                  {proposal.proposerOrigin !== "turn_review" ? (
+                    <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                      {ORIGIN_LABELS[proposal.proposerOrigin]}
+                    </span>
+                  ) : null}
                 </button>
               ))
             )}
@@ -165,10 +196,18 @@ export default function ProposalsPage() {
                   <p className="mt-1 text-xs text-muted-foreground">
                     {selected.reviewerModel ?? "unknown model"} · {formatDate(selected.createdAt)}
                   </p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                      {ORIGIN_LABELS[selected.proposerOrigin]}
+                    </span>
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      {POLICY_LABELS[selected.admissionPolicy]}
+                    </span>
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      {selected.status}
+                    </span>
+                  </div>
                 </div>
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                  {selected.status}
-                </span>
               </div>
 
               <div className="mt-5 grid gap-4">
@@ -178,6 +217,34 @@ export default function ProposalsPage() {
                     {selected.rationale}
                   </p>
                 </section>
+
+                {selected.admissionMetadata ? (
+                  <section className="rounded-lg border border-border p-3">
+                    <h3 className="text-sm font-semibold">Score breakdown</h3>
+                    {selected.admissionMetadata.scoreBps != null ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Total score: {(selected.admissionMetadata.scoreBps / 10000).toFixed(4)} (
+                        {selected.admissionMetadata.scoreBps} bps)
+                        {selected.admissionMetadata.dryRun ? " · dry-run" : ""}
+                      </p>
+                    ) : null}
+                    {selected.admissionMetadata.score ? (
+                      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-4">
+                        {Object.entries(selected.admissionMetadata.score).map(([key, bps]) => (
+                          <div key={key}>
+                            <dt className="inline font-medium text-foreground">
+                              {labelForScoreKey(key)}
+                            </dt>
+                            <dd className="inline">: {(Number(bps) / 10000).toFixed(3)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : null}
+                    {selected.admissionMetadata.gates ? (
+                      <GateResults gates={selected.admissionMetadata.gates} />
+                    ) : null}
+                  </section>
+                ) : null}
 
                 <section>
                   <h3 className="text-sm font-semibold">Payload</h3>
@@ -225,4 +292,76 @@ export default function ProposalsPage() {
       </main>
     </>
   );
+}
+
+function labelForScoreKey(key: string): string {
+  switch (key) {
+    case "relevanceBps":
+      return "Relevance";
+    case "frequencyBps":
+      return "Frequency";
+    case "diversityBps":
+      return "Diversity";
+    case "recencyBps":
+      return "Recency";
+    case "consistencyBps":
+      return "Consistency";
+    case "conceptBps":
+      return "Concept";
+    case "phaseBoostBps":
+      return "Phase boost";
+    case "totalBps":
+      return "Total";
+    default:
+      return key;
+  }
+}
+
+function GateResults({ gates }: { gates: NonNullable<AdmissionMetadata["gates"]> }) {
+  const entries = Object.entries(gates) as [
+    keyof NonNullable<AdmissionMetadata["gates"]>,
+    NonNullable<AdmissionMetadata["gates"]>[keyof NonNullable<AdmissionMetadata["gates"]>],
+  ][];
+  return (
+    <div className="mt-3">
+      <p className="text-xs font-semibold text-muted-foreground">Gates</p>
+      <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+        {entries.map(([key, gate]) => (
+          <li key={key} className="flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-block size-2 rounded-full",
+                gate.passed ? "bg-emerald-500" : "bg-destructive",
+              )}
+              aria-hidden="true"
+            />
+            <span className="font-medium text-foreground">{labelForGate(key)}</span>
+            <span>
+              {gate.passed ? "passed" : "failed"} ·{" "}
+              {"thresholdBps" in gate
+                ? `${(gate as { actualBps: number }).actualBps}/${(gate as { thresholdBps: number }).thresholdBps} bps`
+                : `${(gate as { actual: number }).actual}/${(gate as { threshold: number }).threshold}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function labelForGate(key: string): string {
+  switch (key) {
+    case "minScore":
+      return "Min score";
+    case "recallCount":
+      return "Recall count";
+    case "uniqueQueries":
+      return "Unique queries";
+    case "maxAgeDays":
+      return "Max age (days)";
+    case "groundedEvidence":
+      return "Grounded evidence";
+    default:
+      return key;
+  }
 }

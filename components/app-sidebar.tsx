@@ -2,6 +2,7 @@
 
 import {
   BookOpen,
+  Brain,
   CalendarClock,
   Check,
   MessageSquare,
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { href: "/skills", icon: BookOpen, label: "Skills" },
   { href: "/proposals", icon: Check, label: "Review proposals" },
   { href: "/memories", icon: Pencil, label: "Memories" },
+  { href: "/consolidation", icon: Brain, label: "Consolidation" },
 ] as const;
 
 const MOBILE_QUERY = "(max-width: 639px)";

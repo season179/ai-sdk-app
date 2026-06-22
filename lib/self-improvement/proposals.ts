@@ -2,10 +2,13 @@ import { and, desc, eq, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
+  type AdmissionMetadata,
+  type AdmissionPolicy,
   type AgentReviewProposal,
   agentReviewProposals,
   type NewAgentReviewProposal,
   type ReviewProposalKind,
+  type ReviewProposalOrigin,
   type ReviewProposalPayload,
   type ReviewProposalStatus,
 } from "@/db/schema";
@@ -20,6 +23,9 @@ import {
 } from "@/lib/self-improvement/validation";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
+const PROPOSER_ORIGINS = ["manual", "turn_review", "consolidation", "curator"] as const;
+const ADMISSION_POLICIES = ["human_review", "auto_apply_low_risk", "dry_run_only"] as const;
+
 export type ReviewProposal = {
   id: string;
   agentId: string;
@@ -30,6 +36,12 @@ export type ReviewProposal = {
   rationale: string;
   status: ReviewProposalStatus;
   reviewerModel: string | null;
+  // Who/what minted this proposal (§1.1). Default 'turn_review' matches current behavior.
+  proposerOrigin: ReviewProposalOrigin;
+  // How this proposal is admitted (§1.1). Default 'human_review'.
+  admissionPolicy: AdmissionPolicy;
+  // Score breakdown + gate results + evidence ids for the review UI (§1.1).
+  admissionMetadata: AdmissionMetadata | null;
   appliedAt: string | null;
   error: string | null;
   createdAt: string;
@@ -44,19 +56,32 @@ export type CreateReviewProposalInput = {
   triggerMessageId?: string | null;
   reviewerModel?: string | null;
   agentId?: string;
+  proposerOrigin?: ReviewProposalOrigin;
+  admissionPolicy?: AdmissionPolicy;
+  admissionMetadata?: AdmissionMetadata | null;
 };
 
 export async function listReviewProposals({
   agentId = DEFAULT_AGENT_ID,
   status,
+  proposerOrigin,
+  admissionPolicy,
 }: {
   agentId?: string;
   status?: ReviewProposalStatus;
+  proposerOrigin?: ReviewProposalOrigin;
+  admissionPolicy?: AdmissionPolicy;
 } = {}): Promise<ReviewProposal[]> {
   const conditions = [eq(agentReviewProposals.agentId, agentId)];
 
   if (status) {
     conditions.push(eq(agentReviewProposals.status, status));
+  }
+  if (proposerOrigin) {
+    conditions.push(eq(agentReviewProposals.proposerOrigin, proposerOrigin));
+  }
+  if (admissionPolicy) {
+    conditions.push(eq(agentReviewProposals.admissionPolicy, admissionPolicy));
   }
 
   const rows = await getDb()
@@ -94,10 +119,37 @@ export async function createReviewProposal(
     payload: readPayloadObject(input.payload),
     rationale: parseRationale(input.rationale),
     reviewerModel: input.reviewerModel ?? null,
+    proposerOrigin: parseProposerOrigin(input.proposerOrigin),
+    admissionPolicy: parseAdmissionPolicy(input.admissionPolicy),
+    admissionMetadata: input.admissionMetadata ?? null,
   };
 
   const inserted = await db.insert(agentReviewProposals).values(value).returning();
   return mapProposalRow(inserted[0]);
+}
+
+function parseProposerOrigin(value: unknown): ReviewProposalOrigin {
+  if (value == null) {
+    return "turn_review";
+  }
+  if (typeof value === "string" && PROPOSER_ORIGINS.includes(value as ReviewProposalOrigin)) {
+    return value as ReviewProposalOrigin;
+  }
+  throw new SelfImprovementInputError(
+    `Proposer origin must be one of: ${PROPOSER_ORIGINS.join(", ")}.`,
+  );
+}
+
+function parseAdmissionPolicy(value: unknown): AdmissionPolicy {
+  if (value == null) {
+    return "human_review";
+  }
+  if (typeof value === "string" && ADMISSION_POLICIES.includes(value as AdmissionPolicy)) {
+    return value as AdmissionPolicy;
+  }
+  throw new SelfImprovementInputError(
+    `Admission policy must be one of: ${ADMISSION_POLICIES.join(", ")}.`,
+  );
 }
 
 export async function rejectReviewProposal(id: string): Promise<ReviewProposal> {
@@ -189,6 +241,9 @@ function mapProposalRow(row: AgentReviewProposal): ReviewProposal {
     rationale: row.rationale,
     status: row.status,
     reviewerModel: row.reviewerModel,
+    proposerOrigin: row.proposerOrigin,
+    admissionPolicy: row.admissionPolicy,
+    admissionMetadata: row.admissionMetadata,
     appliedAt: row.appliedAt?.toISOString() ?? null,
     error: row.error,
     createdAt: row.createdAt.toISOString(),

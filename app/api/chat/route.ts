@@ -17,11 +17,15 @@ import {
   truncateConversationAfter,
 } from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
+import { isMemorySearchEnabled } from "@/lib/consolidation/config";
+import { ingestUserTurn } from "@/lib/consolidation/observations";
+import { materializeSnapshot } from "@/lib/consolidation/snapshots";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
 import { loadMemoryBlock } from "@/lib/self-improvement/inject";
+import { memoryTools } from "@/lib/self-improvement/memory-tools";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -136,9 +140,12 @@ async function buildRunMessages({
   sessionId: string | null;
   trigger: ChatTrigger;
   incomingMessage: ChatUIMessage | null;
-}): Promise<ChatUIMessage[]> {
+}): Promise<{ messages: ChatUIMessage[]; isSessionStart: boolean }> {
   if (!sessionId) {
-    return incomingMessage ? [incomingMessage] : [];
+    return {
+      messages: incomingMessage ? [incomingMessage] : [],
+      isSessionStart: Boolean(incomingMessage),
+    };
   }
 
   if (trigger === "regenerate-message") {
@@ -150,17 +157,32 @@ async function buildRunMessages({
     }
 
     const history = (await getChatSession(sessionId))?.messages ?? [];
-    return history.length > 0 ? history : incomingMessage ? [incomingMessage] : [];
+    return {
+      // A regenerate is never a session start: the session already existed.
+      messages: history.length > 0 ? history : incomingMessage ? [incomingMessage] : [],
+      isSessionStart: false,
+    };
   }
 
+  // isSessionStart = priorHistory was empty before appending the incoming msg
+  // (§3c). The snapshot is materialized once on the first turn of a new session
+  // and frozen thereafter.
   const priorHistory = (await getChatSession(sessionId))?.messages ?? [];
+  const isSessionStart = priorHistory.length === 0;
 
   if (incomingMessage) {
     await appendSessionMessages(sessionId, [incomingMessage], { createIfMissing: true });
-    return [...priorHistory, incomingMessage];
+    // §3a: ingest the user turn as grounded observations. Role-gated inside
+    // ingestUserTurn (only role==='user' + text parts), so passing the message
+    // here is safe regardless of role. Fail-soft — ingestion must never break
+    // the chat path. No-op when the flag is off (feature is dark).
+    await ingestUserTurn(sessionId, [incomingMessage]).catch((error) => {
+      console.error("Ingesting user turn failed", error);
+    });
+    return { messages: [...priorHistory, incomingMessage], isSessionStart };
   }
 
-  return priorHistory;
+  return { messages: priorHistory, isSessionStart };
 }
 
 export async function POST(req: Request) {
@@ -243,15 +265,27 @@ export async function POST(req: Request) {
     const requestEstimates: RequestTokenEstimate[] = [];
 
     // Reconstruct the run input server-side from the durable transcript.
-    const fullMessages = await buildRunMessages({ sessionId, trigger, incomingMessage });
+    const { messages: fullMessages, isSessionStart } = await buildRunMessages({
+      sessionId,
+      trigger,
+      incomingMessage,
+    });
 
     // Skill tools and the skills prompt ship together: both come from the same
     // catalog load, so the model never sees tools without their context.
     // User-activated skills are injected per request over the reconstructed
     // transcript; injectUserActivatedSkills is pure and fails soft like the catalog.
+    // §3c: materialize the session-start snapshot only on a new session so the
+    // in-session declarative-memory block is frozen; loadMemoryBlock then reads
+    // from it. Fails soft — if the snapshot is absent it falls back to the live query.
+    if (sessionId && isSessionStart) {
+      await materializeSnapshot(DEFAULT_AGENT_ID, sessionId).catch((error) => {
+        console.error("Materializing memory snapshot failed", error);
+      });
+    }
     const [skillCatalogBlock, memoryBlock, uiMessages] = await Promise.all([
       loadSkillCatalogBlock(),
-      loadMemoryBlock(),
+      loadMemoryBlock(sessionId ?? undefined),
       injectUserActivatedSkills(fullMessages),
     ]);
     // Bind the originating chat into scheduler tools so a task created here
@@ -259,15 +293,30 @@ export async function POST(req: Request) {
     // both exposure paths: the direct toolset (mode=all) and the deferred
     // tool_call path (default search mode).
     const schedulerContext = { originSessionId: sessionId };
+    // §10.3: memory_search is exposed ONLY as a direct tool, gated by
+    // MEMORY_SEARCH_ENABLED — never via the shared toolRegistry (that registry
+    // feeds the deferred tool-search path and would expose it when the flag is off).
+    const memorySearchEnabled = isMemorySearchEnabled();
     const tools = {
       ...(toolExposureMode === "all"
         ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
         : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
+      ...(memorySearchEnabled ? memoryTools : {}),
     };
     const instructions = [
       SYSTEM_PROMPT,
-      ...(memoryBlock ? ["Use these approved durable memories when relevant:", memoryBlock] : []),
+      ...(memoryBlock
+        ? [
+            "Use these approved durable memories when relevant:",
+            memoryBlock,
+            ...(memorySearchEnabled
+              ? [
+                  "The block above is only the core (pinned + top recent) memories. Use the memory_search tool to reach anything not shown — never assume a fact is unknown just because it isn't in the block.",
+                ]
+              : []),
+          ]
+        : []),
       ...(skillCatalogBlock ? [SKILLS_PROMPT, skillCatalogBlock] : []),
       `The current UTC time is ${new Date().toISOString()}.`,
     ].join("\n\n");

@@ -27,7 +27,8 @@ export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "skipp
 export type SkillType = "skill" | "reference";
 export type ChatMessageRole = "user" | "assistant" | "system";
 export type MemoryKind = "preference" | "fact" | "correction" | "persona";
-export type MemorySource = "user" | "review" | "curated";
+// `consolidated` is minted only by consolidation proposals (§1.1 source guard).
+export type MemorySource = "user" | "review" | "curated" | "consolidated";
 export type MemoryStatus = "approved" | "archived";
 export type ReviewProposalKind =
   | "memory_create"
@@ -41,6 +42,86 @@ export type ReviewProposalPayload = Record<string, unknown>;
 // A session is either a normal chat or a dedicated home session a scheduled
 // task owns. The CHECK constraint on agent_chat_sessions is the DB-side backstop.
 export type ChatSessionOrigin = "chat" | "scheduled_task";
+
+// --- Memory consolidation (Appendix A.1) ---
+// Who/what minted a proposal. `turn_review` is the existing per-turn reviewer;
+// `consolidation`/`curator` are the new background proposers; `manual` is a human.
+export type ReviewProposalOrigin = "manual" | "turn_review" | "consolidation" | "curator";
+// How a pending proposal is admitted: human-gated by default, the narrow
+// additive class may auto-apply, dry-run never lands.
+export type AdmissionPolicy = "human_review" | "auto_apply_low_risk" | "dry_run_only";
+// A grounded observation is sourced exclusively from user-authored content.
+// `chat_user` = a user chat turn; `memory_user` = a source='user' memory.
+export type GroundedObservationOrigin = "chat_user" | "memory_user";
+export type ConsolidationRunStatus = "running" | "completed" | "failed";
+export type ConsolidationTrigger = "scheduled" | "manual";
+// Append-only, human-readable timeline of how a memory evolved. Never read
+// back into evidence.
+export type MemoryEventType =
+  | "created"
+  | "edited"
+  | "archived"
+  | "protected"
+  | "unprotected"
+  | "proposed"
+  | "applied"
+  | "rejected"
+  | "consolidation_run";
+export type MemoryEventOrigin = "user" | "review" | "consolidation" | "curator";
+
+// The score breakdown + gate results attached to a consolidation proposal so
+// the review UI can render "why this was/wasn't proposed".
+export type AdmissionMetadata = {
+  version: 1;
+  origin: ReviewProposalOrigin;
+  candidateId?: string;
+  claimKey?: string;
+  claimHash?: string;
+  scoreBps?: number; // 0..10000
+  score?: {
+    relevanceBps: number;
+    frequencyBps: number;
+    diversityBps: number;
+    recencyBps: number;
+    consistencyBps: number;
+    conceptBps: number;
+    phaseBoostBps: number;
+    totalBps: number;
+  };
+  gates?: {
+    minScore: { passed: boolean; actualBps: number; thresholdBps: number };
+    recallCount: { passed: boolean; actual: number; threshold: number };
+    uniqueQueries: { passed: boolean; actual: number; threshold: number };
+    maxAgeDays: { passed: boolean; actual: number; threshold: number };
+    groundedEvidence: { passed: boolean; actual: number; threshold: 1 };
+  };
+  groundedObservationIds?: string[];
+  autoApply?: { eligible: boolean; reasons: string[] };
+  dryRun?: boolean;
+};
+
+// agent_memory_events.detail — human-readable before/after + reason (e.g.
+// "duplicate_claim_hash"). Never re-enters evidence.
+export type MemoryEventDetail = {
+  version: 1;
+  before?: unknown;
+  after?: unknown;
+  admissionMetadata?: AdmissionMetadata;
+  reason?: string;
+};
+
+// Per-agent scoring weights (stored in agent_consolidation_settings.weights).
+export type ConsolidationWeights = {
+  relevance: number; // 0..1
+  frequency: number;
+  diversity: number;
+  recency: number;
+  consistency: number;
+  concept: number;
+  phaseLightBoost: number; // cap
+  phaseRemBoost: number; // cap
+  recencyHalfLifeDays: number;
+};
 
 export const agentScheduledTasks = pgTable(
   "agent_scheduled_tasks",
@@ -236,6 +317,15 @@ export const agentMemories = pgTable(
       (): AnyPgColumn => agentReviewProposals.id,
       { onDelete: "set null" },
     ),
+    // Normalized-content hash for dedupe/idempotency (§1.1). The partial unique
+    // index on (agent_id, kind, claim_hash) is what prevents duplicate durable
+    // facts and makes auto-apply races safe (§4.4).
+    claimHash: text("claim_hash"),
+    // Human "pin": consolidation and curator must never archive/edit a protected
+    // row (§4.4 auto-apply predicate, §9.3 lock badge).
+    isProtected: boolean("is_protected").notNull().default(false),
+    protectedAt: timestamp("protected_at", { withTimezone: true }),
+    protectedBy: text("protected_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -245,13 +335,21 @@ export const agentMemories = pgTable(
       "agent_memories_kind_check",
       sql`${t.kind} in ('preference', 'fact', 'correction', 'persona')`,
     ),
-    check("agent_memories_source_check", sql`${t.source} in ('user', 'review', 'curated')`),
+    check(
+      "agent_memories_source_check",
+      sql`${t.source} in ('user', 'review', 'curated', 'consolidated')`,
+    ),
     check("agent_memories_status_check", sql`${t.status} in ('approved', 'archived')`),
     check("agent_memories_content_check", sql`char_length(${t.content}) between 1 and 2000`),
     check("agent_memories_confidence_check", sql`${t.confidence} between 0 and 100`),
     index("agent_memories_prompt_idx")
       .on(t.agentId, t.kind, t.createdAt)
       .where(sql`${t.status} = 'approved' and ${t.deletedAt} is null`),
+    // Dedupe by durable identity. The index (not app logic) is what prevents
+    // duplicate durable facts and makes auto-apply races safe (§4.4).
+    uniqueIndex("agent_memories_claim_hash_uniq")
+      .on(t.agentId, t.kind, t.claimHash)
+      .where(sql`${t.deletedAt} is null and ${t.claimHash} is not null`),
   ],
 );
 
@@ -267,6 +365,21 @@ export const agentReviewProposals = pgTable(
     rationale: text("rationale").notNull(),
     status: text("status").$type<ReviewProposalStatus>().notNull().default("pending"),
     reviewerModel: text("reviewer_model"),
+    // Who/what minted this proposal. Defaults to 'turn_review' so existing
+    // per-turn reviewers keep their current behavior on backfill (§1.1).
+    proposerOrigin: text("proposer_origin")
+      .$type<ReviewProposalOrigin>()
+      .notNull()
+      .default("turn_review"),
+    // How this proposal is admitted: human-gated by default. Only the narrow
+    // additive class (§4.4) may be 'auto_apply_low_risk'; 'dry_run_only' never lands.
+    admissionPolicy: text("admission_policy")
+      .$type<AdmissionPolicy>()
+      .notNull()
+      .default("human_review"),
+    // Score breakdown + gate results + evidence ids, rendered by the review UI
+    // (§9.2 EvidenceDrawer). Typed shape: AdmissionMetadata (Appendix A.1).
+    admissionMetadata: jsonb("admission_metadata").$type<AdmissionMetadata>(),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -284,6 +397,14 @@ export const agentReviewProposals = pgTable(
     check(
       "agent_review_proposals_rationale_check",
       sql`char_length(${t.rationale}) between 1 and 2000`,
+    ),
+    check(
+      "agent_review_proposals_proposer_origin_check",
+      sql`${t.proposerOrigin} in ('manual', 'turn_review', 'consolidation', 'curator')`,
+    ),
+    check(
+      "agent_review_proposals_admission_policy_check",
+      sql`${t.admissionPolicy} in ('human_review', 'auto_apply_low_risk', 'dry_run_only')`,
     ),
     index("agent_review_proposals_pending_idx")
       .on(t.agentId, t.createdAt)
@@ -311,6 +432,290 @@ export const agentReviewStates = pgTable(
   ],
 );
 
+// ============================================================================
+// Memory consolidation (§1.2). All new tables are agent_-prefixed, partial-
+// indexed, soft-deleted where rows are user-visible. Exact columns/types in
+// Appendix A.4–A.9.
+// ============================================================================
+
+/**
+ * The firewall (§4.1). One row per user-authored unit — a chat_user row points
+ * at a user message; a memory_user row points at a source='user' memory.
+ * Assistant/derivative content can never enter this table (role-gated single
+ * writer, §3a), which is what makes "score your own output" structurally
+ * impossible. The source-shape CHECK (not a WHERE clause) enforces which fields
+ * each origin carries. sourceMessageId is text with no FK because
+ * agent_chat_messages has a composite PK (session_id, id), so a single-column FK
+ * is impossible. Dedupe is by source identity (unique per origin), NEVER by
+ * content_hash — repeated user statements are real evidence and must each count.
+ */
+export const agentGroundedObservations = pgTable(
+  "agent_grounded_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    // Chat provenance. NO FK: agent_chat_messages.id is text and not unique alone
+    // (composite PK (session_id, id)).
+    sessionId: uuid("session_id"),
+    originKind: text("origin_kind").$type<GroundedObservationOrigin>().notNull(),
+    sourceMessageId: text("source_message_id"),
+    sourceMemoryId: uuid("source_memory_id").references(() => agentMemories.id),
+    content: text("content").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    check(
+      "agent_grounded_observations_origin_kind_check",
+      sql`${t.originKind} in ('chat_user', 'memory_user')`,
+    ),
+    check(
+      "agent_grounded_observations_content_check",
+      sql`char_length(${t.content}) between 1 and 2000`,
+    ),
+    // Source shape is enforced by a CHECK (not convention): a chat_user row must
+    // carry session_id + source_message_id and no source_memory_id; a memory_user
+    // row must carry source_memory_id and neither chat field (§1.2).
+    check(
+      "agent_grounded_observations_source_shape",
+      sql`(${t.originKind} = 'chat_user' and ${t.sessionId} is not null and ${t.sourceMessageId} is not null and ${t.sourceMemoryId} is null) or (${t.originKind} = 'memory_user' and ${t.sourceMemoryId} is not null and ${t.sourceMessageId} is null)`,
+    ),
+    // Dedupe by source identity, not content. Repeated user statements each count.
+    uniqueIndex("agent_grounded_observations_chat_uniq")
+      .on(t.agentId, t.sessionId, t.sourceMessageId)
+      .where(sql`${t.originKind} = 'chat_user' and ${t.deletedAt} is null`),
+    uniqueIndex("agent_grounded_observations_memory_uniq")
+      .on(t.agentId, t.sourceMemoryId)
+      .where(sql`${t.originKind} = 'memory_user' and ${t.deletedAt} is null`),
+    index("agent_grounded_observations_agent_created_idx")
+      .on(t.agentId, t.createdAt)
+      .where(sql`${t.deletedAt} is null`),
+  ],
+);
+
+/**
+ * Evidence accumulation (machine state, never in prompt). One row per normalized
+ * claim, pointing back at the grounded observations that back it via an id list
+ * (not hard FKs, so observation pruning never cascades into evidence — §1.3).
+ * Scores are integer basis points (0..10000, §0.5).
+ */
+export const agentRecallSignals = pgTable(
+  "agent_recall_signals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    claimKey: text("claim_key").notNull(),
+    claimHash: text("claim_hash").notNull(),
+    snippet: text("snippet").notNull(),
+    // id list into agent_grounded_observations — NOT hard FKs (§1.3).
+    groundedObservationIds: jsonb("grounded_observation_ids").$type<string[]>().notNull(),
+    recallCount: integer("recall_count").notNull().default(0),
+    uniqueQueryCount: integer("unique_query_count").notNull().default(0),
+    queryHashes: jsonb("query_hashes").$type<string[]>().notNull().default([]),
+    recallDays: jsonb("recall_days").$type<string[]>().notNull().default([]),
+    conceptTags: jsonb("concept_tags").$type<string[]>().notNull().default([]),
+    totalScoreBps: integer("total_score_bps").notNull().default(0),
+    maxScoreBps: integer("max_score_bps").notNull().default(0),
+    firstRecalledAt: timestamp("first_recalled_at", { withTimezone: true }),
+    lastRecalledAt: timestamp("last_recalled_at", { withTimezone: true }),
+    promotedAt: timestamp("promoted_at", { withTimezone: true }),
+    promotedProposalId: uuid("promoted_proposal_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_recall_signals_score_check", sql`${t.totalScoreBps} between 0 and 10000`),
+    check("agent_recall_signals_max_score_check", sql`${t.maxScoreBps} between 0 and 10000`),
+    check("agent_recall_signals_recall_count_check", sql`${t.recallCount} >= 0`),
+    check("agent_recall_signals_unique_query_count_check", sql`${t.uniqueQueryCount} >= 0`),
+    uniqueIndex("agent_recall_signals_claim_uniq").on(t.agentId, t.claimHash),
+    index("agent_recall_signals_agent_idx").on(t.agentId, t.lastRecalledAt),
+  ],
+);
+
+/**
+ * Bounded phase boosts (§4.2). Phase hits give a small capped boost only; they
+ * can never satisfy the count/diversity gates alone. One row per agent+claim.
+ */
+export const agentPhaseSignals = pgTable(
+  "agent_phase_signals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    claimKey: text("claim_key").notNull(),
+    lightHits: integer("light_hits").notNull().default(0),
+    remHits: integer("rem_hits").notNull().default(0),
+    lastLightAt: timestamp("last_light_at", { withTimezone: true }),
+    lastRemAt: timestamp("last_rem_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_phase_signals_light_hits_check", sql`${t.lightHits} >= 0`),
+    check("agent_phase_signals_rem_hits_check", sql`${t.remHits} >= 0`),
+    uniqueIndex("agent_phase_signals_claim_uniq").on(t.agentId, t.claimKey),
+  ],
+);
+
+/**
+ * Incremental ingestion watermark (§1.2). Tuple checkpoints, not a single id,
+ * because chat-message id is not globally unique (composite PK). Scans order by
+ * (created_at, session_id, id) for chat and (created_at, id) for memories. One
+ * row per agent (singleton via the default agent id).
+ */
+export const agentIngestionCheckpoints = pgTable("agent_ingestion_checkpoints", {
+  agentId: uuid("agent_id").primaryKey().default("00000000-0000-0000-0000-000000000001"),
+  lastChatMessageCreatedAt: timestamp("last_chat_message_created_at", { withTimezone: true }),
+  lastChatSessionId: uuid("last_chat_session_id"),
+  lastChatMessageId: text("last_chat_message_id"),
+  lastMemoryCreatedAt: timestamp("last_memory_created_at", { withTimezone: true }),
+  lastMemoryId: uuid("last_memory_id"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * The two-state fix (§0.4, §3c). One snapshot per session (session_id UNIQUE).
+ * The chat route renders from renderedBlock so the in-session prompt is frozen;
+ * durable writes affect the NEXT session's snapshot.
+ */
+export const agentMemorySnapshots = pgTable(
+  "agent_memory_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => agentChatSessions.id, { onDelete: "cascade" }),
+    renderedBlock: text("rendered_block").notNull(),
+    memoryIds: jsonb("memory_ids").$type<string[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One snapshot per session — the freeze point.
+    uniqueIndex("agent_memory_snapshots_session_uniq").on(t.sessionId),
+  ],
+);
+
+/**
+ * Per-agent operator config (§5). Mirrors env defaults, overridable in the
+ * /consolidation UI. Thresholds stored as integers / basis points (§0.5).
+ */
+export const agentConsolidationSettings = pgTable(
+  "agent_consolidation_settings",
+  {
+    agentId: uuid("agent_id").primaryKey().default("00000000-0000-0000-0000-000000000001"),
+    enabled: boolean("enabled").notNull().default(false),
+    autoApplyEnabled: boolean("auto_apply_enabled").notNull().default(false),
+    dryRun: boolean("dry_run").notNull().default(true),
+    minScoreBps: integer("min_score_bps").notNull().default(8000),
+    minRecallCount: integer("min_recall_count").notNull().default(3),
+    minUniqueQueries: integer("min_unique_queries").notNull().default(3),
+    maxAgeDays: integer("max_age_days").notNull().default(30),
+    weights: jsonb("weights").$type<ConsolidationWeights>(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedBy: text("updated_by"),
+  },
+  (t) => [
+    check(
+      "agent_consolidation_settings_min_score_check",
+      sql`${t.minScoreBps} between 0 and 10000`,
+    ),
+    check("agent_consolidation_settings_min_recall_check", sql`${t.minRecallCount} >= 0`),
+    check("agent_consolidation_settings_min_unique_queries_check", sql`${t.minUniqueQueries} >= 0`),
+    check("agent_consolidation_settings_max_age_check", sql`${t.maxAgeDays} >= 0`),
+  ],
+);
+
+/**
+ * One row per sweep (§7). The run log: scanned/evaluated/passed/proposed
+ * counters, duration, errors.
+ */
+export const agentConsolidationRuns = pgTable(
+  "agent_consolidation_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    status: text("status").$type<ConsolidationRunStatus>().notNull(),
+    trigger: text("trigger").$type<ConsolidationTrigger>().notNull(),
+    observationsScanned: integer("observations_scanned").notNull().default(0),
+    candidatesEvaluated: integer("candidates_evaluated").notNull().default(0),
+    candidatesPassed: integer("candidates_passed").notNull().default(0),
+    proposalsCreated: integer("proposals_created").notNull().default(0),
+    error: text("error"),
+  },
+  (t) => [
+    check(
+      "agent_consolidation_runs_status_check",
+      sql`${t.status} in ('running', 'completed', 'failed')`,
+    ),
+    check("agent_consolidation_runs_trigger_check", sql`${t.trigger} in ('scheduled', 'manual')`),
+    index("agent_consolidation_runs_agent_idx").on(t.agentId, t.startedAt),
+  ],
+);
+
+/**
+ * Per-run scored claims — the dry-run preview + explain-why surface (§7, §9.4).
+ * scoreBps is basis points; gateResults carries the per-gate pass/fail; passed
+ * is the overall verdict; proposalId links to the created review proposal if any.
+ */
+export const agentConsolidationCandidates = pgTable(
+  "agent_consolidation_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentConsolidationRuns.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    claimKey: text("claim_key").notNull(),
+    snippet: text("snippet").notNull(),
+    scoreBps: integer("score_bps").notNull(),
+    gateResults: jsonb("gate_results").$type<AdmissionMetadata["gates"]>(),
+    passed: boolean("passed").notNull(),
+    proposalId: uuid("proposal_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_consolidation_candidates_score_check", sql`${t.scoreBps} between 0 and 10000`),
+    index("agent_consolidation_candidates_run_idx").on(t.runId),
+  ],
+);
+
+/**
+ * The timeline / "see the evolution" feed (§7, §9.1). Append-only, human-
+ * readable, and NEVER read back into evidence. Do not log memory_search usage
+ * here (usage ≠ evolution).
+ */
+export const agentMemoryEvents = pgTable(
+  "agent_memory_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    eventType: text("event_type").$type<MemoryEventType>().notNull(),
+    memoryId: uuid("memory_id"),
+    proposalId: uuid("proposal_id"),
+    runId: uuid("run_id"),
+    origin: text("origin").$type<MemoryEventOrigin>().notNull(),
+    summary: text("summary").notNull(),
+    detail: jsonb("detail").$type<MemoryEventDetail>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_memory_events_event_type_check",
+      sql`${t.eventType} in ('created', 'edited', 'archived', 'protected', 'unprotected', 'proposed', 'applied', 'rejected', 'consolidation_run')`,
+    ),
+    check(
+      "agent_memory_events_origin_check",
+      sql`${t.origin} in ('user', 'review', 'consolidation', 'curator')`,
+    ),
+    index("agent_memory_events_agent_created_idx").on(t.agentId, t.createdAt),
+    index("agent_memory_events_memory_idx").on(t.memoryId, t.createdAt),
+  ],
+);
+
 export type AgentScheduledTask = typeof agentScheduledTasks.$inferSelect;
 export type NewAgentScheduledTask = typeof agentScheduledTasks.$inferInsert;
 export type AgentScheduledTaskRun = typeof agentScheduledTaskRuns.$inferSelect;
@@ -327,3 +732,21 @@ export type AgentReviewProposal = typeof agentReviewProposals.$inferSelect;
 export type NewAgentReviewProposal = typeof agentReviewProposals.$inferInsert;
 export type AgentReviewState = typeof agentReviewStates.$inferSelect;
 export type NewAgentReviewState = typeof agentReviewStates.$inferInsert;
+export type AgentGroundedObservation = typeof agentGroundedObservations.$inferSelect;
+export type NewAgentGroundedObservation = typeof agentGroundedObservations.$inferInsert;
+export type AgentRecallSignal = typeof agentRecallSignals.$inferSelect;
+export type NewAgentRecallSignal = typeof agentRecallSignals.$inferInsert;
+export type AgentPhaseSignal = typeof agentPhaseSignals.$inferSelect;
+export type NewAgentPhaseSignal = typeof agentPhaseSignals.$inferInsert;
+export type AgentIngestionCheckpoint = typeof agentIngestionCheckpoints.$inferSelect;
+export type NewAgentIngestionCheckpoint = typeof agentIngestionCheckpoints.$inferInsert;
+export type AgentMemorySnapshot = typeof agentMemorySnapshots.$inferSelect;
+export type NewAgentMemorySnapshot = typeof agentMemorySnapshots.$inferInsert;
+export type AgentConsolidationSettings = typeof agentConsolidationSettings.$inferSelect;
+export type NewAgentConsolidationSettings = typeof agentConsolidationSettings.$inferInsert;
+export type AgentConsolidationRun = typeof agentConsolidationRuns.$inferSelect;
+export type NewAgentConsolidationRun = typeof agentConsolidationRuns.$inferInsert;
+export type AgentConsolidationCandidate = typeof agentConsolidationCandidates.$inferSelect;
+export type NewAgentConsolidationCandidate = typeof agentConsolidationCandidates.$inferInsert;
+export type AgentMemoryEvent = typeof agentMemoryEvents.$inferSelect;
+export type NewAgentMemoryEvent = typeof agentMemoryEvents.$inferInsert;
