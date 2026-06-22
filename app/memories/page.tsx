@@ -229,8 +229,8 @@ export default function MemoriesPage() {
         {tab === "timeline" ? (
           <TimelineView events={events} />
         ) : (
-          <div className="grid gap-6 lg:grid-cols-[minmax(16rem,21rem)_minmax(0,1fr)]">
-            <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
+          <div className="grid gap-6 lg:grid-cols-[minmax(16rem,21rem)_minmax(0,1fr)] lg:items-start">
+            <aside className="min-w-0">
               <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                 <Brain className="size-3.5" aria-hidden="true" />
                 Memories
@@ -277,13 +277,13 @@ export default function MemoriesPage() {
               </div>
             </aside>
 
-            <section className="grid min-w-0 gap-6">
+            <section className="grid min-w-0 gap-6 pt-6">
               <div className="rounded-lg border border-border bg-card p-4">
                 <h2 className="text-lg font-semibold">Create memory</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
                   The client cannot set source — every manual memory is <code>source: user</code>.
                 </p>
-                <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_minmax(0,8rem)]">
+                <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_minmax(0,8rem)] sm:items-start">
                   <label className="grid gap-1 text-xs font-medium text-muted-foreground">
                     Kind
                     <select

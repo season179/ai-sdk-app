@@ -136,17 +136,18 @@ export default function ProposalsPage() {
           </SiteHeaderStatus>
         }
       />
-      <main className="mx-auto grid w-full max-w-7xl gap-6 px-4 pb-10 sm:px-8 lg:grid-cols-[minmax(16rem,21rem)_minmax(0,1fr)] lg:px-10">
+      <main className="mx-auto w-full max-w-7xl px-4 pb-10 sm:px-8 lg:px-10">
         <h1 className="sr-only">Review proposals</h1>
 
         {error ? (
-          <div className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive lg:col-span-2">
+          <div className="mb-4 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">
             <AlertCircle className="mr-2 inline size-4" aria-hidden="true" />
             {error}
           </div>
         ) : null}
 
-        <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
+        <div className="grid gap-6 lg:grid-cols-[minmax(16rem,21rem)_minmax(0,1fr)] lg:items-start">
+        <aside className="min-w-0">
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
             <Sparkles className="size-3.5" aria-hidden="true" />
             Proposals
@@ -219,7 +220,7 @@ export default function ProposalsPage() {
                 </section>
 
                 {selected.admissionMetadata ? (
-                  <section className="rounded-lg border border-border p-3">
+                  <section>
                     <h3 className="text-sm font-semibold">Score breakdown</h3>
                     {selected.admissionMetadata.scoreBps != null ? (
                       <p className="mt-1 text-xs text-muted-foreground">
@@ -284,11 +285,15 @@ export default function ProposalsPage() {
               </div>
             </div>
           ) : (
-            <div className="rounded-lg border border-dashed border-border p-8 text-sm text-muted-foreground">
-              Select a proposal to review.
+            <div>
+              <div className="mb-2 text-xs font-semibold text-muted-foreground">Review</div>
+              <div className="rounded-lg border border-dashed border-border p-8 text-sm text-muted-foreground">
+                Select a proposal to review.
+              </div>
             </div>
           )}
         </section>
+        </div>
       </main>
     </>
   );
