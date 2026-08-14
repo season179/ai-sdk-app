@@ -46,7 +46,7 @@ export async function syncConsolidationSchedule(): Promise<void> {
 
   if (!enabled || !cron) {
     try {
-      await boss.unschedule(CRON_NAME);
+      await boss.unschedule(CONSOLIDATION_QUEUE_NAME, CRON_NAME);
     } catch {
       // unschedule throws if the schedule doesn't exist; treat as a no-op.
     }
@@ -54,10 +54,10 @@ export async function syncConsolidationSchedule(): Promise<void> {
   }
 
   await boss.schedule(
-    CRON_NAME,
+    CONSOLIDATION_QUEUE_NAME,
     cron,
     { agentId: DEFAULT_AGENT_ID, trigger: "scheduled" } satisfies ConsolidationJobData,
-    consolidationSendOptions(DEFAULT_AGENT_ID),
+    { key: CRON_NAME, ...consolidationSendOptions(DEFAULT_AGENT_ID) },
   );
 }
 
