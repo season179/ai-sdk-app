@@ -42,7 +42,12 @@ export async function generateSessionTitle({
   try {
     const openrouter = createOpenRouter({ apiKey });
     const { text } = await generateText({
-      model: openrouter.chat(model),
+      // Reasoning models would spend the whole maxOutputTokens budget thinking
+      // and return an empty title; OpenRouter translates this off-switch for
+      // whichever model is configured.
+      model: openrouter.chat(model, {
+        reasoning: { enabled: false, effort: "none", exclude: true },
+      }),
       system: TITLE_SYSTEM_PROMPT,
       prompt: [
         "Conversation to title:",
