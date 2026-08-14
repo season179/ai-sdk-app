@@ -140,6 +140,36 @@ async function processInstructionJob(
     );
   }
 
+  // Re-check after the slow model round to close the mid-flight cancel race;
+  // advance completed rounds before halting so resume cannot replay them. Fail
+  // open on lookup errors so a transient DB blip cannot stall a healthy chain.
+  try {
+    const currentTask = await getScheduledTaskById(task.id);
+
+    if (!currentTask || currentTask.status !== "active") {
+      if (verdict) {
+        try {
+          await setInstructionRound(task.id, payload.round + 1);
+        } catch (error) {
+          console.error(
+            `Advancing halted instruction task ${task.id} past round ${payload.round} failed`,
+            error,
+          );
+        }
+      }
+
+      console.log(
+        `Instruction chain for task ${task.id} halted after round ${payload.round}; task is no longer active.`,
+      );
+      return;
+    }
+  } catch (error) {
+    console.error(
+      `Status re-check failed for instruction task ${task.id}; continuing the chain`,
+      error,
+    );
+  }
+
   // Append the round's turn into the task's home session, fail-soft: the round
   // is already durably recorded in agent_scheduled_task_runs, so a transcript
   // error must never stall the chain (advanceInstructionChain is isolated
