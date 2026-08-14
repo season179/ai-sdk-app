@@ -34,19 +34,18 @@ Real (non-mock) scheduler tools backed by pg-boss, in the same catalog the tool 
    OPENROUTER_DEFAULT_MODEL=...
    TOOL_EXPOSURE_MODE=search
 
-   DATABASE_URL=postgres://ai_sdk_app:ai_sdk_app@localhost:5433/ai_sdk_app
+   DATABASE_URL=postgres://ai_sdk_app:ai_sdk_app@localhost:5432/ai_sdk_app
    PGBOSS_SCHEMA=pgboss
    DEFAULT_SCHEDULE_TIMEZONE=UTC
    ```
 
    `OPENROUTER_DEFAULT_MODEL` is used directly as the chat model. The app intentionally fails with a clear server error if either variable is missing.
    `TOOL_EXPOSURE_MODE` is optional. `search` sends only the tool-search bridge tools; `all` sends every mock-backed tool schema for baseline comparison.
-   The `DATABASE_URL` block is only needed for scheduled tasks and skills. Any Postgres works — the defaults match the optional `docker-compose.yml`.
+   The `DATABASE_URL` block is only needed for scheduled tasks and skills. Any Postgres works — create an `ai_sdk_app` role and database matching the URL, or point it at your own.
 
-4. Start Postgres and run migrations (only needed for scheduled tasks and skills). If you already run Postgres, point `DATABASE_URL` at it and skip the Docker step:
+4. Run migrations against your Postgres (only needed for scheduled tasks and skills):
 
    ```bash
-   docker compose up -d  # optional: only if you don't have a local Postgres
    pnpm db:migrate
    ```
 

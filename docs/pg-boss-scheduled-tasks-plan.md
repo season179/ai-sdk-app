@@ -237,7 +237,7 @@ Use `agent-browser` for browser verification:
 - **Migrations:** raw SQL scripts in `db/migrations/` with a tiny runner (`scripts/migrate.ts`, `pnpm db:migrate`) tracking applied files in `schema_migrations`.
 - **V1 execution:** explicit tool calls only, stored as a discriminated `payload jsonb` (`{ "kind": "tool_call", "toolName", "arguments" }`) instead of the `instruction text` column drafted above. The worker dispatches on `payload.kind`, so a future `instruction` kind (agent-loop execution) is a new dispatcher branch, not a migration — deliberately a two-way door.
 - **Pause/resume:** included in V1 for both task types. Pause unschedules (cron) or cancels the pending job (one-off); resume re-schedules or sends a fresh job (one-off resume requires `run_at` still in the future). A `completed` status was also added for one-off tasks that ran.
-- **Deployment:** local-only. Postgres via `docker-compose.yml` (port 5433), worker via `pnpm worker:scheduled-tasks`.
+- **Deployment:** local-only. Postgres via local install (port 5432), worker via `pnpm worker:scheduled-tasks`.
 
 ## Implementation Notes (post-build)
 
