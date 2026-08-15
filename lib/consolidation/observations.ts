@@ -8,12 +8,14 @@ import {
   agentIngestionCheckpoints,
   agentMemories,
   agentMemoryVersions,
+  agentTraceEvents,
   type GroundedObservationOrigin,
   type NewAgentGroundedObservation,
 } from "@/db/schema";
 import type { ChatUIMessage } from "@/lib/chat/sessions";
 import { contentHash } from "@/lib/consolidation/normalize";
 import { buildUserMessageEvent } from "@/lib/memory/capture";
+import { redactText } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
@@ -111,7 +113,10 @@ export async function ingestUserTurn(
 
   const rows: NewAgentGroundedObservation[] = [];
   for (const item of userTexts) {
-    const chunks = chunkText(item.text, OBSERVATION_CONTENT_MAX);
+    // Grounded evidence is a durable memory input, so redact before both
+    // persistence and hashing; the trace copy follows the same policy.
+    const redacted = redactText(item.text).text;
+    const chunks = chunkText(redacted, OBSERVATION_CONTENT_MAX);
     chunks.forEach((chunk, index) => {
       rows.push({
         agentId,
@@ -145,6 +150,36 @@ export async function ingestUserTurn(
     .onConflictDoNothing()
     .returning({ id: agentGroundedObservations.id });
 
+  // Source identity is stable across retries, while trace events are
+  // attempt-specific. Repoint the observation to the newest attempt's user
+  // event so a later successful retry is eligible for consolidation.
+  for (const row of rows) {
+    if (
+      typeof row.sessionId !== "string" ||
+      typeof row.sourceMessageId !== "string" ||
+      typeof row.traceEventId !== "string" ||
+      typeof row.content !== "string" ||
+      typeof row.contentHash !== "string"
+    ) {
+      continue;
+    }
+    await db
+      .update(agentGroundedObservations)
+      .set({
+        traceEventId: row.traceEventId,
+        content: row.content,
+        contentHash: row.contentHash,
+      })
+      .where(
+        and(
+          eq(agentGroundedObservations.agentId, agentId),
+          eq(agentGroundedObservations.sessionId, row.sessionId),
+          eq(agentGroundedObservations.sourceMessageId, row.sourceMessageId),
+          isNull(agentGroundedObservations.deletedAt),
+        ),
+      );
+  }
+
   return inserted.length;
 }
 
@@ -164,7 +199,7 @@ export async function ingestUserMemory(
     throw new Error("User-memory observations require a trace event.");
   }
 
-  const chunk = content.trim().slice(0, OBSERVATION_CONTENT_MAX);
+  const chunk = redactText(content).text.trim().slice(0, OBSERVATION_CONTENT_MAX);
   if (!chunk) {
     return;
   }
@@ -223,11 +258,29 @@ export async function listGroundedObservations(
     conditions.push(gt(agentGroundedObservations.createdAt, since));
   }
 
-  return db
-    .select()
+  const rows = await db
+    .select({ observation: agentGroundedObservations })
     .from(agentGroundedObservations)
-    .where(and(...conditions))
+    .innerJoin(agentTraceEvents, eq(agentTraceEvents.id, agentGroundedObservations.traceEventId))
+    .where(
+      and(
+        ...conditions,
+        sql`(
+          ${agentTraceEvents.eventType} in ('explicit_memory_write', 'legacy_import')
+          or (
+            select terminal.terminal_status
+            from agent_trace_events terminal
+            where terminal.agent_id = ${agentTraceEvents.agentId}
+              and terminal.trace_id = ${agentTraceEvents.traceId}
+              and terminal.event_type = 'task_terminal_state'
+            order by terminal.sequence_no desc, terminal.ingested_at desc
+            limit 1
+          ) = 'completed'
+        )`,
+      ),
+    )
     .orderBy(asc(agentGroundedObservations.createdAt), asc(agentGroundedObservations.id));
+  return rows.map((row) => row.observation);
 }
 
 // --- Incremental watermark (§1.2) ---

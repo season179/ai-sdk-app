@@ -12,9 +12,9 @@ import {
   agentTraceEvents,
 } from "@/db/schema";
 import { appendSessionMessages } from "@/lib/chat/sessions";
-import { buildUserMessageEvent } from "@/lib/memory/capture";
+import { buildTerminalEvent, buildUserMessageEvent } from "@/lib/memory/capture";
 import { sanitizeTracePayload } from "@/lib/memory/redaction";
-import { appendTraceEvents } from "@/lib/memory/trace";
+import { appendTraceEvents, listCompletedTraceWindow } from "@/lib/memory/trace";
 import { closePool, getPool } from "@/lib/scheduler/db";
 
 const available =
@@ -62,6 +62,59 @@ integration("trace journal (integration)", () => {
       .from(agentTraceArtifacts)
       .where(eq(agentTraceArtifacts.artifactHash, sanitized.artifact?.artifactHash ?? ""));
     expect(artifacts).toHaveLength(1);
+  });
+
+  it("loads a complete tool-heavy trace beyond the former 500-event cap", async () => {
+    const sessionId = randomUUID();
+    const traceId = randomUUID();
+    const occurredAt = new Date();
+    const events = Array.from({ length: 520 }, (_, sequenceNo) => {
+      const sanitized = sanitizeTracePayload({ sequenceNo });
+      return {
+        agentId,
+        traceId,
+        sessionId,
+        sequenceNo,
+        eventType: "environment_observation" as const,
+        actor: "system" as const,
+        trustClass: "system_record" as const,
+        payload: sanitized.payload,
+        contentHash: sanitized.contentHash,
+        idempotencyKey: `${traceId}:${sequenceNo}`,
+        retentionClass: "standard" as const,
+        occurredAt,
+      };
+    });
+    events.push(
+      buildTerminalEvent({ agentId, traceId, sessionId, occurredAt }, "completed") as never,
+    );
+    await appendTraceEvents(events);
+    const window = await listCompletedTraceWindow({
+      agentId,
+      sessionId,
+      since: new Date(occurredAt.getTime() - 1),
+      expectedTraceId: traceId,
+    });
+    expect(window.filter((row) => row.traceId === traceId)).toHaveLength(521);
+  });
+
+  it("expires overflow artifacts with the strictest referencing event", async () => {
+    const sessionId = randomUUID();
+    const event = buildUserMessageEvent(
+      { agentId, sessionId, traceId: randomUUID() },
+      {
+        id: `msg-${randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "x".repeat(300_000) }],
+      },
+    );
+    await appendTraceEvents([event]);
+    const [artifact] = await getDb()
+      .select()
+      .from(agentTraceArtifacts)
+      .where(eq(agentTraceArtifacts.artifactHash, event.artifact?.artifactHash ?? ""));
+    expect(artifact.expiresAt?.toISOString()).toBe(event.expiresAt?.toISOString());
+    expect(artifact.byteSize).toBeGreaterThan(artifact.content?.byteLength ?? 0);
   });
 
   it("commits user message, trace, and grounded observation together", async () => {

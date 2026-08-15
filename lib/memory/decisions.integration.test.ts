@@ -99,6 +99,44 @@ integration("scheduled decisions ledger (integration)", () => {
     expect(history).toHaveLength(1);
   });
 
+  it("stores only bounded redacted canonical decision and outcome values", async () => {
+    const secret = "api_key=super-secret-value";
+    const decision = await recordScheduledDecision({
+      agentId,
+      taskId,
+      pgBossJobId: randomUUID(),
+      traceId: randomUUID(),
+      round: 88,
+      retryCount: 0,
+      selectedOption: secret,
+      declaredOptions: Array.from({ length: 30 }, () => secret),
+      declaredRationale: secret,
+      assumptions: [secret],
+      expectedOutcome: secret,
+      successCriteria: [secret],
+      constraints: [secret],
+    });
+    expect(JSON.stringify(decision)).not.toContain("super-secret-value");
+    expect(decision.declaredOptions).toHaveLength(16);
+    expect(decision.sensitivityClass).toBe("sensitive");
+
+    const outcome = await appendDecisionOutcome({
+      agentId,
+      decisionId: decision.id,
+      taskId,
+      pgBossJobId: randomUUID(),
+      traceId: decision.traceId,
+      round: 88,
+      retryCount: 0,
+      observedState: secret,
+      metrics: { token: secret },
+      assessment: "inconclusive",
+      status: "unknown",
+    });
+    expect(JSON.stringify(outcome)).not.toContain("super-secret-value");
+    expect(outcome.sensitivityClass).toBe("sensitive");
+  });
+
   it("is idempotent for the same round and attempt", async () => {
     const input = {
       agentId,

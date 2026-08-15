@@ -72,6 +72,10 @@ export type CreateMemoryInput = {
   modelId?: string | null;
   promptHash?: string | null;
   schemaVersion?: number;
+  structured?: Record<string, unknown>;
+  sourceReferenceTime?: Date | null;
+  timePrecision?: "instant" | "day" | "month" | "year" | "unknown";
+  sensitivityClass?: "normal" | "sensitive" | "restricted";
 };
 
 export type UpdateMemoryInput = {
@@ -87,6 +91,10 @@ export type UpdateMemoryInput = {
   validTo?: unknown;
   sourceEventIds?: string[];
   authority?: VersionAuthority;
+  structured?: Record<string, unknown>;
+  sourceReferenceTime?: Date | null;
+  timePrecision?: "instant" | "day" | "month" | "year" | "unknown";
+  sensitivityClass?: "normal" | "sensitive" | "restricted";
 };
 
 type CurrentRow = {
@@ -112,7 +120,7 @@ export async function listMemories(
   db: AppDbClient = getDb(),
 ): Promise<Memory[]> {
   const rows = await currentQuery(db)
-    .where(and(eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()))
+    .where(and(eq(agentMemories.agentId, agentId), sql`${agentMemories.status} <> 'creating'`))
     .orderBy(desc(agentMemories.createdAt));
   return rows.map(mapMemoryRow);
 }
@@ -143,8 +151,7 @@ export async function getMemoryById(
       and(
         eq(agentMemories.id, id),
         eq(agentMemories.agentId, agentId),
-        activeRoot(),
-        activeVersion(),
+        sql`${agentMemories.status} <> 'creating'`,
       ),
     )
     .limit(1);
@@ -201,6 +208,10 @@ export async function createMemory(input: CreateMemoryInput, db?: AppDbClient): 
       canonicalKey: input.canonicalKey ?? null,
       validFrom: bounds.validFrom,
       validTo: bounds.validTo,
+      structured: input.structured,
+      sourceReferenceTime: input.sourceReferenceTime,
+      timePrecision: input.timePrecision,
+      sensitivityClass: input.sensitivityClass,
       extractorId: input.extractorId,
       modelId: input.modelId,
       promptHash: input.promptHash,
@@ -254,7 +265,10 @@ export async function updateMemory(
     input.confidence === undefined
       ? existing.confidence
       : parseMemoryConfidence(input.confidence, existing.confidence);
-  const bounds = parseValidityBounds(input.validFrom, input.validTo);
+  const bounds =
+    input.validFrom === undefined && input.validTo === undefined
+      ? null
+      : parseValidityBounds(input.validFrom, input.validTo);
   const evidence = input.sourceEventIds?.length
     ? input.sourceEventIds
     : [await appendExplicitEvent(db, agentId, existing.sessionId, "update", { id, kind, content })];
@@ -271,8 +285,11 @@ export async function updateMemory(
       authority: input.authority ?? "user",
       sessionId: existing.sessionId,
       reviewProposalId: existing.reviewProposalId,
-      validFrom: bounds.validFrom,
-      validTo: bounds.validTo,
+      ...(bounds ? { validFrom: bounds.validFrom, validTo: bounds.validTo } : {}),
+      structured: input.structured,
+      sourceReferenceTime: input.sourceReferenceTime,
+      timePrecision: input.timePrecision,
+      sensitivityClass: input.sensitivityClass,
     },
     db,
   );

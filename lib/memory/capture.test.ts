@@ -24,6 +24,7 @@ function fakeStep(): StepResult<any> {
     usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
     request: { body: { messages: ["recalled context"] } },
     response: {},
+    content: [],
   } as unknown as StepResult<any>;
 }
 
@@ -45,6 +46,25 @@ describe("AI SDK trace capture mapping", () => {
     expect(serialized).not.toContain("private chain");
     expect(serialized).not.toContain("recalled context");
     expect(serialized).not.toContain("requestBody");
+  });
+
+  it("maps tool-error content without stack leakage", () => {
+    const step = fakeStep() as unknown as { content: unknown[] };
+    step.content = [
+      {
+        type: "tool-error",
+        toolCallId: "tool-2",
+        toolName: "database",
+        error: new Error("connection failed api_key=super-secret-value"),
+      },
+    ];
+    const event = mapStepToTraceEvents(context, step as unknown as StepResult<any>).find((item) =>
+      item.idempotencyKey.endsWith(":error"),
+    );
+    expect(event?.eventType).toBe("tool_result");
+    expect(event?.payload).toMatchObject({ outcome: "error" });
+    expect(JSON.stringify(event)).not.toContain("super-secret-value");
+    expect(JSON.stringify(event)).not.toContain("at ");
   });
 
   it("builds stable terminal keys for every state", () => {

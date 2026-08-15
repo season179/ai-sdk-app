@@ -10,6 +10,7 @@ import {
   type MemoryKind,
   type MemorySource,
   type MemoryType,
+  type SensitivityClass,
 } from "@/db/schema";
 import { getMemoryPolicyVersion } from "@/lib/memory/config";
 
@@ -30,10 +31,18 @@ export type VersionedMemoryInput = {
   scopeType?: "agent" | "session" | "task";
   scopeId?: string;
   conflictPolicy?: MemoryConflictPolicy;
+  structured?: Record<string, unknown>;
   validFrom?: Date | null;
   validTo?: Date | null;
   sourceReferenceTime?: Date | null;
   timePrecision?: "instant" | "day" | "month" | "year" | "unknown";
+  timeSource?: string | null;
+  observedAt?: Date | null;
+  lastConfirmedAt?: Date | null;
+  expiresAt?: Date | null;
+  importance?: number;
+  utilityScoreBps?: number;
+  sensitivityClass?: SensitivityClass;
   extractorId?: string | null;
   modelId?: string | null;
   promptHash?: string | null;
@@ -103,12 +112,19 @@ export async function createVersionedMemory(input: VersionedMemoryInput, outerDb
         memoryId: root.id,
         versionNo: 1,
         content: input.content,
+        structured: input.structured ?? {},
         source: input.source,
         validDuring: validity(input),
         recordedDuring: sql`tstzrange(${now}, NULL, '[)')`,
         sourceReferenceTime: input.sourceReferenceTime ?? null,
         timePrecision: input.timePrecision ?? "unknown",
+        timeSource: input.timeSource ?? null,
+        observedAt: input.observedAt ?? null,
+        lastConfirmedAt: input.lastConfirmedAt ?? null,
+        expiresAt: input.expiresAt ?? null,
         confidence: input.confidence,
+        importance: input.importance ?? 50,
+        utilityScoreBps: input.utilityScoreBps ?? 0,
         operation: "ADD",
         extractorId: input.extractorId ?? null,
         modelId: input.modelId ?? null,
@@ -116,6 +132,7 @@ export async function createVersionedMemory(input: VersionedMemoryInput, outerDb
         schemaVersion: input.schemaVersion ?? 1,
         policyVersion: input.policyVersion ?? getMemoryPolicyVersion(),
         authority: input.authority,
+        sensitivityClass: input.sensitivityClass ?? "normal",
       })
       .returning();
     await db.insert(agentMemoryVersionTraceEvents).values(
@@ -168,12 +185,26 @@ export async function appendMemoryVersion(
         memoryId,
         versionNo: current.versionNo + 1,
         content: input.content,
+        structured: input.structured ?? current.structured,
         source: input.source,
-        validDuring: validity(input),
+        validDuring:
+          input.validFrom === undefined && input.validTo === undefined
+            ? current.validDuring
+            : validity(input),
         recordedDuring: sql`tstzrange(${now}, NULL, '[)')`,
-        sourceReferenceTime: input.sourceReferenceTime ?? null,
-        timePrecision: input.timePrecision ?? "unknown",
+        sourceReferenceTime:
+          input.sourceReferenceTime === undefined
+            ? current.sourceReferenceTime
+            : input.sourceReferenceTime,
+        timePrecision: input.timePrecision ?? current.timePrecision,
+        timeSource: input.timeSource === undefined ? current.timeSource : input.timeSource,
+        observedAt: input.observedAt === undefined ? current.observedAt : input.observedAt,
+        lastConfirmedAt:
+          input.lastConfirmedAt === undefined ? current.lastConfirmedAt : input.lastConfirmedAt,
+        expiresAt: input.expiresAt === undefined ? current.expiresAt : input.expiresAt,
         confidence: input.confidence,
+        importance: input.importance ?? current.importance,
+        utilityScoreBps: input.utilityScoreBps ?? current.utilityScoreBps,
         operation: "UPDATE",
         supersedesMemoryVersionId: current.id,
         extractorId: input.extractorId ?? null,
@@ -182,6 +213,7 @@ export async function appendMemoryVersion(
         schemaVersion: input.schemaVersion ?? 1,
         policyVersion: input.policyVersion ?? getMemoryPolicyVersion(),
         authority: input.authority,
+        sensitivityClass: input.sensitivityClass ?? current.sensitivityClass,
       })
       .returning();
     await db.insert(agentMemoryVersionTraceEvents).values(
@@ -196,6 +228,8 @@ export async function appendMemoryVersion(
       .set({
         kind: input.kind,
         memoryType: family(input.kind, input.memoryType),
+        conflictPolicy:
+          input.kind === root.kind ? root.conflictPolicy : defaultConflict(input.kind),
         currentVersionId: version.id,
         status: "approved",
         tombstoned: false,
@@ -251,11 +285,20 @@ export async function invalidateMemory(
         source: input.source,
         validDuring: current.validDuring,
         recordedDuring: sql`tstzrange(${now}, NULL, '[)')`,
+        sourceReferenceTime: current.sourceReferenceTime,
+        timePrecision: current.timePrecision,
+        timeSource: current.timeSource,
+        observedAt: current.observedAt,
+        lastConfirmedAt: current.lastConfirmedAt,
+        expiresAt: current.expiresAt,
         confidence: current.confidence,
+        importance: current.importance,
+        utilityScoreBps: current.utilityScoreBps,
         operation: "INVALIDATE",
         supersedesMemoryVersionId: current.id,
         policyVersion: input.policyVersion ?? getMemoryPolicyVersion(),
         authority: input.authority,
+        sensitivityClass: current.sensitivityClass,
       })
       .returning();
     await db.insert(agentMemoryVersionTraceEvents).values(

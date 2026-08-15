@@ -152,6 +152,9 @@ export type AdmissionMetadataV2 = {
   validFrom?: string | null;
   validTo?: string | null;
   timePrecision?: "instant" | "day" | "month" | "year" | "unknown";
+  sourceReferenceTime?: string | null;
+  structured?: Record<string, unknown>;
+  sensitivityClass?: SensitivityClass;
   dryRun?: boolean;
 };
 
@@ -691,6 +694,11 @@ export const agentOutcomes = pgTable(
     evaluator: text("evaluator").notNull(),
     evaluatorVersion: text("evaluator_version"),
     policyVersion: text("policy_version").notNull(),
+    sensitivityClass: text("sensitivity_class")
+      .$type<SensitivityClass>()
+      .notNull()
+      .default("normal"),
+    injectionBlocked: boolean("injection_blocked").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -703,6 +711,10 @@ export const agentOutcomes = pgTable(
       sql`${t.assessment} in ('supports', 'contradicts', 'inconclusive')`,
     ),
     check("agent_outcomes_confidence_check", sql`${t.confidence} between 0 and 100`),
+    check(
+      "agent_outcomes_sensitivity_check",
+      sql`${t.sensitivityClass} in ('normal', 'sensitive', 'restricted')`,
+    ),
     index("agent_outcomes_decision_occurred_idx").on(t.decisionId, t.occurredAt.desc()),
     index("agent_outcomes_trace_occurred_idx").on(t.traceId, t.occurredAt),
   ],
@@ -991,6 +1003,18 @@ export const agentReviewProposals = pgTable(
       .on(t.sourceCandidateId)
       .where(sql`${t.sourceCandidateId} is not null`),
   ],
+);
+
+export const agentReviewReceipts = pgTable(
+  "agent_review_receipts",
+  {
+    agentId: uuid("agent_id").notNull(),
+    reviewKey: text("review_key").notNull(),
+    extractorId: text("extractor_id").notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.reviewKey, t.extractorId] })],
 );
 
 export const agentReviewStates = pgTable(

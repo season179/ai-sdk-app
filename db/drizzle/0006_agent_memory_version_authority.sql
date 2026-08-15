@@ -1,3 +1,11 @@
+-- Block legacy inserts/updates before either cutover delta is snapshotted.
+-- These locks remain held for the migration transaction, so no mutable legacy
+-- head or observation provenance can be committed and then dropped unseen.
+LOCK TABLE "agent_memories" IN SHARE ROW EXCLUSIVE MODE;
+--> statement-breakpoint
+LOCK TABLE "agent_grounded_observations" IN SHARE ROW EXCLUSIVE MODE;
+--> statement-breakpoint
+
 -- Catch up grounded observations written by the legacy live writer after 0005.
 INSERT INTO "agent_trace_events" (
   "agent_id", "trace_id", "sequence_no", "source_message_id", "event_type",

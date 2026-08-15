@@ -20,6 +20,7 @@ import {
   createMemory,
   getMemoryById,
   listApprovedMemories,
+  listMemories,
   updateMemory,
 } from "@/lib/self-improvement/memories";
 
@@ -114,8 +115,61 @@ integration("versioned memory authority (integration)", () => {
       .where(eq(agentMemoryVersions.memoryId, memory.id))
       .orderBy(agentMemoryVersions.versionNo);
     expect(versions.at(-1)?.operation).toBe("INVALIDATE");
-    expect(await getMemoryById(memory.id, agentId)).toBeNull();
+    expect((await getMemoryById(memory.id, agentId))?.status).toBe("archived");
+    expect((await listMemories(agentId)).some((item) => item.id === memory.id)).toBe(true);
     expect((await listApprovedMemories(agentId)).some((item) => item.id === memory.id)).toBe(false);
+  });
+
+  it("preserves structured, temporal, expiry, scoring, and sensitivity metadata on edit", async () => {
+    const eventMemory = await createMemory({
+      agentId,
+      kind: "fact",
+      content: "Metadata evidence source.",
+      source: "user",
+    });
+    const [evidence] = await getDb()
+      .select({ eventId: agentMemoryVersionTraceEvents.eventId })
+      .from(agentMemoryVersionTraceEvents)
+      .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, eventMemory.currentVersionId));
+    const validFrom = new Date(Date.now() - 1_000);
+    const validTo = new Date(Date.now() + 86_400_000);
+    const expiresAt = new Date(Date.now() + 172_800_000);
+    const created = await createVersionedMemory({
+      agentId,
+      kind: "fact",
+      content: "Bounded structured memory.",
+      source: "review",
+      confidence: 75,
+      sourceEventIds: [evidence.eventId],
+      authority: "reviewed",
+      structured: { key: "value" },
+      validFrom,
+      validTo,
+      timeSource: "user_statement",
+      observedAt: validFrom,
+      lastConfirmedAt: validFrom,
+      expiresAt,
+      importance: 88,
+      utilityScoreBps: 7777,
+      sensitivityClass: "sensitive",
+    });
+    await updateMemory(
+      created.root.id,
+      { content: "Edited bounded memory.", kind: "preference" },
+      agentId,
+    );
+    const [current] = await getDb()
+      .select({ root: agentMemories, version: agentMemoryVersions })
+      .from(agentMemories)
+      .innerJoin(agentMemoryVersions, eq(agentMemoryVersions.id, agentMemories.currentVersionId))
+      .where(eq(agentMemories.id, created.root.id));
+    expect(current.version.structured).toEqual({ key: "value" });
+    expect(current.version.validDuring).toBeTruthy();
+    expect(current.version.expiresAt?.toISOString()).toBe(expiresAt.toISOString());
+    expect(current.version.importance).toBe(88);
+    expect(current.version.utilityScoreBps).toBe(7777);
+    expect(current.version.sensitivityClass).toBe("sensitive");
+    expect(current.root.conflictPolicy).toBe("replace_current");
   });
 
   it("aborts a source-less or foreign-evidence curated write", async () => {

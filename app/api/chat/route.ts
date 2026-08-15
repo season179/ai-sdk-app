@@ -21,7 +21,6 @@ import {
 } from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
-import { ingestUserTurn } from "@/lib/consolidation/observations";
 import {
   buildAssistantMessageEvent,
   buildTerminalEvent,
@@ -32,6 +31,7 @@ import {
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
 import { appendTurnProjection, shouldRecall } from "@/lib/memory/context";
 import { recallForTurn } from "@/lib/memory/recall";
+import { classifyChatStreamEnd } from "@/lib/memory/stream-status";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
@@ -166,6 +166,7 @@ async function buildRunMessages({
   modelMessages: ChatUIMessage[];
   apiPartMessageIds: string[];
   targetMessageId: string | null;
+  userCaptured: boolean;
 }> {
   if (!sessionId) {
     const messages = incomingMessage ? [incomingMessage] : [];
@@ -174,6 +175,7 @@ async function buildRunMessages({
       modelMessages: messages,
       apiPartMessageIds: [],
       targetMessageId: incomingMessage?.id ?? null,
+      userCaptured: false,
     };
   }
 
@@ -201,6 +203,7 @@ async function buildRunMessages({
       modelMessages,
       apiPartMessageIds: history?.apiPartMessageIds ?? [],
       targetMessageId: incomingMessage?.id ?? null,
+      userCaptured: false,
     };
   }
 
@@ -211,7 +214,7 @@ async function buildRunMessages({
   if (incomingMessage) {
     const captureEnabled = Boolean(traceContext && isMemoryWriteEnabled());
     // Persist and journal the raw incoming parts before any model-only projection.
-    await appendSessionMessages(sessionId, [incomingMessage], {
+    const capture = await appendSessionMessages(sessionId, [incomingMessage], {
       createIfMissing: true,
       ...(captureEnabled && traceContext
         ? {
@@ -222,16 +225,12 @@ async function buildRunMessages({
           }
         : {}),
     });
-    if (!captureEnabled) {
-      await ingestUserTurn(sessionId, [incomingMessage]).catch((error) => {
-        console.error("Ingesting user turn failed", error);
-      });
-    }
     return {
       cleanMessages: [...priorClean, incomingMessage],
       modelMessages: [...priorModel, incomingMessage],
       apiPartMessageIds: prior?.apiPartMessageIds ?? [],
       targetMessageId: incomingMessage.id,
+      userCaptured: capture.traceCaptured,
     };
   }
 
@@ -240,6 +239,7 @@ async function buildRunMessages({
     modelMessages: priorModel,
     apiPartMessageIds: prior?.apiPartMessageIds ?? [],
     targetMessageId: null,
+    userCaptured: false,
   };
 }
 
@@ -264,6 +264,9 @@ export async function POST(req: Request) {
   // The model the composer's picker chose for this turn. Validated server-side
   // against the account's allow-set below; missing/invalid => env default.
   let requestedModel: string | null = null;
+  let traceContext: TraceContext | null = null;
+  let rawCaptureCompleted = false;
+  let streamEstablished = false;
 
   try {
     const body: {
@@ -332,12 +335,13 @@ export async function POST(req: Request) {
 
     // One request trace is created before any prompt/skill/memory injection.
     // Only the raw body.message is journaled as user evidence.
-    const traceContext: TraceContext | null = sessionId
+    traceContext = sessionId
       ? { agentId: DEFAULT_AGENT_ID, sessionId, traceId: randomUUID() }
       : null;
 
     // Reconstruct clean evidence history and model replay history separately.
     const run = await buildRunMessages({ sessionId, trigger, incomingMessage, traceContext });
+    rawCaptureCompleted = run.userCaptured;
     const fullMessages = run.cleanMessages;
     let uiMessages = run.modelMessages;
     const skillCatalogBlock = await loadSkillCatalogBlock();
@@ -421,7 +425,8 @@ export async function POST(req: Request) {
       include: { requestBody: true },
     });
 
-    return createAgentUIStreamResponse({
+    let streamErrored = false;
+    const response = createAgentUIStreamResponse({
       agent,
       uiMessages,
       abortSignal: req.signal,
@@ -473,62 +478,69 @@ export async function POST(req: Request) {
         if (!sessionId || !traceContext) {
           return;
         }
-        if (isAborted || finishReason === "error") {
+        const terminalStatus = classifyChatStreamEnd({
+          streamErrored,
+          isAborted,
+          finishReason,
+        });
+        if (terminalStatus !== "completed") {
           await appendTraceEventsFailOpen([
-            buildTerminalEvent(traceContext, isAborted ? "interrupted" : "failed", {
-              finishReason,
-            }),
+            buildTerminalEvent(traceContext, terminalStatus, { finishReason }),
           ]);
           return;
         }
 
+        // Append-only: persist the assistant and completed terminal atomically.
+        // An error-stream flush never reaches this branch, even when the SDK's
+        // onEnd callback has no finishReason.
         try {
-          // Append-only: the user turn was already persisted before the stream
-          // (submit) or already lives in the transcript (regenerate), so only
-          // the assistant reply is new. responseMessage carries its
-          // generateMessageId id and the messageMetadata token usage; the
-          // composite-PK onConflictDoNothing makes a re-run idempotent.
           const terminalEvent = buildTerminalEvent(traceContext, "completed", { finishReason });
           await appendSessionMessages(sessionId, [responseMessage], {
             traceCapture: {
               events: [buildAssistantMessageEvent(traceContext, responseMessage), terminalEvent],
             },
           });
-          // Push the assistant turn to any other open tab on this session (K2).
-          // The tab that submitted already has it locally and dedupes by id.
-          await notifySessionAppended(sessionId);
-          void recordCompletedTurnAndMaybeEnqueueReview({
-            sessionId,
-            triggerMessageId: responseMessage.id,
-            latestTerminalTraceId: traceContext.traceId,
-            reviewKey: `chat:${sessionId}:${traceContext.traceId}`,
-          }).catch((error) => {
-            console.error("Enqueuing self-improvement review failed", error);
-          });
+        } catch (error) {
+          console.error("Persisting completed chat turn failed", error);
+          await appendTraceEventsFailOpen([
+            buildTerminalEvent(traceContext, "failed", {
+              finishReason,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          ]);
+          return;
+        }
 
-          // Title only the first completed assistant reply, and only while the
-          // session is still untitled. assistantCount = assistants already in the
-          // run input + this new reply. The sessionNeedsTitle precheck skips the
-          // paid, stream-blocking title-model call once a title exists;
-          // setSessionTitleIfUnset remains the atomic write-time guard.
+        // Non-evidence side effects cannot rewrite a successfully persisted
+        // attempt's terminal state.
+        await notifySessionAppended(sessionId).catch((error) => {
+          console.error("Notifying appended chat session failed", error);
+        });
+        void recordCompletedTurnAndMaybeEnqueueReview({
+          sessionId,
+          triggerMessageId: responseMessage.id,
+          latestTerminalTraceId: traceContext.traceId,
+          reviewKey: `chat:${sessionId}:${traceContext.traceId}`,
+        }).catch((error) => {
+          console.error("Enqueuing self-improvement review failed", error);
+        });
+
+        try {
           const assistantCount =
             fullMessages.filter((message) => message.role === "assistant").length + 1;
-
           if (assistantCount === 1 && (await sessionNeedsTitle(sessionId))) {
             const title = await generateSessionTitle({
               firstUserText: messageText(fullMessages.find((message) => message.role === "user")),
               firstAssistantText: messageText(responseMessage),
             });
-
-            if (title) {
-              await setSessionTitleIfUnset(sessionId, title);
-            }
+            if (title) await setSessionTitleIfUnset(sessionId, title);
           }
         } catch (error) {
-          console.error("Persisting chat session failed", error);
+          console.error("Generating chat title failed", error);
         }
       },
       onError(error) {
+        streamErrored = true;
         console.error("Chat stream failed", error);
         if (traceContext) {
           void appendTraceEventsFailOpen([
@@ -540,12 +552,21 @@ export async function POST(req: Request) {
         return error instanceof Error ? error.message : "Chat stream failed unexpectedly.";
       },
     });
+    streamEstablished = true;
+    return response;
   } catch (error) {
     if (error instanceof MissingEnvironmentVariableError) {
       return configErrorResponse(error);
     }
 
     console.error("Chat route failed before streaming started", error);
+    if (traceContext && rawCaptureCompleted && !streamEstablished) {
+      await appendTraceEventsFailOpen([
+        buildTerminalEvent(traceContext, "failed", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      ]);
+    }
     return Response.json(
       { error: "Chat request failed before the stream could start." },
       { status: 500 },

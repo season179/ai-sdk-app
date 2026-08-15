@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
@@ -60,13 +60,22 @@ export async function appendTraceEvents(
   if (events.length === 0) return [];
   events.forEach(validateEvent);
 
-  const artifacts = [
-    ...new Map(
-      events.flatMap((event) =>
-        event.artifact ? [[event.artifact.artifactHash, event.artifact] as const] : [],
-      ),
-    ).values(),
-  ];
+  const artifactMap = new Map<string, TraceArtifactInput>();
+  for (const event of events) {
+    if (!event.artifact) continue;
+    const prior = artifactMap.get(event.artifact.artifactHash);
+    const priorExpiry = prior?.expiresAt ?? null;
+    const nextExpiry = event.artifact.expiresAt ?? null;
+    artifactMap.set(event.artifact.artifactHash, {
+      ...(prior ?? event.artifact),
+      // A deduplicated blob honors the strictest finite event retention.
+      expiresAt:
+        priorExpiry && nextExpiry
+          ? new Date(Math.min(priorExpiry.getTime(), nextExpiry.getTime()))
+          : (priorExpiry ?? nextExpiry),
+    });
+  }
+  const artifacts = [...artifactMap.values()];
   if (artifacts.length > 0) {
     await db
       .insert(agentTraceArtifacts)
@@ -82,7 +91,16 @@ export async function appendTraceEvents(
           expiresAt: artifact.expiresAt ?? null,
         })),
       )
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: agentTraceArtifacts.artifactHash,
+        set: {
+          expiresAt: sql`case
+            when ${agentTraceArtifacts.expiresAt} is null then excluded.expires_at
+            when excluded.expires_at is null then ${agentTraceArtifacts.expiresAt}
+            else least(${agentTraceArtifacts.expiresAt}, excluded.expires_at)
+          end`,
+        },
+      });
   }
 
   await db
@@ -207,11 +225,60 @@ export async function assertCompletedTraceWindow(
   return rows;
 }
 
-export async function listCompletedTraceWindow(
-  input: { agentId: string; sessionId?: string; taskId?: string; since?: Date },
+export async function assertPromotableTraceEvidence(
+  input: { agentId: string; eventIds: string[] },
   db: AppDbClient = getDb(),
 ): Promise<AgentTraceEvent[]> {
+  if (input.eventIds.length === 0) throw new Error("Trace evidence is required.");
   const rows = await db
+    .select()
+    .from(agentTraceEvents)
+    .where(
+      and(
+        eq(agentTraceEvents.agentId, input.agentId),
+        inArray(agentTraceEvents.id, [...new Set(input.eventIds)]),
+      ),
+    );
+  if (rows.length !== new Set(input.eventIds).size) {
+    throw new Error("Trace evidence is missing or foreign.");
+  }
+  const governed = rows.filter(
+    (row) => !["explicit_memory_write", "legacy_import"].includes(row.eventType),
+  );
+  for (const traceId of new Set(governed.map((row) => row.traceId))) {
+    const [terminal] = await db
+      .select({ status: agentTraceEvents.terminalStatus })
+      .from(agentTraceEvents)
+      .where(
+        and(
+          eq(agentTraceEvents.agentId, input.agentId),
+          eq(agentTraceEvents.traceId, traceId),
+          eq(agentTraceEvents.eventType, "task_terminal_state"),
+        ),
+      )
+      .orderBy(sql`${agentTraceEvents.sequenceNo} desc, ${agentTraceEvents.ingestedAt} desc`)
+      .limit(1);
+    if (terminal?.status !== "completed") {
+      throw new Error("Trace evidence is not from a completed attempt.");
+    }
+  }
+  return rows;
+}
+
+export async function listCompletedTraceWindow(
+  input: {
+    agentId: string;
+    sessionId?: string;
+    taskId?: string;
+    since?: Date;
+    expectedTraceId?: string;
+  },
+  db: AppDbClient = getDb(),
+): Promise<AgentTraceEvent[]> {
+  // Select traces by their terminal boundary, then fetch each selected trace in
+  // full. A timestamp watermark can therefore never split an attempt, and a
+  // tool-heavy trace is never truncated by a raw event-row limit.
+  const terminals = await db
     .select()
     .from(agentTraceEvents)
     .where(
@@ -219,25 +286,45 @@ export async function listCompletedTraceWindow(
         eq(agentTraceEvents.agentId, input.agentId),
         input.sessionId ? eq(agentTraceEvents.sessionId, input.sessionId) : undefined,
         input.taskId ? eq(agentTraceEvents.taskId, input.taskId) : undefined,
-        input.since ? sql`${agentTraceEvents.occurredAt} > ${input.since}` : undefined,
+        eq(agentTraceEvents.eventType, "task_terminal_state"),
+        input.since
+          ? or(
+              sql`${agentTraceEvents.occurredAt} > ${input.since}`,
+              input.expectedTraceId
+                ? eq(agentTraceEvents.traceId, input.expectedTraceId)
+                : undefined,
+            )
+          : undefined,
       ),
     )
-    .orderBy(asc(agentTraceEvents.occurredAt), asc(agentTraceEvents.sequenceNo))
-    .limit(500);
-
-  const completed = new Set(
-    rows
-      .filter(
-        (row) => row.eventType === "task_terminal_state" && row.terminalStatus === "completed",
-      )
-      .map((row) => row.traceId),
+    .orderBy(desc(agentTraceEvents.sequenceNo), desc(agentTraceEvents.ingestedAt));
+  const latestByTrace = new Map<string, AgentTraceEvent>();
+  for (const terminal of terminals) {
+    if (!latestByTrace.has(terminal.traceId)) latestByTrace.set(terminal.traceId, terminal);
+  }
+  const traceIds = [...latestByTrace.values()]
+    .filter((terminal) => terminal.terminalStatus === "completed")
+    .map((terminal) => terminal.traceId);
+  const rows: AgentTraceEvent[] = [];
+  for (let offset = 0; offset < traceIds.length; offset += 100) {
+    rows.push(
+      ...(await db
+        .select()
+        .from(agentTraceEvents)
+        .where(
+          and(
+            eq(agentTraceEvents.agentId, input.agentId),
+            inArray(agentTraceEvents.traceId, traceIds.slice(offset, offset + 100)),
+            input.sessionId ? eq(agentTraceEvents.sessionId, input.sessionId) : undefined,
+            input.taskId ? eq(agentTraceEvents.taskId, input.taskId) : undefined,
+          ),
+        )),
+    );
+  }
+  return rows.sort(
+    (a, b) =>
+      a.occurredAt.getTime() - b.occurredAt.getTime() ||
+      a.sequenceNo - b.sequenceNo ||
+      a.id.localeCompare(b.id),
   );
-  const incomplete = new Set(
-    rows
-      .filter(
-        (row) => row.eventType === "task_terminal_state" && row.terminalStatus !== "completed",
-      )
-      .map((row) => row.traceId),
-  );
-  return rows.filter((row) => completed.has(row.traceId) && !incomplete.has(row.traceId));
 }

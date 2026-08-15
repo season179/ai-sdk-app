@@ -119,7 +119,8 @@ export async function persistMemoryCandidates(
           proposedOperation: draft.proposedOperation,
         }),
       );
-      const validDuring = toRange(draft.validFrom, draft.validTo);
+      const validDuring =
+        gate.status === "accepted" ? toRange(draft.validFrom, draft.validTo) : null;
       const values = {
         agentId: input.agentId,
         reviewKey: input.reviewKey,

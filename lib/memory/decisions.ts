@@ -10,6 +10,7 @@ import {
 } from "@/db/schema";
 import { buildTerminalEvent, type TraceContext } from "@/lib/memory/capture";
 import { getMemoryPolicyVersion } from "@/lib/memory/config";
+import { sanitizeDecisionLedger, sanitizeOutcomeLedger } from "@/lib/memory/ledger-sanitization";
 import { sanitizeTracePayload } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 
@@ -38,15 +39,13 @@ export async function recordScheduledDecision(
   input: ScheduledDecisionInput,
   outerDb?: AppDbClient,
 ) {
+  const canonical = sanitizeDecisionLedger(input);
   const run = async (db: AppDbClient) => {
     const key = `task:${input.taskId}:round:${input.round}:attempt:${input.retryCount}:decision`;
     await db.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
     const payload = sanitizeTracePayload({
       subject: `scheduled-task:${input.taskId}`,
-      selectedOption: input.selectedOption,
-      declaredRationale: input.declaredRationale,
-      expectedOutcome: input.expectedOutcome ?? null,
-      successCriteria: input.successCriteria,
+      ...canonical.value,
     });
     const [traceEvent] = await appendTraceEvents(
       [
@@ -115,13 +114,13 @@ export async function recordScheduledDecision(
         scopeType: "task",
         scopeId: input.taskId,
         subjectKey: `scheduled-task:${input.taskId}`,
-        selectedOption: input.selectedOption,
-        declaredOptions: input.declaredOptions ?? [],
-        declaredRationale: input.declaredRationale.trim().slice(0, 2000),
-        assumptions: input.assumptions ?? [],
-        expectedOutcome: input.expectedOutcome ?? null,
-        successCriteria: input.successCriteria,
-        constraints: input.constraints ?? [],
+        selectedOption: canonical.value.selectedOption,
+        declaredOptions: canonical.value.declaredOptions,
+        declaredRationale: canonical.value.declaredRationale,
+        assumptions: canonical.value.assumptions,
+        expectedOutcome: canonical.value.expectedOutcome,
+        successCriteria: canonical.value.successCriteria,
+        constraints: canonical.value.constraints,
         confidence: input.confidence ?? 80,
         status: "open",
         decidedAt: now,
@@ -131,6 +130,8 @@ export async function recordScheduledDecision(
         promptHash: input.promptHash ?? null,
         policyVersion: getMemoryPolicyVersion(),
         authority: "model_verdict",
+        sensitivityClass: canonical.sensitivityClass,
+        injectionBlocked: canonical.injectionDetected,
         supersedesDecisionId: previous?.id ?? null,
       })
       .returning();
@@ -165,13 +166,13 @@ export type DecisionOutcomeInput = {
 };
 
 export async function appendDecisionOutcome(input: DecisionOutcomeInput, outerDb?: AppDbClient) {
+  const canonical = sanitizeOutcomeLedger(input);
   const run = async (db: AppDbClient) => {
     const key = `task:${input.taskId}:round:${input.round}:attempt:${input.retryCount}:outcome`;
     await db.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
     const payload = sanitizeTracePayload({
-      observedState: input.observedState,
+      ...canonical.value,
       assessment: input.assessment,
-      metrics: input.metrics ?? {},
     });
     const [traceEvent] = await appendTraceEvents(
       [
@@ -215,14 +216,16 @@ export async function appendDecisionOutcome(input: DecisionOutcomeInput, outerDb
       .values({
         decisionId: input.decisionId,
         traceId: input.traceId,
-        observedState: input.observedState.trim().slice(0, 4000),
-        metrics: input.metrics ?? {},
+        observedState: canonical.value.observedState,
+        metrics: canonical.value.metrics,
         assessment: input.assessment,
         confidence: input.confidence ?? 90,
         occurredAt: input.occurredAt ?? new Date(),
         evaluator: "scheduled-task-worker",
         evaluatorVersion: "write-v1",
         policyVersion: getMemoryPolicyVersion(),
+        sensitivityClass: canonical.sensitivityClass,
+        injectionBlocked: canonical.injectionDetected,
       })
       .returning();
     const eventIds = [traceEvent.id];

@@ -222,9 +222,9 @@ export async function appendSessionMessages(
       groundedUserMessages?: ChatUIMessage[];
     };
   } = {},
-): Promise<void> {
+): Promise<{ traceCaptured: boolean }> {
   if (messages.length === 0) {
-    return;
+    return { traceCaptured: false };
   }
 
   // The composite PK (sessionId, id) would make the bulk insert throw on a
@@ -234,7 +234,8 @@ export async function appendSessionMessages(
     throw new ChatSessionInputError("Chat messages must have unique ids within a batch.");
   }
 
-  await getDb().transaction(async (tx) => {
+  return getDb().transaction(async (tx) => {
+    let traceCaptured = false;
     const existing = await tx
       .select({ deletedAt: agentChatSessions.deletedAt })
       .from(agentChatSessions)
@@ -298,6 +299,7 @@ export async function appendSessionMessages(
             });
           }
           await savepoint.execute(sql`set local statement_timeout = 0`);
+          traceCaptured = true;
         });
       } catch (error) {
         console.error("Chat trace capture failed; message persistence continues", error);
@@ -308,6 +310,7 @@ export async function appendSessionMessages(
       .update(agentChatSessions)
       .set({ lastMessageAt: sql`now()`, updatedAt: sql`now()` })
       .where(eq(agentChatSessions.id, sessionId));
+    return { traceCaptured };
   });
 }
 

@@ -11,6 +11,7 @@ export const GATE_WEIGHTS_BPS = {
 
 export type GateCandidate = {
   memoryType: MemoryType;
+  canonicalKey?: string | null;
   content: string;
   evidenceTraceEventIds: string[];
   validFrom: string | null;
@@ -81,6 +82,12 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
     return reject("reversed_validity_interval");
   }
   if (candidate.proposedOperation === "NOOP") return reject("extractor_noop");
+  if (
+    ["UPDATE", "INVALIDATE"].includes(candidate.proposedOperation) &&
+    !candidate.canonicalKey?.trim()
+  ) {
+    return reject("canonical_target_required");
+  }
 
   const support = options.citedEvents.filter((row) =>
     ["user_message", "explicit_memory_write", "tool_result", "task_terminal_state"].includes(

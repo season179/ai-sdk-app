@@ -7,12 +7,14 @@ import {
   agentConsolidationCandidates,
   agentGroundedObservations,
   agentMemories,
+  agentMemoryCandidates,
   agentMemoryEvents,
   agentMemoryVersions,
   agentRecallSignals,
+  agentReviewProposals,
 } from "@/db/schema";
 import { claimHash } from "@/lib/consolidation/normalize";
-import { ingestUserTurn } from "@/lib/consolidation/observations";
+import { ingestUserTurn, listGroundedObservations } from "@/lib/consolidation/observations";
 import { runConsolidation } from "@/lib/consolidation/run";
 import { buildTerminalEvent, buildUserMessageEvent } from "@/lib/memory/capture";
 import { appendTraceEvents } from "@/lib/memory/trace";
@@ -90,6 +92,54 @@ describeIntegration("consolidation pipeline (integration)", () => {
       .where(eq(agentGroundedObservations.sourceMessageId, messageId));
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0].originKind).toBe("chat_user");
+  });
+
+  it("redacts secrets before every observation-to-version write plane", async () => {
+    const secret = `super-secret-${randomUUID()}`;
+    await createGroundedEvidence(`api_key=${secret}`);
+    await runConsolidation(AGENT_ID, { trigger: "manual" });
+    const db = getDb();
+    const [observations, signals, typedCandidates, candidates, proposals, versions] =
+      await Promise.all([
+        db
+          .select()
+          .from(agentGroundedObservations)
+          .where(eq(agentGroundedObservations.agentId, AGENT_ID)),
+        db.select().from(agentRecallSignals).where(eq(agentRecallSignals.agentId, AGENT_ID)),
+        db.select().from(agentMemoryCandidates).where(eq(agentMemoryCandidates.agentId, AGENT_ID)),
+        db
+          .select()
+          .from(agentConsolidationCandidates)
+          .where(eq(agentConsolidationCandidates.agentId, AGENT_ID)),
+        db.select().from(agentReviewProposals).where(eq(agentReviewProposals.agentId, AGENT_ID)),
+        db
+          .select({ version: agentMemoryVersions })
+          .from(agentMemoryVersions)
+          .innerJoin(agentMemories, eq(agentMemories.id, agentMemoryVersions.memoryId))
+          .where(eq(agentMemories.agentId, AGENT_ID)),
+      ]);
+    expect(
+      JSON.stringify({ observations, signals, typedCandidates, candidates, proposals, versions }),
+    ).not.toContain(secret);
+  });
+
+  it("excludes observations linked to failed attempts from consolidation scans", async () => {
+    const sessionId = randomUUID();
+    const message = {
+      id: `failed-${randomUUID()}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "Failed attempt evidence must not promote." }],
+    };
+    const context = { agentId: AGENT_ID, sessionId, traceId: randomUUID() };
+    const events = await appendTraceEvents([
+      buildUserMessageEvent(context, message),
+      buildTerminalEvent(context, "failed"),
+    ]);
+    await ingestUserTurn(sessionId, [message], {
+      traceEventIds: new Map([[message.id, events[0].id]]),
+    });
+    const eligible = await listGroundedObservations(AGENT_ID);
+    expect(eligible.some((row) => row.sourceMessageId === message.id)).toBe(false);
   });
 
   it("assistant content never produces a grounded observation (firewall)", async () => {

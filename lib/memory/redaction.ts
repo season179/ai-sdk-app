@@ -104,37 +104,37 @@ export function sha256(value: string | Buffer): string {
 export function sanitizeTracePayload(input: Record<string, unknown>): SanitizedTracePayload {
   const state = { secretDetected: false };
   const sanitized = sanitizeValue(input, state) as Record<string, unknown>;
-  let serialized = canonicalJson(sanitized);
+  const serialized = canonicalJson(sanitized);
+  const serializedBytes = Buffer.from(serialized);
+  const contentHash = sha256(serializedBytes);
   const injectionDetected = detectPromptInjection(serialized);
   const sensitivityClass = state.secretDetected ? "sensitive" : "normal";
   let artifact: TraceArtifactInput | undefined;
 
-  if (Buffer.byteLength(serialized) > TRACE_PAYLOAD_MAX_BYTES) {
-    const bounded = Buffer.from(serialized).subarray(0, TRACE_ARTIFACT_MAX_BYTES);
-    const artifactHash = sha256(bounded);
+  if (serializedBytes.byteLength > TRACE_PAYLOAD_MAX_BYTES) {
+    const bounded = serializedBytes.subarray(0, TRACE_ARTIFACT_MAX_BYTES);
+    // Identity covers the entire redacted payload; storage is capped separately.
     artifact = {
-      artifactHash,
+      artifactHash: contentHash,
       mediaType: "application/json",
-      byteSize: bounded.byteLength,
+      byteSize: serializedBytes.byteLength,
       encoding: "utf-8",
       redactedExcerpt: bounded.toString("utf8").slice(0, TRACE_ARTIFACT_EXCERPT_MAX_CHARS),
       content: bounded,
       sensitivityClass,
     };
+    for (const key of Object.keys(sanitized)) delete sanitized[key];
     sanitized.overflow = {
-      artifactHash,
-      originalByteSize: Buffer.byteLength(serialized),
-      truncated: bounded.byteLength < Buffer.byteLength(serialized),
+      artifactHash: contentHash,
+      originalByteSize: serializedBytes.byteLength,
+      storedByteSize: bounded.byteLength,
+      truncated: bounded.byteLength < serializedBytes.byteLength,
     };
-    for (const key of Object.keys(sanitized)) {
-      if (key !== "overflow") delete sanitized[key];
-    }
-    serialized = canonicalJson(sanitized);
   }
 
   return {
     payload: sanitized,
-    contentHash: sha256(serialized),
+    contentHash,
     artifact,
     sensitivityClass,
     secretDetected: state.secretDetected,

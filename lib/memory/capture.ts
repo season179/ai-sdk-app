@@ -37,6 +37,7 @@ function event(
 ): TraceEventInput {
   const occurredAt = input.occurredAt ?? context.occurredAt ?? new Date();
   const sanitized = sanitizeTracePayload(input.payload);
+  const eventExpiresAt = input.retentionClass === "audit" ? null : expiresAt(occurredAt);
   return {
     ...input,
     agentId: context.agentId,
@@ -46,10 +47,10 @@ function event(
     pgBossJobId: context.pgBossJobId ?? null,
     payload: sanitized.payload,
     contentHash: sanitized.contentHash,
-    artifact: sanitized.artifact,
+    artifact: sanitized.artifact ? { ...sanitized.artifact, expiresAt: eventExpiresAt } : undefined,
     sensitivityClass: sanitized.sensitivityClass,
     occurredAt,
-    expiresAt: input.retentionClass === "audit" ? null : expiresAt(occurredAt),
+    expiresAt: eventExpiresAt,
   };
 }
 
@@ -71,7 +72,9 @@ export function buildUserMessageEvent(
     actor: "user",
     trustClass: "user_assertion",
     payload: { messageId: message.id, text: visibleText(message) },
-    idempotencyKey: `chat:${context.sessionId}:message:${message.id}:user`,
+    // Attempt membership is independent from grounded-observation source
+    // identity, so a successful retry carries its own user evidence event.
+    idempotencyKey: `trace:${context.traceId}:message:${message.id}:user`,
     retentionClass: "standard",
   });
 }
@@ -155,14 +158,50 @@ export function mapStepToTraceEvents(
         eventType: "tool_result",
         actor: "tool",
         trustClass: "tool_observation",
-        payload: { toolName: result.toolName, output: result.output ?? null },
+        payload: { toolName: result.toolName, outcome: "success", output: result.output ?? null },
         idempotencyKey: `trace:${context.traceId}:tool:${result.toolCallId}:result`,
         retentionClass: "standard",
       }),
     );
   });
 
-  return output;
+  const content = (step as unknown as { content?: unknown[] }).content ?? [];
+  content.forEach((part, index) => {
+    if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "tool-error") {
+      return;
+    }
+    const toolError = part as {
+      toolCallId?: unknown;
+      toolName?: unknown;
+      error?: unknown;
+    };
+    if (typeof toolError.toolCallId !== "string") return;
+    const error =
+      toolError.error instanceof Error
+        ? toolError.error.message
+        : typeof toolError.error === "string"
+          ? toolError.error
+          : "Tool execution failed.";
+    output.push(
+      event(context, {
+        sequenceNo: base + 70 + index,
+        spanId: step.callId,
+        toolCallId: toolError.toolCallId,
+        eventType: "tool_result",
+        actor: "tool",
+        trustClass: "tool_observation",
+        payload: {
+          toolName: typeof toolError.toolName === "string" ? toolError.toolName : "unknown",
+          outcome: "error",
+          error: error.slice(0, 4_000),
+        },
+        idempotencyKey: `trace:${context.traceId}:tool:${toolError.toolCallId}:error`,
+        retentionClass: "standard",
+      }),
+    );
+  });
+
+  return output.sort((a, b) => a.sequenceNo - b.sequenceNo);
 }
 
 export function buildTerminalEvent(

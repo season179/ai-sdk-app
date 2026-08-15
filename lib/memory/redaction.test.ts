@@ -34,11 +34,16 @@ describe("memory trace redaction", () => {
     expect(canonicalJson(a.payload)).toBe('{"a":2,"z":1}');
   });
 
-  it("spills oversized redacted data into a bounded content-addressed artifact", () => {
-    const result = sanitizeTracePayload({ text: "x".repeat(300_000) });
-    expect(result.artifact?.content?.byteLength).toBeLessThanOrEqual(262_144);
-    expect(result.artifact?.redactedExcerpt.length).toBeLessThanOrEqual(4_000);
-    expect(Buffer.byteLength(JSON.stringify(result.payload))).toBeLessThanOrEqual(65_536);
+  it("hashes the full redacted payload while storing only bounded artifact bytes", () => {
+    const prefix = "x".repeat(300_000);
+    const first = sanitizeTracePayload({ text: `${prefix}A` });
+    const second = sanitizeTracePayload({ text: `${prefix}B` });
+    expect(first.artifact?.content?.byteLength).toBeLessThanOrEqual(262_144);
+    expect(first.artifact?.byteSize).toBeGreaterThan(first.artifact?.content?.byteLength ?? 0);
+    expect(first.artifact?.redactedExcerpt.length).toBeLessThanOrEqual(4_000);
+    expect(Buffer.byteLength(JSON.stringify(first.payload))).toBeLessThanOrEqual(65_536);
+    expect(first.contentHash).not.toBe(second.contentHash);
+    expect(first.artifact?.artifactHash).not.toBe(second.artifact?.artifactHash);
   });
 
   it("detects hard injection separately from ordinary quoted text", () => {
