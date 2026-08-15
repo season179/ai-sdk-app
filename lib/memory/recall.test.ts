@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { recallForTurn, searchRankedRecall } from "@/lib/memory/recall";
+import { PostgresRecallRepository } from "@/lib/memory/repository";
 import type {
   DecisionRecallItem,
   GeneralRecallItem,
@@ -79,6 +80,37 @@ describe("recallForTurn", () => {
     );
     expect(result).toMatchObject({ status: "miss", renderedBlock: "", items: [] });
     expect(logger).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("recall checkout cancellation", () => {
+  it("releases a checkout won after timeout without executing SQL", async () => {
+    vi.useFakeTimers();
+    let resolveCheckout: ((client: unknown) => void) | undefined;
+    const checkout = new Promise<unknown>((resolve) => {
+      resolveCheckout = resolve;
+    });
+    const query = vi.fn();
+    const release = vi.fn();
+    const repository = new PostgresRecallRepository({
+      pool: { connect: vi.fn(() => checkout) } as never,
+    });
+    const controller = new AbortController();
+    const pending = repository.recall({
+      agentId: "00000000-0000-0000-0000-000000000001",
+      query: "queued recall",
+      asOf: new Date(),
+      signal: controller.signal,
+      deadlineAt: Date.now() + 20,
+    });
+    const rejected = expect(pending).rejects.toThrow("recall_deadline_exceeded");
+    await vi.advanceTimersByTimeAsync(20);
+    await rejected;
+    controller.abort();
+    resolveCheckout?.({ query, release });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 

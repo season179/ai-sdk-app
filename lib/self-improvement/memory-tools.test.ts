@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { executeMemoryTool, memoryToolSpecs } from "@/lib/self-improvement/memory-tools";
+import {
+  createMemoryTools,
+  executeMemoryTool,
+  memoryToolSpecs,
+} from "@/lib/self-improvement/memory-tools";
 
 describe("memory_search tool spec", () => {
   it("exposes exactly one direct-only tool contract requiring query", () => {
@@ -26,6 +30,7 @@ describe("memory_search tool mapping", () => {
     );
     expect(search).toHaveBeenCalledWith({
       agentId: "00000000-0000-0000-0000-000000000001",
+      sessionId: undefined,
       query: "deployment telemetry",
       kind: "procedure",
       limit: 20,
@@ -45,6 +50,27 @@ describe("memory_search tool mapping", () => {
         },
       ],
     });
+  });
+
+  it("keeps session scope server-side and out of the model-visible schema", async () => {
+    const search = vi.fn(async () => [memoryItem()]);
+    await executeMemoryTool(
+      "memory_search",
+      { query: "session decision" },
+      { search },
+      {
+        agentId: "00000000-0000-0000-0000-000000000002",
+        sessionId: "00000000-0000-0000-0000-000000000003",
+      },
+    );
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "00000000-0000-0000-0000-000000000002",
+        sessionId: "00000000-0000-0000-0000-000000000003",
+      }),
+    );
+    expect(memoryToolSpecs[0].properties).not.toHaveProperty("sessionId");
+    expect(createMemoryTools({ sessionId: "hidden" })).toHaveProperty("memory_search");
   });
 
   it("maps backend rejection to the fail-soft error", async () => {

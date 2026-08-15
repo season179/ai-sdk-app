@@ -11,6 +11,8 @@ export type RecallDependencies = {
   repository?: RecallRepository;
   clock?: () => Date;
   deadlineMs?: number;
+  deadlineAt?: number;
+  signal?: AbortSignal;
   logger?: (event: Record<string, unknown>) => void;
 };
 
@@ -19,23 +21,31 @@ export async function searchRankedRecall(
     limit?: number;
     asOf?: Date;
   },
-  dependencies: Pick<RecallDependencies, "repository" | "clock" | "deadlineMs"> = {},
+  dependencies: Pick<
+    RecallDependencies,
+    "repository" | "clock" | "deadlineMs" | "deadlineAt" | "signal"
+  > = {},
 ) {
   const repository = dependencies.repository ?? postgresRecallRepository;
   const clock = dependencies.clock ?? (() => new Date());
   const limit = Math.max(1, Math.min(20, Math.trunc(input.limit ?? 10)));
   const result = await withDeadline(
-    repository.recall({
-      agentId: input.agentId,
-      sessionId: input.sessionId,
-      query: input.query,
-      kind: input.kind,
-      asOf: input.asOf ?? clock(),
-      includeDecisions: input.kind === undefined,
-      decisionLimit: 3,
-      generalLimit: limit,
-    }),
+    (signal, deadlineAt) =>
+      repository.recall({
+        agentId: input.agentId,
+        sessionId: input.sessionId,
+        query: input.query,
+        kind: input.kind,
+        asOf: input.asOf ?? clock(),
+        includeDecisions: input.kind === undefined,
+        decisionLimit: 3,
+        generalLimit: limit,
+        signal,
+        deadlineAt,
+      }),
     dependencies.deadlineMs ?? OUTER_DEADLINE_MS,
+    dependencies.signal,
+    dependencies.deadlineAt,
   );
   const decisionIntent = /\b(decision|decide|decided|choice|chosen|outcome|rationale)\b/i.test(
     input.query,
@@ -60,13 +70,18 @@ export async function recallForTurn(
 
   try {
     const repositoryResult = await withDeadline(
-      repository.recall({
-        ...input,
-        asOf,
-        decisionLimit: Math.min(DECISION_SLOTS, input.decisionLimit ?? DECISION_SLOTS),
-        generalLimit: Math.min(20, input.generalLimit ?? 20),
-      }),
+      (signal, deadlineAt) =>
+        repository.recall({
+          ...input,
+          asOf,
+          decisionLimit: Math.min(DECISION_SLOTS, input.decisionLimit ?? DECISION_SLOTS),
+          generalLimit: Math.min(20, input.generalLimit ?? 20),
+          signal,
+          deadlineAt,
+        }),
       deadlineMs,
+      dependencies.signal ?? input.signal,
+      dependencies.deadlineAt ?? input.deadlineAt,
     );
     const decisions = repositoryResult.decisions.slice(0, DECISION_SLOTS);
     const general = repositoryResult.general.slice(0, GENERAL_SLOTS);
@@ -122,12 +137,28 @@ export async function recallForTurn(
   }
 }
 
-function withDeadline<T>(promise: Promise<T>, deadlineMs: number): Promise<T> {
+function withDeadline<T>(
+  operation: (signal: AbortSignal, deadlineAt: number) => Promise<T>,
+  deadlineMs: number,
+  externalSignal?: AbortSignal,
+  sharedDeadlineAt?: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const signal = externalSignal
+    ? AbortSignal.any([externalSignal, controller.signal])
+    : controller.signal;
+  const deadlineAt = sharedDeadlineAt ?? Date.now() + deadlineMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("recall_deadline_exceeded")), deadlineMs);
+    const fail = () => {
+      controller.abort();
+      reject(new Error("recall_deadline_exceeded"));
+    };
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) fail();
+    else timer = setTimeout(fail, remaining);
   });
-  return Promise.race([promise, deadline]).finally(() => {
+  return Promise.race([operation(signal, deadlineAt), deadline]).finally(() => {
     if (timer) clearTimeout(timer);
   });
 }

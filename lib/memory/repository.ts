@@ -1,6 +1,9 @@
 import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
+import type { Pool, PoolClient } from "pg";
 
-import { getDb } from "@/db";
+import type { AppDbTransaction } from "@/db";
+import * as schema from "@/db/schema";
 import { contentDedupeKey, dedupeGeneralRecall } from "@/lib/memory/ranking";
 import type {
   DecisionRecallItem,
@@ -10,35 +13,116 @@ import type {
   RecallRequest,
   RecallScoreComponents,
 } from "@/lib/memory/types";
+import { getPool } from "@/lib/scheduler/db";
 
 const MAX_DECISIONS = 3;
 const MAX_GENERAL = 20;
 
 export class PostgresRecallRepository implements RecallRepository {
+  constructor(
+    private readonly dependencies: {
+      pool?: Pick<Pool, "connect">;
+      now?: () => number;
+    } = {},
+  ) {}
+
   async recall(request: RecallRequest): Promise<RecallRepositoryResult> {
     const decisionLimit = boundedLimit(request.decisionLimit, MAX_DECISIONS, MAX_DECISIONS);
     const generalLimit = boundedLimit(request.generalLimit, MAX_GENERAL, MAX_GENERAL);
+    const now = this.dependencies.now ?? Date.now;
+    const client = await acquireRecallClient(
+      this.dependencies.pool ?? getPool(),
+      request.signal,
+      request.deadlineAt,
+      now,
+    );
+    try {
+      throwIfRecallExpired(request.signal, request.deadlineAt, now);
+      const db = drizzle(client, { schema });
+      return await db.transaction(async (tx) => {
+        await tx.execute(sql`set local statement_timeout = '1750ms'`);
+        await tx.execute(sql`set local pg_trgm.similarity_threshold = '0.12'`);
 
-    return getDb().transaction(async (tx) => {
-      await tx.execute(sql`set local statement_timeout = '1750ms'`);
-      await tx.execute(sql`set local pg_trgm.similarity_threshold = '0.12'`);
+        const decisions =
+          request.includeDecisions === false
+            ? []
+            : await queryDecisions(tx, request, decisionLimit);
+        const general = await queryGeneral(tx, request, generalLimit);
 
-      const decisions =
-        request.includeDecisions === false ? [] : await queryDecisions(tx, request, decisionLimit);
-      const general = await queryGeneral(tx, request, generalLimit);
+        return {
+          decisions,
+          general,
+          candidateIds: [...decisions.map((item) => item.id), ...general.map((item) => item.id)],
+        };
+      });
+    } finally {
+      client.release();
+    }
+  }
+}
 
-      return {
-        decisions,
-        general,
-        candidateIds: [...decisions.map((item) => item.id), ...general.map((item) => item.id)],
-      };
-    });
+export async function acquireRecallClient(
+  pool: Pick<Pool, "connect">,
+  signal?: AbortSignal,
+  deadlineAt?: number,
+  now: () => number = Date.now,
+): Promise<PoolClient> {
+  throwIfRecallExpired(signal, deadlineAt, now);
+  const checkout = pool.connect();
+  return new Promise<PoolClient>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      if (timer) clearTimeout(timer);
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("recall_deadline_exceeded"));
+    };
+    const abort = () => fail();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (deadlineAt !== undefined) {
+      const remaining = deadlineAt - now();
+      if (remaining <= 0) fail();
+      else timer = setTimeout(fail, remaining);
+    }
+    checkout.then(
+      (client) => {
+        if (settled || signal?.aborted || (deadlineAt !== undefined && now() >= deadlineAt)) {
+          client.release();
+          fail();
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(client);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function throwIfRecallExpired(
+  signal: AbortSignal | undefined,
+  deadlineAt: number | undefined,
+  now: () => number,
+) {
+  if (signal?.aborted || (deadlineAt !== undefined && now() >= deadlineAt)) {
+    throw new Error("recall_deadline_exceeded");
   }
 }
 
 export const postgresRecallRepository: RecallRepository = new PostgresRecallRepository();
 
-type DbTransaction = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
+type DbTransaction = AppDbTransaction;
 
 type DecisionRow = {
   id: string;
@@ -104,7 +188,14 @@ async function queryDecisions(
       ) source
     ) provenance on true
     where d.agent_id = ${request.agentId}::uuid
-      and (d.session_id is null or d.session_id = ${request.sessionId ?? null}::uuid)
+      and (
+        (d.scope_type = 'agent' and d.scope_id = ${request.agentId}::text)
+        or (
+          ${request.sessionId ?? null}::uuid is not null
+          and d.scope_type = 'session'
+          and d.scope_id = ${request.sessionId ?? null}::text
+        )
+      )
       and d.status <> 'superseded'
       and d.revoked_at is null
       and d.tombstoned = false
@@ -113,7 +204,7 @@ async function queryDecisions(
       and d.recorded_during @> ${request.asOf}::timestamptz
       and (d.status in ('open', 'unknown') or d.decided_at >= ${request.asOf}::timestamptz - interval '30 days')
     order by
-      coalesce(d.session_id = ${request.sessionId ?? null}::uuid, false) desc,
+      (d.scope_type = 'session' and d.scope_id = ${request.sessionId ?? null}::text) desc,
       (lower(d.subject_key) = any(${termArray})) desc,
       case d.status when 'open' then 0 when 'unknown' then 1 else 2 end,
       d.decided_at desc,
@@ -168,7 +259,14 @@ function eligibleWhere(request: RecallRequest) {
     and m.revoked_at is null
     and m.tombstoned = false
     and m.injection_blocked = false
-    and (m.session_id is null or m.session_id = ${request.sessionId ?? null}::uuid)
+    and (
+      (m.scope_type = 'agent' and m.scope_id = ${request.agentId}::text)
+      or (
+        ${request.sessionId ?? null}::uuid is not null
+        and m.scope_type = 'session'
+        and m.scope_id = ${request.sessionId ?? null}::text
+      )
+    )
     and (v.valid_during is null or v.valid_during @> ${request.asOf}::timestamptz)
     and v.recorded_during @> ${request.asOf}::timestamptz
     and (v.expires_at is null or v.expires_at > ${request.asOf}::timestamptz)
@@ -177,8 +275,22 @@ function eligibleWhere(request: RecallRequest) {
 }
 
 async function queryRanked(tx: DbTransaction, request: RecallRequest, limit: number) {
-  return tx.execute<GeneralRow>(sql`
-    with eligible as materialized (
+  return tx.execute<GeneralRow>(rankedRecallSql(request, limit));
+}
+
+function rankedRecallSql(request: RecallRequest, limit: number) {
+  return sql`
+    with lexical_matches as materialized (
+      select
+        v.id,
+        ts_rank_cd(v.search_tsv, websearch_to_tsquery('english', ${request.query})) as raw_score
+      from agent_memory_versions v
+      where v.search_tsv @@ websearch_to_tsquery('english', ${request.query})
+    ), trigram_matches as materialized (
+      select v.id, similarity(v.content, ${request.query}) as raw_score
+      from agent_memory_versions v
+      where v.content % ${request.query}
+    ), eligible as not materialized (
       select
         v.id as version_id,
         m.id as memory_id,
@@ -201,10 +313,10 @@ async function queryRanked(tx: DbTransaction, request: RecallRequest, limit: num
         ranked.version_id as id,
         row_number() over (order by ranked.raw_score desc, ranked.version_id asc) as lane_rank
       from (
-        select e.version_id, ts_rank_cd(e.search_tsv, websearch_to_tsquery('english', ${request.query})) as raw_score
-        from eligible e
-        where e.search_tsv @@ websearch_to_tsquery('english', ${request.query})
-        order by raw_score desc, e.version_id asc
+        select e.version_id, matches.raw_score
+        from lexical_matches matches
+        join eligible e on e.version_id = matches.id
+        order by matches.raw_score desc, e.version_id asc
         limit 50
       ) ranked
     ), trigram as (
@@ -212,10 +324,10 @@ async function queryRanked(tx: DbTransaction, request: RecallRequest, limit: num
         ranked.version_id as id,
         row_number() over (order by ranked.raw_score desc, ranked.version_id asc) as lane_rank
       from (
-        select e.version_id, similarity(e.content, ${request.query}) as raw_score
-        from eligible e
-        where e.content % ${request.query}
-        order by raw_score desc, e.version_id asc
+        select e.version_id, matches.raw_score
+        from trigram_matches matches
+        join eligible e on e.version_id = matches.id
+        order by matches.raw_score desc, e.version_id asc
         limit 50
       ) ranked
     ), fused as (
@@ -270,7 +382,24 @@ async function queryRanked(tx: DbTransaction, request: RecallRequest, limit: num
     ) provenance on true
     order by scored.composite_score desc, scored.rrf desc, scored.observed_at desc, scored.version_id asc
     limit ${limit}
-  `);
+  `;
+}
+
+/** Integration-only plan probe over the exact production ranked query. */
+export async function explainRankedRecall(request: RecallRequest): Promise<unknown> {
+  const client = await getPool().connect();
+  try {
+    const db = drizzle(client, { schema });
+    return await db.transaction(async (tx) => {
+      await tx.execute(sql`set local enable_seqscan = off`);
+      const result = await tx.execute<Record<string, unknown>>(
+        sql`explain (format json) ${rankedRecallSql(request, MAX_GENERAL)}`,
+      );
+      return result.rows[0]?.["QUERY PLAN"];
+    });
+  } finally {
+    client.release();
+  }
 }
 
 async function queryBrowse(tx: DbTransaction, request: RecallRequest, limit: number) {

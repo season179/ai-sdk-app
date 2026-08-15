@@ -345,14 +345,37 @@ export async function appendSessionMessages(
       .onConflictDoNothing()
       .returning({ id: agentChatMessages.id });
     const insertedIds = new Set(inserted.map((row) => row.id));
+    const rows = await tx
+      .select()
+      .from(agentChatMessages)
+      .where(
+        and(
+          eq(agentChatMessages.sessionId, sessionId),
+          inArray(
+            agentChatMessages.id,
+            messages.map((message) => message.id),
+          ),
+        ),
+      );
+    const byId = new Map(rows.map((row) => [row.id, mapMessage(row, row.parts)]));
+    const requestedById = new Map(messages.map((message) => [message.id, message]));
+    const captureIds = new Set(
+      rows.flatMap((row) => {
+        const requested = requestedById.get(row.id);
+        return requested && canonicalJson(row.parts) === canonicalJson(requested.parts)
+          ? [row.id]
+          : [];
+      }),
+    );
 
-    // A losing duplicate request cannot journal or ground its request-local body.
-    if (opts.traceCapture && insertedIds.size > 0 && isMemoryWriteEnabled()) {
+    // Same-body retries get an attempt-specific event and repoint grounded
+    // evidence; a different-body loser can never journal request-local content.
+    if (opts.traceCapture && captureIds.size > 0 && isMemoryWriteEnabled()) {
       try {
         await tx.transaction(async (savepoint) => {
           await savepoint.execute(sql`set local statement_timeout = '750ms'`);
           const events = opts.traceCapture?.events.filter(
-            (event) => !event.sourceMessageId || insertedIds.has(event.sourceMessageId),
+            (event) => !event.sourceMessageId || captureIds.has(event.sourceMessageId),
           );
           const traceRows = await appendTraceEvents(events ?? [], savepoint);
           const traceEventIds = new Map(
@@ -361,7 +384,7 @@ export async function appendSessionMessages(
             ),
           );
           const grounded = opts.traceCapture?.groundedUserMessages?.filter((message) =>
-            insertedIds.has(message.id),
+            captureIds.has(message.id),
           );
           if (grounded?.length) {
             await ingestUserTurn(sessionId, grounded, {
@@ -384,19 +407,6 @@ export async function appendSessionMessages(
         .set({ lastMessageAt: sql`now()`, updatedAt: sql`now()` })
         .where(eq(agentChatSessions.id, sessionId));
     }
-    const rows = await tx
-      .select()
-      .from(agentChatMessages)
-      .where(
-        and(
-          eq(agentChatMessages.sessionId, sessionId),
-          inArray(
-            agentChatMessages.id,
-            messages.map((message) => message.id),
-          ),
-        ),
-      );
-    const byId = new Map(rows.map((row) => [row.id, mapMessage(row, row.parts)]));
     return {
       traceCaptured,
       persistedMessages: messages.flatMap((message) => {

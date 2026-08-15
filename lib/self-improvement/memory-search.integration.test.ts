@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getDb } from "@/db";
 import {
+  agentChatSessions,
   agentMemories,
   agentMemoryEvents,
   agentMemoryVersions,
@@ -20,10 +21,13 @@ const integration = available ? describe : describe.skip;
 
 integration("memory_search ranked backend mapping", () => {
   const marker = `toolrecall${Date.now()}`;
+  const sessionId = "00000000-0000-4000-8000-000000000099";
   let memoryId = "";
+  let scopedMemoryId = "";
 
   beforeAll(async () => {
     getPool();
+    await getDb().insert(agentChatSessions).values({ id: sessionId, agentId: DEFAULT_AGENT_ID });
     const memory = await createMemory({
       agentId: DEFAULT_AGENT_ID,
       kind: "procedure",
@@ -33,36 +37,63 @@ integration("memory_search ranked backend mapping", () => {
       confidence: 87,
     });
     memoryId = memory.id;
+    scopedMemoryId = (
+      await createMemory({
+        agentId: DEFAULT_AGENT_ID,
+        sessionId,
+        kind: "fact",
+        content: `${marker} owning session only`,
+        source: "curated",
+      })
+    ).id;
   });
 
   afterAll(async () => {
     const db = getDb();
-    const versions = await db
-      .select({ id: agentMemoryVersions.id })
-      .from(agentMemoryVersions)
-      .where(eq(agentMemoryVersions.memoryId, memoryId));
     const eventIds: string[] = [];
-    for (const version of versions) {
-      const provenance = await db
-        .select({ eventId: agentMemoryVersionTraceEvents.eventId })
-        .from(agentMemoryVersionTraceEvents)
-        .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
-      eventIds.push(...provenance.map((row) => row.eventId));
+    for (const cleanupMemoryId of [memoryId, scopedMemoryId].filter(Boolean)) {
+      const versions = await db
+        .select({ id: agentMemoryVersions.id })
+        .from(agentMemoryVersions)
+        .where(eq(agentMemoryVersions.memoryId, cleanupMemoryId));
+      for (const version of versions) {
+        const provenance = await db
+          .select({ eventId: agentMemoryVersionTraceEvents.eventId })
+          .from(agentMemoryVersionTraceEvents)
+          .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+        eventIds.push(...provenance.map((row) => row.eventId));
+        await db
+          .delete(agentMemoryVersionTraceEvents)
+          .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+      }
+      await db.delete(agentMemoryEvents).where(eq(agentMemoryEvents.memoryId, cleanupMemoryId));
       await db
-        .delete(agentMemoryVersionTraceEvents)
-        .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+        .update(agentMemories)
+        .set({ currentVersionId: null, status: "creating" })
+        .where(eq(agentMemories.id, cleanupMemoryId));
+      await db.delete(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, cleanupMemoryId));
+      await db.delete(agentMemories).where(eq(agentMemories.id, cleanupMemoryId));
     }
-    await db.delete(agentMemoryEvents).where(eq(agentMemoryEvents.memoryId, memoryId));
-    await db
-      .update(agentMemories)
-      .set({ currentVersionId: null, status: "creating" })
-      .where(eq(agentMemories.id, memoryId));
-    await db.delete(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, memoryId));
-    await db.delete(agentMemories).where(eq(agentMemories.id, memoryId));
     for (const eventId of eventIds) {
       await db.delete(agentTraceEvents).where(eq(agentTraceEvents.id, eventId));
     }
+    await db.delete(agentChatSessions).where(eq(agentChatSessions.id, sessionId));
     await closePool();
+  });
+
+  it("keeps direct search scoped to the owning session", async () => {
+    const owned = (await executeMemoryTool(
+      "memory_search",
+      { query: `${marker} owning session`, limit: 10 },
+      {},
+      { agentId: DEFAULT_AGENT_ID, sessionId },
+    )) as { memories: Array<{ id: string }> };
+    const unscoped = (await executeMemoryTool("memory_search", {
+      query: `${marker} owning session`,
+      limit: 10,
+    })) as { memories: Array<{ id: string }> };
+    expect(owned.memories.map((item) => item.id)).toContain(scopedMemoryId);
+    expect(unscoped.memories.map((item) => item.id)).not.toContain(scopedMemoryId);
   });
 
   it("maps kind/limit and compact ranked fields from the shared repository", async () => {

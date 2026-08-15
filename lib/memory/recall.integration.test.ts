@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getDb } from "@/db";
 import {
+  agentChatSessions,
   agentDecisions,
   agentDecisionTraceEvents,
   agentGroundedObservations,
@@ -16,7 +17,7 @@ import {
   agentOutcomeTraceEvents,
   agentTraceEvents,
 } from "@/db/schema";
-import { postgresRecallRepository } from "@/lib/memory/repository";
+import { explainRankedRecall, postgresRecallRepository } from "@/lib/memory/repository";
 import { closePool, getPool } from "@/lib/scheduler/db";
 import { createMemory, updateMemory } from "@/lib/self-improvement/memories";
 
@@ -28,6 +29,7 @@ integration("Postgres recall repository", () => {
   const agentId = randomUUID();
   const otherAgentId = randomUUID();
   const sessionId = randomUUID();
+  const otherSessionId = randomUUID();
   const marker = `recall${Date.now()}`;
   // Capture one read instant after all ordinary seed writes will have begun.
   const asOf = new Date(Date.now() + 60_000);
@@ -35,6 +37,12 @@ integration("Postgres recall repository", () => {
 
   beforeAll(async () => {
     getPool();
+    await getDb()
+      .insert(agentChatSessions)
+      .values([
+        { id: sessionId, agentId },
+        { id: otherSessionId, agentId },
+      ]);
     ids.exact = (
       await createMemory({
         agentId,
@@ -114,6 +122,36 @@ integration("Postgres recall repository", () => {
         source: "curated",
       })
     ).id;
+    ids.session = (
+      await createMemory({
+        agentId,
+        sessionId,
+        kind: "fact",
+        content: `${marker} current session visible`,
+        source: "curated",
+      })
+    ).id;
+    ids.otherSession = (
+      await createMemory({
+        agentId,
+        sessionId: otherSessionId,
+        kind: "fact",
+        content: `${marker} other session forbidden`,
+        source: "curated",
+      })
+    ).id;
+    ids.taskScoped = (
+      await createMemory({
+        agentId,
+        kind: "fact",
+        content: `${marker} unbound task forbidden`,
+        source: "curated",
+      })
+    ).id;
+    await getDb()
+      .update(agentMemories)
+      .set({ scopeType: "task", scopeId: randomUUID(), sessionId: null })
+      .where(eq(agentMemories.id, ids.taskScoped));
     ids.foreign = (
       await createMemory({
         agentId: otherAgentId,
@@ -182,6 +220,8 @@ integration("Postgres recall repository", () => {
     const sessionDecision = decisionValues({
       id: randomUUID(),
       sessionId,
+      scopeType: "session",
+      scopeId: sessionId,
       selectedOption: "session-choice",
     });
     ids.decision = sessionDecision.id;
@@ -281,6 +321,7 @@ integration("Postgres recall repository", () => {
       await db.delete(agentMemories).where(eq(agentMemories.agentId, cleanupAgentId));
       await db.delete(agentTraceEvents).where(eq(agentTraceEvents.agentId, cleanupAgentId));
     }
+    await getDb().delete(agentChatSessions).where(eq(agentChatSessions.agentId, agentId));
     await closePool();
   });
 
@@ -300,12 +341,15 @@ integration("Postgres recall repository", () => {
     const result = await recall(marker);
     const returned = new Set(result.general.map((item) => item.id));
     expect(returned.has(ids.exact)).toBe(true);
+    expect(returned.has(ids.session)).toBe(true);
     for (const excluded of [
       ids.expired,
       ids.tombstoned,
       ids.blocked,
       ids.archived,
       ids.invalidRecorded,
+      ids.otherSession,
+      ids.taskScoped,
       ids.foreign,
     ]) {
       expect(returned.has(excluded)).toBe(false);
@@ -329,6 +373,20 @@ integration("Postgres recall repository", () => {
         "stale concluded forbidden",
       ]),
     );
+  });
+
+  it("uses both GIN indexes for the exact production ranked query", async () => {
+    const plan = JSON.stringify(
+      await explainRankedRecall({
+        agentId,
+        sessionId,
+        query: `${marker} telemetry`,
+        asOf,
+        generalLimit: 20,
+      }),
+    );
+    expect(plan).toContain("agent_memory_versions_search_tsv_idx");
+    expect(plan).toContain("agent_memory_versions_content_trgm_idx");
   });
 
   it("respects kind and limit and resolves browse ties by stable version id", async () => {

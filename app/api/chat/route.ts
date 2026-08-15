@@ -31,6 +31,7 @@ import {
 } from "@/lib/memory/capture";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
 import { appendTurnProjection, shouldRecall } from "@/lib/memory/context";
+import { runProjectionReads } from "@/lib/memory/projection-reads";
 import { recallForTurn } from "@/lib/memory/recall";
 import { classifyChatStreamEnd } from "@/lib/memory/stream-status";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
@@ -39,7 +40,7 @@ import { resolveChatModel } from "@/lib/models/openrouter";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { isSelfImprovementEnabled } from "@/lib/self-improvement/config";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
-import { memoryTools } from "@/lib/self-improvement/memory-tools";
+import { createMemoryTools } from "@/lib/self-improvement/memory-tools";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -344,7 +345,6 @@ export async function POST(req: Request) {
     rawCaptureCompleted = run.userCaptured;
     const fullMessages = run.cleanMessages;
     let uiMessages = run.modelMessages;
-    const skillCatalogBlock = await loadSkillCatalogBlock();
     let recallStatus: "hit" | "miss" | "skipped" | "degraded" = "skipped";
     let recallCount = 0;
     const target = run.targetMessageId
@@ -353,34 +353,73 @@ export async function POST(req: Request) {
     const hasSidecar = Boolean(
       run.targetMessageId && run.apiPartMessageIds.includes(run.targetMessageId),
     );
+    const asOf = new Date();
+    const projectionDeadlineAt = Date.now() + 2_000;
+
+    const readProjection = (cleanTarget: ChatUIMessage | undefined) => {
+      const targetText = messageText(cleanTarget);
+      const recallEnabled = Boolean(
+        cleanTarget && !hasSidecar && isSelfImprovementEnabled() && shouldRecall(targetText),
+      );
+      return runProjectionReads<{
+        skillCatalogBlock: string;
+        activatedTarget: ChatUIMessage | undefined;
+        recall: Awaited<ReturnType<typeof recallForTurn>> | null;
+      }>(
+        {
+          skillCatalogBlock: () => loadSkillCatalogBlock(),
+          activatedTarget: () =>
+            cleanTarget && !hasSidecar
+              ? injectUserActivatedSkill(cleanTarget)
+              : Promise.resolve(cleanTarget),
+          recall: ({ signal, deadlineAt }) =>
+            recallEnabled
+              ? recallForTurn(
+                  {
+                    agentId: DEFAULT_AGENT_ID,
+                    sessionId: sessionId ?? undefined,
+                    query: targetText,
+                    asOf,
+                  },
+                  { signal, deadlineAt },
+                )
+              : Promise.resolve(null),
+        },
+        { skillCatalogBlock: "", activatedTarget: cleanTarget, recall: null },
+        { deadlineAt: projectionDeadlineAt, signal: req.signal },
+      );
+    };
+
+    let cleanTarget = target;
+    let projectionReads = await readProjection(cleanTarget);
+    const skillCatalogBlock = projectionReads.skillCatalogBlock;
+    const project = () => {
+      const recalled = projectionReads.recall;
+      if (recalled) {
+        recallStatus = recalled.status;
+        recallCount = recalled.items.length;
+      } else if (
+        cleanTarget &&
+        !hasSidecar &&
+        isSelfImprovementEnabled() &&
+        shouldRecall(messageText(cleanTarget))
+      ) {
+        recallStatus = "degraded";
+      }
+      return cleanTarget && projectionReads.activatedTarget
+        ? appendTurnProjection(projectionReads.activatedTarget, {
+            utc: asOf.toISOString(),
+            skillCatalogBlock,
+            memoryBlock: recalled?.renderedBlock ?? "",
+          })
+        : cleanTarget;
+    };
 
     // A stored sidecar is exact replay authority. Otherwise project only this
     // current/fork user message; historical messages are never recomputed.
-    if (target && run.targetMessageId && !hasSidecar) {
-      const asOf = new Date();
-      const project = async (cleanTarget: ChatUIMessage) => {
-        const targetText = messageText(cleanTarget);
-        const projected = await injectUserActivatedSkill(cleanTarget);
-        let memoryBlock = "";
-        if (isSelfImprovementEnabled() && shouldRecall(targetText)) {
-          const recalled = await recallForTurn({
-            agentId: DEFAULT_AGENT_ID,
-            sessionId: sessionId ?? undefined,
-            query: targetText,
-            asOf,
-          });
-          recallStatus = recalled.status;
-          recallCount = recalled.items.length;
-          memoryBlock = recalled.renderedBlock;
-        }
-        return appendTurnProjection(projected, {
-          utc: asOf.toISOString(),
-          skillCatalogBlock,
-          memoryBlock,
-        });
-      };
-      let cleanTarget = target;
-      let projectedTarget = await project(cleanTarget);
+    if (cleanTarget && run.targetMessageId && !hasSidecar) {
+      let projectedTarget = project();
+      if (!projectedTarget) throw new ChatBranchConflictError("Projection target disappeared.");
 
       if (sessionId) {
         try {
@@ -396,7 +435,8 @@ export async function POST(req: Request) {
           } catch (error) {
             if (!(error instanceof ChatMessagePartsMismatchError)) throw error;
             cleanTarget = { ...cleanTarget, parts: error.winningParts };
-            projectedTarget = await project(cleanTarget);
+            projectionReads = await readProjection(cleanTarget);
+            projectedTarget = project() ?? cleanTarget;
             winningParts = await materializeMessageApiParts(
               sessionId,
               run.targetMessageId,
@@ -432,7 +472,7 @@ export async function POST(req: Request) {
         ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
         : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
-      ...(memorySearchEnabled ? memoryTools : {}),
+      ...(memorySearchEnabled ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId }) : {}),
     };
     // Byte-stable across every turn: all dynamic data lives in api_parts.
     const instructions = [SYSTEM_PROMPT, SKILLS_PROMPT, MEMORY_REFERENCE_POLICY].join("\n\n");

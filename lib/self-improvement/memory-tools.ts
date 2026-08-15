@@ -61,12 +61,24 @@ export const memoryToolSpecs: RealisticToolSpec[] = [
 type MemoryToolHandler = (input: RealisticToolInput) => Promise<unknown>;
 type RankedSearch = typeof searchRankedRecall;
 
-async function executeMemorySearch(input: RealisticToolInput, search: RankedSearch) {
+type MemoryToolContext = { agentId?: string; sessionId?: string | null };
+
+async function executeMemorySearch(
+  input: RealisticToolInput,
+  search: RankedSearch,
+  context: MemoryToolContext,
+) {
   const query = typeof input.query === "string" ? input.query.trim() : "";
   if (!query) return { success: false, error: "query is required." };
   const kind = parseKind(input.kind);
   const limit = clampLimit(input.limit);
-  const memories = await search({ agentId: DEFAULT_AGENT_ID, query, kind, limit });
+  const memories = await search({
+    agentId: context.agentId ?? DEFAULT_AGENT_ID,
+    sessionId: context.sessionId ?? undefined,
+    query,
+    kind,
+    limit,
+  });
 
   return {
     success: true,
@@ -108,12 +120,13 @@ export async function executeMemoryTool(
   name: string,
   input: RealisticToolInput,
   dependencies: { search?: RankedSearch; logger?: typeof console.error } = {},
+  context: MemoryToolContext = {},
 ) {
   if (name !== "memory_search") {
     return { success: false, error: `'${name}' is not a memory tool.` };
   }
   try {
-    return await executeMemorySearch(input, dependencies.search ?? searchRankedRecall);
+    return await executeMemorySearch(input, dependencies.search ?? searchRankedRecall, context);
   } catch (error) {
     (dependencies.logger ?? console.error)(`Memory tool ${name} failed`, error);
     return { success: false, error: SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE };
@@ -124,8 +137,15 @@ export const memoryToolHandlers: Record<string, MemoryToolHandler> = {
   memory_search: (input) => executeMemoryTool("memory_search", input),
 };
 
-/** Real AI SDK tools, exposed directly (NOT via the shared registry) when the flag is on. */
-export const memoryTools: ToolSet = buildSpecToolSet(memoryToolSpecs, executeMemoryTool);
+/** Per-request tools close over server-side scope without exposing it in the schema. */
+export function createMemoryTools(context: MemoryToolContext): ToolSet {
+  return buildSpecToolSet(memoryToolSpecs, (name, input) =>
+    executeMemoryTool(name, input, {}, context),
+  );
+}
+
+/** Default-scope export retained for non-chat callers and tests. */
+export const memoryTools: ToolSet = createMemoryTools({ agentId: DEFAULT_AGENT_ID });
 
 function parseKind(value: unknown): MemoryKind | undefined {
   // Optional filter: absent → no kind constraint. Otherwise reuse the canonical

@@ -11,6 +11,9 @@ export type RecallRequest = {
   generalLimit?: number;
   maxItems?: number;
   maxChars?: number;
+  /** Server-only cancellation/deadline; never model-visible. */
+  signal?: AbortSignal;
+  deadlineAt?: number;
 };
 
 export type RecallScoreComponents = {

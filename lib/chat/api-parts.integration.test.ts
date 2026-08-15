@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getDb } from "@/db";
@@ -96,6 +96,60 @@ integration("chat api_parts replay boundary", () => {
     const after = await getChatSessionForRun(sessionId, agentId);
     expect(replayed).toEqual(before?.modelMessages[0]?.parts);
     expect(after?.modelMessages[0]?.parts).toEqual(before?.modelMessages[0]?.parts);
+  });
+
+  it("journals a same-body retry and repoints grounded evidence to its new attempt", async () => {
+    const retrySessionId = randomUUID();
+    const retryMessageId = `user-${randomUUID()}`;
+    const retryParts = [{ type: "text" as const, text: "same persisted retry body" }];
+    const firstTraceId = randomUUID();
+    const secondTraceId = randomUUID();
+    const retryMessage = { id: retryMessageId, role: "user" as const, parts: retryParts };
+    try {
+      await appendSessionMessages(retrySessionId, [retryMessage], {
+        agentId,
+        createIfMissing: true,
+        traceCapture: {
+          events: [
+            buildUserMessageEvent(
+              { agentId, sessionId: retrySessionId, traceId: firstTraceId },
+              retryMessage,
+            ),
+          ],
+          groundedUserMessages: [retryMessage],
+        },
+      });
+      const retry = await appendSessionMessages(retrySessionId, [retryMessage], {
+        agentId,
+        traceCapture: {
+          events: [
+            buildUserMessageEvent(
+              { agentId, sessionId: retrySessionId, traceId: secondTraceId },
+              retryMessage,
+            ),
+          ],
+          groundedUserMessages: [retryMessage],
+        },
+      });
+      expect(retry.traceCaptured).toBe(true);
+      const [secondEvent] = await getDb()
+        .select({ id: agentTraceEvents.id })
+        .from(agentTraceEvents)
+        .where(eq(agentTraceEvents.traceId, secondTraceId));
+      const [observation] = await getDb()
+        .select({ traceEventId: agentGroundedObservations.traceEventId })
+        .from(agentGroundedObservations)
+        .where(
+          and(
+            eq(agentGroundedObservations.sessionId, retrySessionId),
+            eq(agentGroundedObservations.sourceMessageId, retryMessageId),
+          ),
+        );
+      expect(secondEvent?.id).toBeTruthy();
+      expect(observation?.traceEventId).toBe(secondEvent?.id);
+    } finally {
+      await getDb().delete(agentChatSessions).where(eq(agentChatSessions.id, retrySessionId));
+    }
   });
 
   it("binds concurrent duplicate submits and their sidecar to the clean winner", async () => {
@@ -200,7 +254,12 @@ integration("chat api_parts replay boundary", () => {
     const [observation] = await getDb()
       .select({ content: agentGroundedObservations.content })
       .from(agentGroundedObservations)
-      .where(eq(agentGroundedObservations.agentId, agentId));
+      .where(
+        and(
+          eq(agentGroundedObservations.agentId, agentId),
+          eq(agentGroundedObservations.sessionId, sessionId),
+        ),
+      );
     expect(trace?.payload.text).toBe("raw user evidence only");
     expect(JSON.stringify(trace?.payload)).not.toContain("<memory_context>");
     expect(observation?.content).toBe("raw user evidence only");
