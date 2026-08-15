@@ -4,7 +4,12 @@ import { jsonSchema, Output, ToolLoopAgent } from "ai";
 import { and, eq, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
-import { type AgentTraceEvent, agentReviewProposals } from "@/db/schema";
+import {
+  type AgentTraceEvent,
+  agentReviewProposals,
+  agentReviewReceipts,
+  agentReviewStates,
+} from "@/db/schema";
 import { admitTurnReviewCandidates } from "@/lib/consolidation/run";
 import {
   type ExtractedMemoryCandidate,
@@ -18,6 +23,7 @@ import {
 } from "@/lib/memory/config";
 import { sha256 } from "@/lib/memory/redaction";
 import { assertCompletedTraceWindow, listCompletedTraceWindow } from "@/lib/memory/trace";
+import { getPool } from "@/lib/scheduler/db";
 import { getReviewerModel } from "@/lib/self-improvement/config";
 import type { TurnReviewJobData } from "@/lib/self-improvement/enqueue";
 import { createReviewProposal } from "@/lib/self-improvement/proposals";
@@ -95,11 +101,40 @@ export const REVIEW_PROMPT_HASH = sha256(
 );
 
 export async function runTurnReview(job: TurnReviewJobData): Promise<RunTurnReviewResult> {
+  const lockKey = `${job.agentId}:${job.reviewKey}:${MEMORY_EXTRACTOR_ID}`;
+  const client = await getPool().connect();
+  await client.query("select pg_advisory_lock(hashtext($1))", [lockKey]);
+  try {
+    const [receipt] = await getDb()
+      .select({ result: agentReviewReceipts.result })
+      .from(agentReviewReceipts)
+      .where(
+        and(
+          eq(agentReviewReceipts.agentId, job.agentId),
+          eq(agentReviewReceipts.reviewKey, job.reviewKey),
+          eq(agentReviewReceipts.extractorId, MEMORY_EXTRACTOR_ID),
+        ),
+      )
+      .limit(1);
+    if (receipt) return receipt.result as RunTurnReviewResult;
+    return await runUnreceiptedTurnReview(job);
+  } finally {
+    await client.query("select pg_advisory_unlock(hashtext($1))", [lockKey]).catch(() => undefined);
+    client.release();
+  }
+}
+
+async function runUnreceiptedTurnReview(job: TurnReviewJobData): Promise<RunTurnReviewResult> {
   const since = job.kind === "chat" && job.reviewFrom ? new Date(job.reviewFrom) : undefined;
   const window = await listCompletedTraceWindow(
     job.kind === "chat"
-      ? { agentId: job.agentId, sessionId: job.sessionId, since }
-      : { agentId: job.agentId, taskId: job.taskId },
+      ? {
+          agentId: job.agentId,
+          sessionId: job.sessionId,
+          since,
+          expectedTraceId: job.latestTerminalTraceId,
+        }
+      : { agentId: job.agentId, taskId: job.taskId, expectedTraceId: job.attemptTraceId },
   );
   const expectedTraceId = job.kind === "chat" ? job.latestTerminalTraceId : job.attemptTraceId;
   const selected =
@@ -186,17 +221,43 @@ export async function runTurnReview(job: TurnReviewJobData): Promise<RunTurnRevi
       }
       skillProposalCount += 1;
     }
-    return { admission, skillProposalCount };
+    const completed: RunTurnReviewResult = {
+      proposalCount: admission.proposed + skillProposalCount,
+      candidatesAccepted: admission.accepted,
+      candidatesRejected: admission.rejected,
+      candidatesProposed: admission.proposed,
+      summary: verdict.summary,
+      noActionReason: verdict.noActionReason,
+    };
+    await tx.insert(agentReviewReceipts).values({
+      agentId: job.agentId,
+      reviewKey: job.reviewKey,
+      extractorId: MEMORY_EXTRACTOR_ID,
+      result: completed,
+    });
+    if (job.kind === "chat") {
+      const watermarkAt = selected.reduce(
+        (latest, row) => (row.occurredAt > latest ? row.occurredAt : latest),
+        selected[0].occurredAt,
+      );
+      await tx
+        .update(agentReviewStates)
+        .set({
+          lastReviewedMessageId: job.triggerMessageId,
+          lastReviewedAt: watermarkAt,
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(agentReviewStates.agentId, job.agentId),
+            eq(agentReviewStates.sessionId, job.sessionId),
+          ),
+        );
+    }
+    return completed;
   });
 
-  return {
-    proposalCount: persisted.admission.proposed + persisted.skillProposalCount,
-    candidatesAccepted: persisted.admission.accepted,
-    candidatesRejected: persisted.admission.rejected,
-    candidatesProposed: persisted.admission.proposed,
-    summary: verdict.summary,
-    noActionReason: verdict.noActionReason,
-  };
+  return persisted;
 }
 
 export function selectApplicableProposals(

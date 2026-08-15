@@ -112,6 +112,9 @@ export async function admitTurnReviewCandidates(
       validFrom,
       validTo,
       timePrecision: item.candidate.timePrecision,
+      sourceReferenceTime: item.candidate.sourceReferenceTime?.toISOString() ?? null,
+      structured,
+      sensitivityClass: "normal",
       dryRun: false,
     };
     const proposal = await proposeTypedCandidate(
@@ -124,6 +127,10 @@ export async function admitTurnReviewCandidates(
         confidence: item.candidate.confidence,
         validFrom,
         validTo,
+        structured,
+        sourceReferenceTime: item.candidate.sourceReferenceTime?.toISOString() ?? null,
+        timePrecision: item.candidate.timePrecision,
+        sensitivityClass: "normal",
         metadata,
         runId: run.id,
       },

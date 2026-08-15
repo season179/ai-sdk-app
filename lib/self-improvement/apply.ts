@@ -3,13 +3,18 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { type AppDbClient, getDb } from "@/db";
 import {
   agentGroundedObservations,
+  agentMemories,
   agentMemoryCandidates,
   agentMemoryCandidateTraceEvents,
 } from "@/db/schema";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { getMemoryPolicyVersion } from "@/lib/memory/config";
 import { sanitizeTracePayload } from "@/lib/memory/redaction";
-import { appendTraceEvents, assertCompletedTraceWindow } from "@/lib/memory/trace";
+import {
+  appendTraceEvents,
+  assertCompletedTraceWindow,
+  assertPromotableTraceEvidence,
+} from "@/lib/memory/trace";
 import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   archiveMemory,
@@ -28,6 +33,7 @@ import {
   parseMemoryContent,
   parseMemoryKind,
   parseMemorySource,
+  parseMemoryType,
   readOptionalString,
   readPayloadObject,
   readRequiredString,
@@ -110,6 +116,10 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
         return;
       }
       const sourceEventIds = await resolveProposalEvidence(proposal, payload, db);
+      const proposedOperation = readCandidateOperation(payload, "ADD");
+      if (proposedOperation !== "ADD") {
+        throw new SelfImprovementInputError("operation_kind_mismatch");
+      }
 
       // Derive the memory source from the proposal and guard the privileged
       // `consolidated` source (§1.1): only consolidation proposals may mint a
@@ -134,6 +144,7 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
           : null;
 
       try {
+        await assertCanonicalAddAvailable(proposal, payload, db);
         // Isolate a uniqueness race in a savepoint. PostgreSQL marks the
         // current transaction failed after a constraint violation; without the
         // nested transaction the no-op path could not mark the proposal applied.
@@ -152,6 +163,10 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
               canonicalKey: typeof payload.canonicalKey === "string" ? payload.canonicalKey : null,
               validFrom: payload.validFrom,
               validTo: payload.validTo,
+              structured: readStructured(payload.structured),
+              sourceReferenceTime: readOptionalDate(payload.sourceReferenceTime),
+              timePrecision: readTimePrecision(payload.timePrecision),
+              sensitivityClass: readSensitivity(payload.sensitivityClass),
               sourceEventIds,
               authority: memorySource === "consolidated" ? "consolidated" : "reviewed",
               extractorId: proposal.admissionMetadata?.version === 2 ? "turn-review-v1" : null,
@@ -187,8 +202,15 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
 
     case "memory_edit": {
       const sourceEventIds = await resolveProposalEvidence(proposal, payload, db);
+      if (readCandidateOperation(payload, "UPDATE") !== "UPDATE") {
+        throw new SelfImprovementInputError("operation_kind_mismatch");
+      }
+      const target = await resolveCanonicalTarget(proposal, payload, db);
+      if (target.conflictPolicy === "add_only") {
+        throw new SelfImprovementInputError("conflict_policy_add_only");
+      }
       await updateMemory(
-        readRequiredString(payload, "memoryId"),
+        target.id,
         {
           kind: payload.memoryKind ?? payload.kind,
           content: payload.content,
@@ -196,6 +218,11 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
           memoryType: payload.memoryType,
           validFrom: payload.validFrom,
           validTo: payload.validTo,
+          structured: readStructured(payload.structured),
+          sourceReferenceTime: readOptionalDate(payload.sourceReferenceTime),
+          timePrecision: readTimePrecision(payload.timePrecision),
+          sensitivityClass: readSensitivity(payload.sensitivityClass),
+          source: proposal.proposerOrigin === "consolidation" ? "consolidated" : "review",
           sourceEventIds,
           authority: "reviewed",
         },
@@ -207,12 +234,12 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
 
     case "memory_archive": {
       const sourceEventIds = await resolveProposalEvidence(proposal, payload, db);
-      await archiveMemory(
-        readRequiredString(payload, "memoryId"),
-        proposal.agentId,
-        db,
-        sourceEventIds,
-      );
+      if (readCandidateOperation(payload, "INVALIDATE") !== "INVALIDATE") {
+        throw new SelfImprovementInputError("operation_kind_mismatch");
+      }
+      const target = await resolveCanonicalTarget(proposal, payload, db, true);
+      if (target.status === "archived" || target.tombstoned) return;
+      await archiveMemory(target.id, proposal.agentId, db, sourceEventIds);
       return;
     }
 
@@ -307,6 +334,13 @@ async function resolveProposalEvidence(
     if (eventIds.length !== observationIds.length) {
       throw new SelfImprovementInputError("Consolidation proposal has incomplete trace evidence.");
     }
+    try {
+      await assertPromotableTraceEvidence({ agentId: proposal.agentId, eventIds }, db);
+    } catch {
+      throw new SelfImprovementInputError(
+        "Consolidation proposal evidence is not from a completed attempt.",
+      );
+    }
     return eventIds;
   }
 
@@ -339,6 +373,118 @@ async function resolveProposalEvidence(
     db,
   );
   return [event.id];
+}
+
+type CandidateOperation = "ADD" | "UPDATE" | "INVALIDATE";
+
+function readCandidateOperation(
+  payload: Record<string, unknown>,
+  fallback: CandidateOperation,
+): CandidateOperation {
+  const value = payload.proposedOperation ?? fallback;
+  if (value === "ADD" || value === "UPDATE" || value === "INVALIDATE") return value;
+  throw new SelfImprovementInputError("unsupported_candidate_operation");
+}
+
+function readStructured(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readOptionalDate(value: unknown): Date | null | undefined {
+  if (value == null) return value === null ? null : undefined;
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new SelfImprovementInputError("source_reference_time_invalid");
+  }
+  return new Date(value);
+}
+
+function readTimePrecision(
+  value: unknown,
+): "instant" | "day" | "month" | "year" | "unknown" | undefined {
+  return ["instant", "day", "month", "year", "unknown"].includes(String(value))
+    ? (value as "instant" | "day" | "month" | "year" | "unknown")
+    : undefined;
+}
+
+function readSensitivity(value: unknown): "normal" | "sensitive" | "restricted" | undefined {
+  return ["normal", "sensitive", "restricted"].includes(String(value))
+    ? (value as "normal" | "sensitive" | "restricted")
+    : undefined;
+}
+
+async function assertCanonicalAddAvailable(
+  proposal: ReviewProposal,
+  payload: Record<string, unknown>,
+  db: AppDbClient,
+): Promise<void> {
+  const canonicalKey = typeof payload.canonicalKey === "string" ? payload.canonicalKey.trim() : "";
+  if (!canonicalKey) return;
+  const kind = parseMemoryKind(payload.memoryKind ?? payload.kind);
+  const memoryType = parseMemoryType(
+    payload.memoryType,
+    kind === "episode" ? "episodic" : kind === "procedure" ? "procedural" : "semantic",
+  );
+  const scopeType = proposal.sessionId ? "session" : "agent";
+  const scopeId = proposal.sessionId ?? proposal.agentId;
+  const lockKey = `${proposal.agentId}:${scopeType}:${scopeId}:${memoryType}:${canonicalKey}`;
+  await db.execute(sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`);
+  const [existing] = await db
+    .select({ id: agentMemories.id })
+    .from(agentMemories)
+    .where(
+      and(
+        eq(agentMemories.agentId, proposal.agentId),
+        eq(agentMemories.scopeType, scopeType),
+        eq(agentMemories.scopeId, scopeId),
+        eq(agentMemories.memoryType, memoryType),
+        eq(agentMemories.canonicalKey, canonicalKey),
+        eq(agentMemories.status, "approved"),
+        eq(agentMemories.tombstoned, false),
+      ),
+    )
+    .limit(1);
+  if (existing) throw new SelfImprovementInputError("canonical_key_exists");
+}
+
+async function resolveCanonicalTarget(
+  proposal: ReviewProposal,
+  payload: Record<string, unknown>,
+  db: AppDbClient,
+  allowArchived = false,
+) {
+  const memoryId = typeof payload.memoryId === "string" ? payload.memoryId.trim() : "";
+  const canonicalKey = typeof payload.canonicalKey === "string" ? payload.canonicalKey.trim() : "";
+  const conditions = [eq(agentMemories.agentId, proposal.agentId)];
+  if (memoryId) {
+    conditions.push(eq(agentMemories.id, memoryId));
+  } else {
+    if (!canonicalKey) throw new SelfImprovementInputError("canonical_key_not_found");
+    const kind = parseMemoryKind(payload.memoryKind ?? payload.kind);
+    const memoryType = parseMemoryType(
+      payload.memoryType,
+      kind === "episode" ? "episodic" : kind === "procedure" ? "procedural" : "semantic",
+    );
+    conditions.push(
+      eq(agentMemories.scopeType, proposal.sessionId ? "session" : "agent"),
+      eq(agentMemories.scopeId, proposal.sessionId ?? proposal.agentId),
+      eq(agentMemories.memoryType, memoryType),
+      eq(agentMemories.canonicalKey, canonicalKey),
+    );
+  }
+  const [target] = await db
+    .select()
+    .from(agentMemories)
+    .where(and(...conditions))
+    .orderBy(sql`${agentMemories.updatedAt} desc`)
+    .limit(1)
+    .for("update");
+  if (!target) throw new SelfImprovementInputError("canonical_key_not_found");
+  if (!allowArchived && (target.status !== "approved" || target.tombstoned)) {
+    throw new SelfImprovementInputError("canonical_target_inactive");
+  }
+  return target;
 }
 
 function readReferences(value: unknown): SkillReferenceInput[] | undefined {

@@ -74,7 +74,9 @@ export async function recordCompletedTurnAndMaybeEnqueueReview({
     getTurnReviewDelaySeconds(),
   );
   if (!jobId) throw new Error("pg-boss did not return a job id for turn review.");
-  await resetReviewCounter({ agentId, sessionId, triggerMessageId });
+  // Queueing resets cadence only. The successful-review watermark advances in
+  // the worker's candidate/admission transaction, never at enqueue time.
+  await resetReviewCadenceAfterEnqueue({ agentId, sessionId });
   return { enqueued: true, jobId };
 }
 
@@ -130,17 +132,14 @@ async function incrementReviewCounter(input: { agentId: string; sessionId: strin
   });
 }
 
-async function resetReviewCounter(input: {
+export async function resetReviewCadenceAfterEnqueue(input: {
   agentId: string;
   sessionId: string;
-  triggerMessageId: string;
 }) {
   await getDb()
     .update(agentReviewStates)
     .set({
       turnsSinceMemoryReview: 0,
-      lastReviewedMessageId: input.triggerMessageId,
-      lastReviewedAt: sql`now()`,
       updatedAt: sql`now()`,
     })
     .where(

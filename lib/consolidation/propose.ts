@@ -89,15 +89,25 @@ export async function proposeTypedCandidate(
     confidence: number;
     validFrom: string | null;
     validTo: string | null;
+    structured: Record<string, unknown>;
+    sourceReferenceTime: string | null;
+    timePrecision: "instant" | "day" | "month" | "year" | "unknown";
+    sensitivityClass: "normal" | "sensitive" | "restricted";
     metadata: AdmissionMetadataV2;
     runId: string;
   },
   db: AppDbClient,
 ): Promise<ReviewProposal> {
   const kind = typedKind(input.memoryType, input.metadata.memoryKind);
+  const proposalKind =
+    input.metadata.proposedOperation === "UPDATE"
+      ? "memory_edit"
+      : input.metadata.proposedOperation === "INVALIDATE"
+        ? "memory_archive"
+        : "memory_create";
   const proposal = await createCandidateReviewProposal(
     {
-      kind: "memory_create",
+      kind: proposalKind,
       payload: {
         memoryKind: kind,
         memoryType: input.memoryType,
@@ -107,6 +117,11 @@ export async function proposeTypedCandidate(
         canonicalKey: input.canonicalKey,
         validFrom: input.validFrom,
         validTo: input.validTo,
+        structured: input.structured,
+        sourceReferenceTime: input.sourceReferenceTime,
+        timePrecision: input.timePrecision,
+        sensitivityClass: input.sensitivityClass,
+        proposedOperation: input.metadata.proposedOperation,
       },
       rationale: `Evidence-backed ${input.memoryType} candidate (${input.metadata.evidenceTraceEventIds.length} trace event(s), ${input.metadata.scoreBps} bps).`,
       proposerOrigin: "consolidation",

@@ -168,6 +168,74 @@ integration("typed trace distillation (integration)", () => {
     expect(provenance.length).toBeGreaterThan(0);
   });
 
+  it("dispatches UPDATE and INVALIDATE to the locked canonical root", async () => {
+    const canonicalKey = `preference:dispatch-${randomUUID()}`;
+    const applyCandidate = async (
+      operation: "ADD" | "UPDATE" | "INVALIDATE",
+      content: string,
+      structured: Record<string, unknown>,
+    ) => {
+      const evidence = await window();
+      const persisted = await persistMemoryCandidates({
+        agentId,
+        reviewKey: `review:${randomUUID()}`,
+        traceId: evidence.traceId,
+        candidates: [
+          draft(
+            evidence.rows.map((row) => row.id),
+            {
+              canonicalKey,
+              content,
+              structured: { memoryKind: "preference", ...structured },
+              proposedOperation: operation,
+            },
+          ),
+        ],
+        windowEvents: evidence.rows,
+        extractorId: "integration-extractor",
+        modelId: "integration-model",
+        promptHash: "integration-prompt",
+        schemaVersion: 1,
+        policyVersion: "write-v1",
+      });
+      const admitted = await admitTurnReviewCandidates({ agentId, candidates: persisted });
+      expect(admitted.proposed).toBe(1);
+      const [proposal] = await getDb()
+        .select()
+        .from(agentReviewProposals)
+        .where(eq(agentReviewProposals.sourceCandidateId, persisted[0].candidate.id));
+      await applyReviewProposal(proposal.id);
+    };
+
+    await applyCandidate("ADD", "Initial canonical preference.", { revision: 1 });
+    await applyCandidate("UPDATE", "Updated canonical preference.", { revision: 2 });
+    const [root] = await getDb()
+      .select()
+      .from(agentMemories)
+      .where(eq(agentMemories.canonicalKey, canonicalKey));
+    const versionsAfterUpdate = await getDb()
+      .select()
+      .from(agentMemoryVersions)
+      .where(eq(agentMemoryVersions.memoryId, root.id))
+      .orderBy(agentMemoryVersions.versionNo);
+    expect(versionsAfterUpdate).toHaveLength(2);
+    expect(versionsAfterUpdate[1].content).toBe("Updated canonical preference.");
+    expect(versionsAfterUpdate[1].structured).toMatchObject({ revision: 2 });
+
+    await applyCandidate("INVALIDATE", "Invalidate canonical preference.", { revision: 3 });
+    const [archived] = await getDb()
+      .select()
+      .from(agentMemories)
+      .where(eq(agentMemories.id, root.id));
+    expect(archived.status).toBe("archived");
+    const versions = await getDb()
+      .select()
+      .from(agentMemoryVersions)
+      .where(eq(agentMemoryVersions.memoryId, root.id))
+      .orderBy(agentMemoryVersions.versionNo);
+    expect(versions.at(-1)?.operation).toBe("INVALIDATE");
+  });
+
   it("never stores a rejected secret body and never proposes failed traces", async () => {
     const completed = await window();
     const secret = "api_key=super-secret-value";
@@ -190,6 +258,26 @@ integration("typed trace distillation (integration)", () => {
     });
     expect(secretRows[0].candidate.content).toBeNull();
     expect(JSON.stringify(secretRows[0].candidate)).not.toContain("super-secret-value");
+
+    const malformedRows = await persistMemoryCandidates({
+      agentId,
+      reviewKey: `review:${randomUUID()}`,
+      traceId: completed.traceId,
+      candidates: [
+        draft(
+          completed.rows.map((row) => row.id),
+          { validFrom: "next someday" },
+        ),
+      ],
+      windowEvents: completed.rows,
+      extractorId: "integration-extractor",
+      modelId: "integration-model",
+      promptHash: "integration-prompt",
+      schemaVersion: 1,
+      policyVersion: "write-v1",
+    });
+    expect(malformedRows[0].candidate.gateReason).toBe("malformed_validity_interval");
+    expect(malformedRows[0].candidate.validDuring).toBeNull();
 
     const failed = await window("failed");
     const failedRows = await persistMemoryCandidates({
