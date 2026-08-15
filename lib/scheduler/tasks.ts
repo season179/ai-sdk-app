@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { and, desc, eq, getTableColumns, isNull, sql } from "drizzle-orm";
 
-import { getDb } from "@/db";
+import { type AppDbClient, getDb } from "@/db";
 import { agentChatSessions, agentScheduledTaskRuns, agentScheduledTasks } from "@/db/schema";
 import { createTaskSession } from "@/lib/chat/sessions";
 import {
@@ -373,8 +373,12 @@ export async function getScheduledTaskRuns(taskId: string) {
 
 // --- Worker-facing helpers -------------------------------------------------
 
-export async function markRunStarted(taskId: string, pgBossJobId: string) {
-  await getDb()
+export async function markRunStarted(
+  taskId: string,
+  pgBossJobId: string,
+  db: AppDbClient = getDb(),
+) {
+  await db
     .insert(agentScheduledTaskRuns)
     .values({ taskId, pgBossJobId, status: "running" })
     .onConflictDoUpdate({
@@ -389,8 +393,13 @@ export async function markRunStarted(taskId: string, pgBossJobId: string) {
     });
 }
 
-export async function markRunSkipped(taskId: string, pgBossJobId: string, reason: string) {
-  await getDb()
+export async function markRunSkipped(
+  taskId: string,
+  pgBossJobId: string,
+  reason: string,
+  db: AppDbClient = getDb(),
+) {
+  await db
     .insert(agentScheduledTaskRuns)
     .values({ taskId, pgBossJobId, status: "skipped", error: reason, completedAt: sql`now()` })
     .onConflictDoUpdate({
@@ -399,8 +408,12 @@ export async function markRunSkipped(taskId: string, pgBossJobId: string, reason
     });
 }
 
-export async function markRunCompleted(pgBossJobId: string, output: unknown) {
-  await getDb()
+export async function markRunCompleted(
+  pgBossJobId: string,
+  output: unknown,
+  db: AppDbClient = getDb(),
+) {
+  await db
     .update(agentScheduledTaskRuns)
     .set({
       status: "completed",
@@ -413,8 +426,12 @@ export async function markRunCompleted(pgBossJobId: string, output: unknown) {
     .where(eq(agentScheduledTaskRuns.pgBossJobId, pgBossJobId));
 }
 
-export async function markRunFailed(pgBossJobId: string, error: string) {
-  await getDb()
+export async function markRunFailed(
+  pgBossJobId: string,
+  error: string,
+  db: AppDbClient = getDb(),
+) {
+  await db
     .update(agentScheduledTaskRuns)
     .set({ status: "failed", error, completedAt: sql`now()` })
     .where(eq(agentScheduledTaskRuns.pgBossJobId, pgBossJobId));

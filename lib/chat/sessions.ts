@@ -5,6 +5,9 @@ import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import { agentChatMessages, agentChatSessions } from "@/db/schema";
+import { ingestUserTurn } from "@/lib/consolidation/observations";
+import { isMemoryWriteEnabled } from "@/lib/memory/config";
+import { appendTraceEvents, type TraceEventInput } from "@/lib/memory/trace";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
 
@@ -143,7 +146,14 @@ export async function getChatSession(
 export async function appendSessionMessages(
   sessionId: string,
   messages: ChatUIMessage[],
-  opts: { agentId?: string; createIfMissing?: boolean } = {},
+  opts: {
+    agentId?: string;
+    createIfMissing?: boolean;
+    traceCapture?: {
+      events: TraceEventInput[];
+      groundedUserMessages?: ChatUIMessage[];
+    };
+  } = {},
 ): Promise<void> {
   if (messages.length === 0) {
     return;
@@ -201,6 +211,30 @@ export async function appendSessionMessages(
         })),
       )
       .onConflictDoNothing();
+
+    if (opts.traceCapture && isMemoryWriteEnabled()) {
+      try {
+        await tx.transaction(async (savepoint) => {
+          await savepoint.execute(sql`set local statement_timeout = '750ms'`);
+          const traceRows = await appendTraceEvents(opts.traceCapture?.events ?? [], savepoint);
+          const traceEventIds = new Map(
+            traceRows.flatMap((row) =>
+              row.sourceMessageId ? ([[row.sourceMessageId, row.id]] as const) : [],
+            ),
+          );
+          if (opts.traceCapture?.groundedUserMessages?.length) {
+            await ingestUserTurn(sessionId, opts.traceCapture.groundedUserMessages, {
+              agentId: opts.agentId ?? DEFAULT_AGENT_ID,
+              db: savepoint,
+              traceEventIds,
+            });
+          }
+          await savepoint.execute(sql`set local statement_timeout = 0`);
+        });
+      } catch (error) {
+        console.error("Chat trace capture failed; message persistence continues", error);
+      }
+    }
 
     await tx
       .update(agentChatSessions)

@@ -68,7 +68,11 @@ export function extractUserText(messages: ChatUIMessage[]): {
 export async function ingestUserTurn(
   sessionId: string,
   messages: ChatUIMessage[],
-  opts: { agentId?: string; db?: AppDbClient } = {},
+  opts: {
+    agentId?: string;
+    db?: AppDbClient;
+    traceEventIds?: ReadonlyMap<string, string>;
+  } = {},
 ): Promise<number> {
   const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
   const db = opts.db ?? getDb();
@@ -94,6 +98,7 @@ export async function ingestUserTurn(
         // original id and re-ingest stays idempotent.
         sourceMessageId: chunks.length > 1 ? `${item.messageId}#${index}` : item.messageId,
         sourceMemoryId: null,
+        traceEventId: opts.traceEventIds?.get(item.messageId) ?? null,
         content: chunk,
         contentHash: contentHash(chunk),
       });
@@ -124,7 +129,7 @@ export async function ingestUserTurn(
 export async function ingestUserMemory(
   memoryId: string,
   content: string,
-  opts: { agentId?: string; db?: AppDbClient } = {},
+  opts: { agentId?: string; db?: AppDbClient; traceEventId?: string | null } = {},
 ): Promise<void> {
   const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
   const db = opts.db ?? getDb();
@@ -142,6 +147,7 @@ export async function ingestUserMemory(
       sourceMemoryId: memoryId,
       sourceMessageId: null,
       sessionId: null,
+      traceEventId: opts.traceEventId ?? null,
       content: chunk,
       contentHash: contentHash(chunk),
     })

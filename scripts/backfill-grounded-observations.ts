@@ -1,14 +1,21 @@
 import "@/lib/scheduler/load-env";
 
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
 import { getDb } from "@/db";
-import { agentChatMessages, agentMemories } from "@/db/schema";
+import {
+  agentChatMessages,
+  agentGroundedObservations,
+  agentMemories,
+} from "@/db/schema";
 import type { ChatUIMessage } from "@/lib/chat/sessions";
 import {
   advanceCheckpoint,
   ingestUserMemory,
   ingestUserTurn,
 } from "@/lib/consolidation/observations";
+import { buildUserMessageEvent } from "@/lib/memory/capture";
+import { sanitizeTracePayload } from "@/lib/memory/redaction";
+import { appendTraceEvents } from "@/lib/memory/trace";
 import { closePool } from "@/lib/scheduler/db";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
@@ -76,6 +83,7 @@ async function main() {
   console.log(`  source='user' memories:    ${memoryRows.length}`);
   console.log(`  non-user chat rows (skip): ${nonUserChatCount[0]?.count ?? 0}`);
   console.log(`  non-user memories (skip):  ${nonUserMemoryCount[0]?.count ?? 0}`);
+  console.log(`  prospective trace links:  ${chatRows.length + memoryRows.length}`);
 
   if (dryRun) {
     console.log("--dry-run: no rows written.");
@@ -97,13 +105,74 @@ async function main() {
       role: row.role as "user",
       parts: row.parts as ChatUIMessage["parts"],
     }));
-    chatIngested += await ingestUserTurn(sessionId, messages, { db });
+    const events = messages.map((message) =>
+      buildUserMessageEvent(
+        {
+          agentId: DEFAULT_AGENT_ID,
+          sessionId,
+          traceId: `legacy-chat:${sessionId}:${message.id}`,
+        },
+        message,
+      ),
+    );
+    const traces = await appendTraceEvents(events, db);
+    const traceEventIds = new Map(
+      traces.flatMap((event) =>
+        event.sourceMessageId ? ([[event.sourceMessageId, event.id]] as const) : [],
+      ),
+    );
+    chatIngested += await ingestUserTurn(sessionId, messages, { db, traceEventIds });
+    for (const [messageId, traceEventId] of traceEventIds) {
+      await db
+        .update(agentGroundedObservations)
+        .set({ traceEventId })
+        .where(
+          and(
+            eq(agentGroundedObservations.agentId, DEFAULT_AGENT_ID),
+            eq(agentGroundedObservations.sessionId, sessionId),
+            or(
+              eq(agentGroundedObservations.sourceMessageId, messageId),
+              sql`${agentGroundedObservations.sourceMessageId} like ${`${messageId}#%`}`,
+            ),
+            isNull(agentGroundedObservations.traceEventId),
+          ),
+        );
+    }
   }
 
   // Ingest user memories.
   let memoryIngested = 0;
   for (const row of memoryRows) {
-    await ingestUserMemory(row.id, row.content, { db });
+    const sanitized = sanitizeTracePayload({ memoryId: row.id, content: row.content });
+    const [trace] = await appendTraceEvents(
+      [
+        {
+          agentId: DEFAULT_AGENT_ID,
+          traceId: `legacy-user-memory:${row.id}`,
+          sequenceNo: 0,
+          eventType: "explicit_memory_write",
+          actor: "user",
+          trustClass: "user_assertion",
+          payload: sanitized.payload,
+          contentHash: sanitized.contentHash,
+          idempotencyKey: `legacy-user-memory:${row.id}`,
+          retentionClass: "audit",
+          occurredAt: row.createdAt,
+        },
+      ],
+      db,
+    );
+    await ingestUserMemory(row.id, row.content, { db, traceEventId: trace.id });
+    await db
+      .update(agentGroundedObservations)
+      .set({ traceEventId: trace.id })
+      .where(
+        and(
+          eq(agentGroundedObservations.agentId, DEFAULT_AGENT_ID),
+          eq(agentGroundedObservations.sourceMemoryId, row.id),
+          isNull(agentGroundedObservations.traceEventId),
+        ),
+      );
     memoryIngested += 1;
   }
 

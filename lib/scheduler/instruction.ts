@@ -2,6 +2,9 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { jsonSchema, Output, ToolLoopAgent } from "ai";
 
 import type { ChatUIMessage } from "@/lib/chat/sessions";
+import { mapStepToTraceEvents, type TraceContext } from "@/lib/memory/capture";
+import { sha256 } from "@/lib/memory/redaction";
+import type { TraceEventInput } from "@/lib/memory/trace";
 import { mockTools } from "@/lib/mock-tools";
 import { type InstructionTaskPayload, MIN_CHAIN_DELAY_SECONDS } from "@/lib/scheduler/execute";
 import type { ScheduledTask } from "@/lib/scheduler/tasks";
@@ -14,6 +17,9 @@ import type { ScheduledTask } from "@/lib/scheduler/tasks";
  */
 export type InstructionVerdict = {
   statusUpdate: string;
+  declaredRationale: string;
+  expectedOutcome: string;
+  successCriteria: string[];
   continue: boolean;
   nextDelaySeconds: number;
 };
@@ -51,6 +57,19 @@ const verdictSchema = jsonSchema<InstructionVerdict>({
       type: "string",
       description: "Concise status update for the user; stored as this round's output.",
     },
+    declaredRationale: {
+      type: "string",
+      description: "A brief declared basis for the scheduling choice; never hidden reasoning.",
+    },
+    expectedOutcome: {
+      type: "string",
+      description: "The concrete result expected from the selected scheduling action.",
+    },
+    successCriteria: {
+      type: "array",
+      items: { type: "string" },
+      description: "Observable criteria that would show the scheduling action succeeded.",
+    },
     continue: {
       type: "boolean",
       description: "true to run another round, false to stop the chain.",
@@ -60,7 +79,14 @@ const verdictSchema = jsonSchema<InstructionVerdict>({
       description: `Seconds until the next round when continue is true (minimum ${MIN_CHAIN_DELAY_SECONDS}). Use 0 when continue is false.`,
     },
   },
-  required: ["statusUpdate", "continue", "nextDelaySeconds"],
+  required: [
+    "statusUpdate",
+    "declaredRationale",
+    "expectedOutcome",
+    "successCriteria",
+    "continue",
+    "nextDelaySeconds",
+  ],
   additionalProperties: false,
 });
 
@@ -69,8 +95,14 @@ const INSTRUCTION_SYSTEM_PROMPT = [
   "Use the available tools to check on whatever the instruction asks, then report.",
   "You cannot schedule, cancel, or modify tasks. The worker process acts on your verdict: continue=true requests another round after nextDelaySeconds; continue=false ends the chain.",
   "Write statusUpdate as the user-facing result of this round — concise and specific, with concrete values from your tool calls.",
+  "Provide only a brief declaredRationale for the action; never reveal or summarize hidden chain-of-thought.",
+  "State an expectedOutcome and observable successCriteria for the requested worker action.",
   "If this is the final round, wrap up: summarize the overall outcome in statusUpdate and set continue to false.",
 ].join(" ");
+
+export const INSTRUCTION_PROMPT_HASH = sha256(
+  `${INSTRUCTION_SYSTEM_PROMPT}\n${JSON.stringify(verdictSchema)}`,
+);
 
 /**
  * Run one round of an instruction chain. Scheduled execution deliberately
@@ -81,11 +113,20 @@ export async function runInstructionRound({
   task,
   payload,
   previousOutput,
+  traceContext,
+  onTraceEvents,
 }: {
   task: ScheduledTask;
   payload: InstructionTaskPayload;
   previousOutput: unknown;
-}): Promise<{ verdict: InstructionVerdict; messages: ChatUIMessage[] }> {
+  traceContext?: TraceContext;
+  onTraceEvents?: (events: TraceEventInput[]) => void;
+}): Promise<{
+  verdict: InstructionVerdict;
+  messages: ChatUIMessage[];
+  traceEvents: TraceEventInput[];
+  modelId: string;
+}> {
   const { apiKey, model } = requireInstructionRunnerEnv();
   const openrouter = createOpenRouter({ apiKey });
 
@@ -96,7 +137,17 @@ export async function runInstructionRound({
     output: Output.object({ schema: verdictSchema }),
   });
 
-  const result = await agent.generate({ prompt: buildRoundPrompt(task, payload, previousOutput) });
+  const traceEvents: TraceEventInput[] = [];
+  const result = await agent.generate({
+    prompt: buildRoundPrompt(task, payload, previousOutput),
+    onStepEnd(step) {
+      if (traceContext) {
+        const mapped = mapStepToTraceEvents(traceContext, step);
+        traceEvents.push(...mapped);
+        onTraceEvents?.(mapped);
+      }
+    },
+  });
 
   if (!result.output || typeof result.output.statusUpdate !== "string") {
     throw new Error("Instruction run ended without a usable verdict.");
@@ -104,7 +155,12 @@ export async function runInstructionRound({
 
   const verdict = result.output;
 
-  return { verdict, messages: buildRoundMessages(task, payload, verdict) };
+  return {
+    verdict,
+    messages: buildRoundMessages(task, payload, verdict),
+    traceEvents,
+    modelId: model,
+  };
 }
 
 /**

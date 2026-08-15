@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   consumeStream,
@@ -19,6 +21,15 @@ import {
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
 import { ingestUserTurn } from "@/lib/consolidation/observations";
+import {
+  buildAssistantMessageEvent,
+  buildTerminalEvent,
+  buildUserMessageEvent,
+  mapStepToTraceEvents,
+  type TraceContext,
+} from "@/lib/memory/capture";
+import { isMemoryWriteEnabled } from "@/lib/memory/config";
+import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
 import { materializeSnapshot } from "@/lib/consolidation/snapshots";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
@@ -136,10 +147,12 @@ async function buildRunMessages({
   sessionId,
   trigger,
   incomingMessage,
+  traceContext,
 }: {
   sessionId: string | null;
   trigger: ChatTrigger;
   incomingMessage: ChatUIMessage | null;
+  traceContext: TraceContext | null;
 }): Promise<{ messages: ChatUIMessage[]; isSessionStart: boolean }> {
   if (!sessionId) {
     return {
@@ -171,14 +184,24 @@ async function buildRunMessages({
   const isSessionStart = priorHistory.length === 0;
 
   if (incomingMessage) {
-    await appendSessionMessages(sessionId, [incomingMessage], { createIfMissing: true });
-    // §3a: ingest the user turn as grounded observations. Role-gated inside
-    // ingestUserTurn (only role==='user' + text parts), so passing the message
-    // here is safe regardless of role. Fail-soft — ingestion must never break
-    // the chat path. No-op when the flag is off (feature is dark).
-    await ingestUserTurn(sessionId, [incomingMessage]).catch((error) => {
-      console.error("Ingesting user turn failed", error);
+    const captureEnabled = Boolean(traceContext && isMemoryWriteEnabled());
+    await appendSessionMessages(sessionId, [incomingMessage], {
+      createIfMissing: true,
+      ...(captureEnabled && traceContext
+        ? {
+            traceCapture: {
+              events: [buildUserMessageEvent(traceContext, incomingMessage)],
+              groundedUserMessages: [incomingMessage],
+            },
+          }
+        : {}),
     });
+    // Preserve the legacy consolidation hook while the governed writer is dark.
+    if (!captureEnabled) {
+      await ingestUserTurn(sessionId, [incomingMessage]).catch((error) => {
+        console.error("Ingesting user turn failed", error);
+      });
+    }
     return { messages: [...priorHistory, incomingMessage], isSessionStart };
   }
 
@@ -264,11 +287,18 @@ export async function POST(req: Request) {
     const toolSearchTrace: ToolSearchTraceEvent[] = [];
     const requestEstimates: RequestTokenEstimate[] = [];
 
+    // One request trace is created before any prompt/skill/memory injection.
+    // Only the raw body.message is journaled as user evidence.
+    const traceContext: TraceContext | null = sessionId
+      ? { agentId: DEFAULT_AGENT_ID, sessionId, traceId: randomUUID() }
+      : null;
+
     // Reconstruct the run input server-side from the durable transcript.
     const { messages: fullMessages, isSessionStart } = await buildRunMessages({
       sessionId,
       trigger,
       incomingMessage,
+      traceContext,
     });
 
     // Skill tools and the skills prompt ship together: both come from the same
@@ -343,11 +373,14 @@ export async function POST(req: Request) {
         delayInMs: 35,
       }),
       sendReasoning: true,
-      onStepEnd(step) {
+      async onStepEnd(step) {
         const estimate = estimateRequestTokenUsage(step.request.body);
 
         if (estimate) {
           requestEstimates.push(estimate);
+        }
+        if (traceContext) {
+          await appendTraceEventsFailOpen(mapStepToTraceEvents(traceContext, step));
         }
       },
       headers: {
@@ -374,9 +407,15 @@ export async function POST(req: Request) {
         };
       },
       async onEnd({ responseMessage, isAborted, finishReason }) {
-        // Fail-soft: a persistence error must never break the stream the client
-        // already received. Skip aborted/errored finishes.
-        if (!sessionId || isAborted || finishReason === "error") {
+        if (!sessionId || !traceContext) {
+          return;
+        }
+        if (isAborted || finishReason === "error") {
+          await appendTraceEventsFailOpen([
+            buildTerminalEvent(traceContext, isAborted ? "interrupted" : "failed", {
+              finishReason,
+            }),
+          ]);
           return;
         }
 
@@ -386,13 +425,20 @@ export async function POST(req: Request) {
           // the assistant reply is new. responseMessage carries its
           // generateMessageId id and the messageMetadata token usage; the
           // composite-PK onConflictDoNothing makes a re-run idempotent.
-          await appendSessionMessages(sessionId, [responseMessage]);
+          const terminalEvent = buildTerminalEvent(traceContext, "completed", { finishReason });
+          await appendSessionMessages(sessionId, [responseMessage], {
+            traceCapture: {
+              events: [buildAssistantMessageEvent(traceContext, responseMessage), terminalEvent],
+            },
+          });
           // Push the assistant turn to any other open tab on this session (K2).
           // The tab that submitted already has it locally and dedupes by id.
           await notifySessionAppended(sessionId);
           void recordCompletedTurnAndMaybeEnqueueReview({
             sessionId,
             triggerMessageId: responseMessage.id,
+            latestTerminalTraceId: traceContext.traceId,
+            reviewKey: `chat:${sessionId}:${traceContext.traceId}`,
           }).catch((error) => {
             console.error("Enqueuing self-improvement review failed", error);
           });
@@ -421,6 +467,13 @@ export async function POST(req: Request) {
       },
       onError(error) {
         console.error("Chat stream failed", error);
+        if (traceContext) {
+          void appendTraceEventsFailOpen([
+            buildTerminalEvent(traceContext, "failed", {
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          ]);
+        }
         return error instanceof Error ? error.message : "Chat stream failed unexpectedly.";
       },
     });
