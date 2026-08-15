@@ -115,8 +115,8 @@ export async function runInstructionRound({
  * (`task-<id>-r<round>`) so a catch-up re-run is idempotent under the composite
  * PK + onConflictDoNothing in appendSessionMessages.
  *
- * Deliberately minimal: ai@6 has no ModelMessage→UIMessage converter, so the
- * agent's tool calls (result.steps) are not hand-mapped here yet — statusUpdate
+ * Deliberately minimal: the agent's model messages are not converted into UI
+ * messages here, so tool calls (result.steps) are not hand-mapped — statusUpdate
  * is the user-facing summary of the round. Enrich from steps later if the
  * transcript needs to show the underlying tool activity.
  */

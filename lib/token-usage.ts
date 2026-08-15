@@ -124,8 +124,8 @@ export function toTokenUsage(usage: LanguageModelUsage): TokenUsage {
   return compactTokenUsage({
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
-    reasoningTokens: usage.outputTokenDetails.reasoningTokens ?? usage.reasoningTokens,
-    cachedInputTokens: usage.inputTokenDetails.cacheReadTokens ?? usage.cachedInputTokens,
+    reasoningTokens: usage.outputTokenDetails.reasoningTokens,
+    cachedInputTokens: usage.inputTokenDetails.cacheReadTokens,
     totalTokens: usage.totalTokens,
   });
 }

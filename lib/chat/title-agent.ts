@@ -48,7 +48,7 @@ export async function generateSessionTitle({
       model: openrouter.chat(model, {
         reasoning: { enabled: false, effort: "none", exclude: true },
       }),
-      system: TITLE_SYSTEM_PROMPT,
+      instructions: TITLE_SYSTEM_PROMPT,
       prompt: [
         "Conversation to title:",
         `User: ${firstUserText.slice(0, MAX_SOURCE_CHARS)}`,

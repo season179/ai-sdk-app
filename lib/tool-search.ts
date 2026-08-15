@@ -69,7 +69,7 @@ export function createToolSearchTools(
   schedulerContext: SchedulerToolContext = NO_SCHEDULER_CONTEXT,
 ): ToolSet {
   return {
-    [TOOL_SEARCH_NAME]: tool<SearchInput, ReturnType<typeof runToolSearch>>({
+    [TOOL_SEARCH_NAME]: tool<SearchInput, ReturnType<typeof runToolSearch>, {}>({
       title: "Search deferred tools",
       description:
         "Search the hidden tool catalog when you need a capability that is not directly listed. Follow with tool_describe for the selected tool schema, then tool_call to invoke it.",
@@ -109,7 +109,7 @@ export function createToolSearchTools(
         return result;
       },
     }),
-    [TOOL_DESCRIBE_NAME]: tool<DescribeInput, ReturnType<typeof describeTool>>({
+    [TOOL_DESCRIBE_NAME]: tool<DescribeInput, ReturnType<typeof describeTool>, {}>({
       title: "Describe deferred tool",
       description:
         "Load the full parameter schema for one tool returned by tool_search before invoking it with tool_call.",
@@ -137,7 +137,7 @@ export function createToolSearchTools(
         return result;
       },
     }),
-    [TOOL_CALL_NAME]: tool<DeferredCallInput, Awaited<ReturnType<typeof callDeferredTool>>>({
+    [TOOL_CALL_NAME]: tool<DeferredCallInput, Awaited<ReturnType<typeof callDeferredTool>>, {}>({
       title: "Call deferred tool",
       description:
         "Invoke a hidden tool by exact name with arguments that match the schema returned by tool_describe.",

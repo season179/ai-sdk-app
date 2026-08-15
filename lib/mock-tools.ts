@@ -3172,7 +3172,7 @@ export function buildSpecToolSet(
   return Object.fromEntries(
     specs.map((spec) => [
       spec.name,
-      tool<RealisticToolInput, unknown>({
+      tool<RealisticToolInput, unknown, {}>({
         title: spec.title,
         description: spec.description,
         inputSchema: jsonSchema<RealisticToolInput>(getMockToolParameterSchema(spec)),

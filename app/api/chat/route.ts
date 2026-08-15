@@ -123,7 +123,7 @@ function configErrorResponse(error: MissingEnvironmentVariableError) {
  *
  * - submit-message: persist the new user turn up front so it survives a failed
  *   stream, then run over history + that turn. The assistant reply is appended
- *   later in onFinish.
+ *   later in onEnd.
  * - regenerate-message: fork off the client's last kept message — the SDK has
  *   already sliced everything from the regenerated turn onward — by truncating
  *   the transcript strictly after that message's ordinal, then re-run on the
@@ -325,6 +325,9 @@ export async function POST(req: Request) {
       instructions,
       model: openrouter.chat(model),
       tools,
+      // AI SDK 7 excludes request bodies from step results by default. The
+      // per-step estimator below needs them to preserve usage breakdowns.
+      include: { requestBody: true },
     });
 
     return createAgentUIStreamResponse({
@@ -332,7 +335,7 @@ export async function POST(req: Request) {
       uiMessages,
       abortSignal: req.signal,
       generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
-      // Consume the tee'd SSE stream server-side so onFinish (persistence) runs
+      // Consume the tee'd SSE stream server-side so onEnd (persistence) runs
       // even if the browser disconnects or navigates away mid-stream.
       consumeSseStream: consumeStream,
       experimental_transform: smoothStream({
@@ -340,7 +343,7 @@ export async function POST(req: Request) {
         delayInMs: 35,
       }),
       sendReasoning: true,
-      onStepFinish(step) {
+      onStepEnd(step) {
         const estimate = estimateRequestTokenUsage(step.request.body);
 
         if (estimate) {
@@ -370,7 +373,7 @@ export async function POST(req: Request) {
           }),
         };
       },
-      async onFinish({ responseMessage, isAborted, finishReason }) {
+      async onEnd({ responseMessage, isAborted, finishReason }) {
         // Fail-soft: a persistence error must never break the stream the client
         // already received. Skip aborted/errored finishes.
         if (!sessionId || isAborted || finishReason === "error") {
