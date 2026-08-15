@@ -11,6 +11,7 @@ import {
   Pencil,
   Plus,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
   { href: "/", icon: MessageSquare, label: "Chat" },
   { href: "/tasks", icon: CalendarClock, label: "Scheduled tasks" },
   { href: "/skills", icon: BookOpen, label: "Skills" },
+  { href: "/tools", icon: Wrench, label: "Tools" },
   { href: "/proposals", icon: Check, label: "Review proposals" },
   { href: "/memories", icon: Pencil, label: "Memories" },
   { href: "/consolidation", icon: Brain, label: "Consolidation" },

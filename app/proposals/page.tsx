@@ -147,152 +147,152 @@ export default function ProposalsPage() {
         ) : null}
 
         <div className="grid gap-6 lg:grid-cols-[minmax(16rem,21rem)_minmax(0,1fr)] lg:items-start">
-        <aside className="min-w-0">
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-            <Sparkles className="size-3.5" aria-hidden="true" />
-            Proposals
-          </div>
-          <div className="space-y-1">
-            {loading ? (
-              <div className="h-24 animate-pulse rounded-lg bg-muted" />
-            ) : proposals.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-                No proposals yet.
-              </div>
-            ) : (
-              proposals.map((proposal) => (
-                <button
-                  className={cn(
-                    "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60",
-                    selected?.id === proposal.id && "bg-muted text-foreground",
-                  )}
-                  key={proposal.id}
-                  onClick={() => setSelectedId(proposal.id)}
-                  type="button"
-                >
-                  <span className="block truncate font-medium">{proposal.kind}</span>
-                  <span className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                    <span className="truncate">
-                      {proposal.status} · {formatDate(proposal.createdAt)}
+          <aside className="min-w-0">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+              <Sparkles className="size-3.5" aria-hidden="true" />
+              Proposals
+            </div>
+            <div className="space-y-1">
+              {loading ? (
+                <div className="h-24 animate-pulse rounded-lg bg-muted" />
+              ) : proposals.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
+                  No proposals yet.
+                </div>
+              ) : (
+                proposals.map((proposal) => (
+                  <button
+                    className={cn(
+                      "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60",
+                      selected?.id === proposal.id && "bg-muted text-foreground",
+                    )}
+                    key={proposal.id}
+                    onClick={() => setSelectedId(proposal.id)}
+                    type="button"
+                  >
+                    <span className="block truncate font-medium">{proposal.kind}</span>
+                    <span className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                      <span className="truncate">
+                        {proposal.status} · {formatDate(proposal.createdAt)}
+                      </span>
                     </span>
-                  </span>
-                  {proposal.proposerOrigin !== "turn_review" ? (
-                    <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                      {ORIGIN_LABELS[proposal.proposerOrigin]}
-                    </span>
-                  ) : null}
-                </button>
-              ))
-            )}
-          </div>
-        </aside>
+                    {proposal.proposerOrigin !== "turn_review" ? (
+                      <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                        {ORIGIN_LABELS[proposal.proposerOrigin]}
+                      </span>
+                    ) : null}
+                  </button>
+                ))
+              )}
+            </div>
+          </aside>
 
-        <section className="min-w-0">
-          {selected ? (
-            <div className="rounded-lg border border-border bg-card p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-muted-foreground">Proposal</p>
-                  <h2 className="truncate text-lg font-semibold">{selected.kind}</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {selected.reviewerModel ?? "unknown model"} · {formatDate(selected.createdAt)}
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                      {ORIGIN_LABELS[selected.proposerOrigin]}
-                    </span>
-                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                      {POLICY_LABELS[selected.admissionPolicy]}
-                    </span>
-                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                      {selected.status}
-                    </span>
+          <section className="min-w-0">
+            {selected ? (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-muted-foreground">Proposal</p>
+                    <h2 className="truncate text-lg font-semibold">{selected.kind}</h2>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {selected.reviewerModel ?? "unknown model"} · {formatDate(selected.createdAt)}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                        {ORIGIN_LABELS[selected.proposerOrigin]}
+                      </span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        {POLICY_LABELS[selected.admissionPolicy]}
+                      </span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        {selected.status}
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="mt-5 grid gap-4">
-                <section>
-                  <h3 className="text-sm font-semibold">Rationale</h3>
-                  <p className="mt-1 max-w-[72ch] text-sm text-muted-foreground">
-                    {selected.rationale}
-                  </p>
-                </section>
-
-                {selected.admissionMetadata ? (
+                <div className="mt-5 grid gap-4">
                   <section>
-                    <h3 className="text-sm font-semibold">Score breakdown</h3>
-                    {selected.admissionMetadata.scoreBps != null ? (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Total score: {(selected.admissionMetadata.scoreBps / 10000).toFixed(4)} (
-                        {selected.admissionMetadata.scoreBps} bps)
-                        {selected.admissionMetadata.dryRun ? " · dry-run" : ""}
-                      </p>
-                    ) : null}
-                    {selected.admissionMetadata.score ? (
-                      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-4">
-                        {Object.entries(selected.admissionMetadata.score).map(([key, bps]) => (
-                          <div key={key}>
-                            <dt className="inline font-medium text-foreground">
-                              {labelForScoreKey(key)}
-                            </dt>
-                            <dd className="inline">: {(Number(bps) / 10000).toFixed(3)}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    ) : null}
-                    {selected.admissionMetadata.gates ? (
-                      <GateResults gates={selected.admissionMetadata.gates} />
-                    ) : null}
+                    <h3 className="text-sm font-semibold">Rationale</h3>
+                    <p className="mt-1 max-w-[72ch] text-sm text-muted-foreground">
+                      {selected.rationale}
+                    </p>
                   </section>
-                ) : null}
 
-                <section>
-                  <h3 className="text-sm font-semibold">Payload</h3>
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs text-muted-foreground">
-                    {JSON.stringify(selected.payload, null, 2)}
-                  </pre>
-                </section>
+                  {selected.admissionMetadata ? (
+                    <section>
+                      <h3 className="text-sm font-semibold">Score breakdown</h3>
+                      {selected.admissionMetadata.scoreBps != null ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Total score: {(selected.admissionMetadata.scoreBps / 10000).toFixed(4)} (
+                          {selected.admissionMetadata.scoreBps} bps)
+                          {selected.admissionMetadata.dryRun ? " · dry-run" : ""}
+                        </p>
+                      ) : null}
+                      {selected.admissionMetadata.score ? (
+                        <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-4">
+                          {Object.entries(selected.admissionMetadata.score).map(([key, bps]) => (
+                            <div key={key}>
+                              <dt className="inline font-medium text-foreground">
+                                {labelForScoreKey(key)}
+                              </dt>
+                              <dd className="inline">: {(Number(bps) / 10000).toFixed(3)}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      ) : null}
+                      {selected.admissionMetadata.gates ? (
+                        <GateResults gates={selected.admissionMetadata.gates} />
+                      ) : null}
+                    </section>
+                  ) : null}
 
-                {selected.error ? (
-                  <section className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">
-                    <AlertCircle className="mr-2 inline size-4" aria-hidden="true" />
-                    {selected.error}
+                  <section>
+                    <h3 className="text-sm font-semibold">Payload</h3>
+                    <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs text-muted-foreground">
+                      {JSON.stringify(selected.payload, null, 2)}
+                    </pre>
                   </section>
-                ) : null}
 
-                {selected.status === "pending" ? (
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      disabled={busyId === selected.id}
-                      onClick={() => void act(selected.id, "approve")}
-                      type="button"
-                    >
-                      <Check className="size-4" aria-hidden="true" />
-                      Approve
-                    </Button>
-                    <Button
-                      disabled={busyId === selected.id}
-                      onClick={() => void act(selected.id, "reject")}
-                      type="button"
-                      variant="outline"
-                    >
-                      <X className="size-4" aria-hidden="true" />
-                      Reject
-                    </Button>
-                  </div>
-                ) : null}
+                  {selected.error ? (
+                    <section className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">
+                      <AlertCircle className="mr-2 inline size-4" aria-hidden="true" />
+                      {selected.error}
+                    </section>
+                  ) : null}
+
+                  {selected.status === "pending" ? (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        disabled={busyId === selected.id}
+                        onClick={() => void act(selected.id, "approve")}
+                        type="button"
+                      >
+                        <Check className="size-4" aria-hidden="true" />
+                        Approve
+                      </Button>
+                      <Button
+                        disabled={busyId === selected.id}
+                        onClick={() => void act(selected.id, "reject")}
+                        type="button"
+                        variant="outline"
+                      >
+                        <X className="size-4" aria-hidden="true" />
+                        Reject
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ) : (
-            <div>
-              <div className="mb-2 text-xs font-semibold text-muted-foreground">Review</div>
-              <div className="rounded-lg border border-dashed border-border p-8 text-sm text-muted-foreground">
-                Select a proposal to review.
+            ) : (
+              <div>
+                <div className="mb-2 text-xs font-semibold text-muted-foreground">Review</div>
+                <div className="rounded-lg border border-dashed border-border p-8 text-sm text-muted-foreground">
+                  Select a proposal to review.
+                </div>
               </div>
-            </div>
-          )}
-        </section>
+            )}
+          </section>
         </div>
       </main>
     </>

@@ -45,6 +45,7 @@
     "pg-boss": "^12.27.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "server-only": "^0.0.1",
     "streamdown": "2.5.0",
     "tailwind-merge": "3.6.0"
   },
