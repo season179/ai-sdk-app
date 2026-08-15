@@ -1,9 +1,15 @@
 "use client";
 
 import { AlertCircle, ChevronRight, Search, SlidersHorizontal, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { SiteHeader, SiteHeaderStatus } from "@/components/site-header";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
 import type { CatalogTool, ToolCatalogSnapshot } from "@/lib/tools/catalog-view";
 import { cn } from "@/lib/utils";
@@ -30,6 +36,7 @@ export function ToolCatalog({ snapshot }: { snapshot: ToolCatalogSnapshot }) {
   const [service, setService] = useState("all");
   const [backing, setBacking] = useState<BackingFilter>("all");
   const [runtime, setRuntime] = useState<RuntimeFilter>("all");
+  const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
 
   const serviceCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -75,13 +82,26 @@ export function ToolCatalog({ snapshot }: { snapshot: ToolCatalogSnapshot }) {
     return groups;
   }, [visibleTools]);
 
+  const hasTextSearch = query.trim() !== "";
   const hasFilters = query !== "" || service !== "all" || backing !== "all" || runtime !== "all";
+
+  useEffect(() => {
+    if (hasTextSearch) {
+      setExpandedGroups([...visibleGroups.keys()]);
+    }
+  }, [hasTextSearch, visibleGroups]);
+
+  function updateQuery(value: string) {
+    setQuery(value);
+    if (value.trim() === "") setExpandedGroups([]);
+  }
 
   function clearFilters() {
     setQuery("");
     setService("all");
     setBacking("all");
     setRuntime("all");
+    setExpandedGroups([]);
   }
 
   return (
@@ -122,7 +142,7 @@ export function ToolCatalog({ snapshot }: { snapshot: ToolCatalogSnapshot }) {
               />
               <input
                 className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary/30"
-                onChange={(event) => setQuery(event.currentTarget.value)}
+                onChange={(event) => updateQuery(event.currentTarget.value)}
                 placeholder="Search tools and parameters"
                 type="search"
                 value={query}
@@ -210,26 +230,36 @@ export function ToolCatalog({ snapshot }: { snapshot: ToolCatalogSnapshot }) {
                 </Button>
               </div>
             ) : (
-              <div className="space-y-10">
+              <Accordion
+                className="space-y-6"
+                onValueChange={setExpandedGroups}
+                type="multiple"
+                value={expandedGroups}
+              >
                 {[...visibleGroups].map(([groupService, tools]) => (
-                  <section key={groupService}>
-                    <div className="mb-3 flex items-baseline justify-between gap-3 border-b border-border pb-2">
-                      <h2 className="text-sm font-semibold text-foreground">
-                        {formatService(groupService)}
-                      </h2>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {tools.length} visible / {serviceCounts.get(groupService) ?? tools.length}{" "}
-                        total
+                  <AccordionItem className="border-border" key={groupService} value={groupService}>
+                    <AccordionTrigger
+                      className="items-baseline py-3 hover:no-underline focus-visible:ring-primary/30"
+                      headingLevel={2}
+                    >
+                      <span className="flex min-w-0 flex-1 items-baseline justify-between gap-3">
+                        <span className="text-sm font-semibold text-foreground">
+                          {formatService(groupService)}
+                        </span>
+                        <span className="text-[11px] font-normal tabular-nums text-muted-foreground">
+                          {tools.length} visible / {serviceCounts.get(groupService) ?? tools.length}{" "}
+                          total
+                        </span>
                       </span>
-                    </div>
-                    <div className="grid gap-3">
+                    </AccordionTrigger>
+                    <AccordionContent className="grid gap-3 pt-3">
                       {tools.map((tool) => (
                         <ToolCard key={tool.name} snapshot={snapshot} tool={tool} />
                       ))}
-                    </div>
-                  </section>
+                    </AccordionContent>
+                  </AccordionItem>
                 ))}
-              </div>
+              </Accordion>
             )}
           </section>
         </div>
