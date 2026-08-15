@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { StepResult } from "ai";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -19,7 +20,11 @@ import {
 } from "@/db/schema";
 import { admitTurnReviewCandidates } from "@/lib/consolidation/run";
 import { type ExtractedMemoryCandidate, persistMemoryCandidates } from "@/lib/memory/candidates";
-import { buildTerminalEvent, buildUserMessageEvent } from "@/lib/memory/capture";
+import {
+  buildTerminalEvent,
+  buildUserMessageEvent,
+  mapStepToTraceEvents,
+} from "@/lib/memory/capture";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import { closePool, getPool } from "@/lib/scheduler/db";
 import { applyReviewProposal } from "@/lib/self-improvement/apply";
@@ -169,6 +174,65 @@ integration("typed trace distillation (integration)", () => {
       .from(agentMemoryVersionTraceEvents)
       .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, root.currentVersionId as string));
     expect(provenance.length).toBeGreaterThan(0);
+  });
+
+  it("never admits recalled memory content cited as fresh evidence", async () => {
+    const traceId = randomUUID();
+    const context = { agentId, traceId, sessionId: randomUUID() };
+    const recalledContent = "The user prefers recalled-only deployment settings.";
+    const step = {
+      callId: "recall-call",
+      stepNumber: 1,
+      model: { provider: "test", modelId: "test" },
+      text: "",
+      toolCalls: [
+        { toolCallId: "memory-call", toolName: "memory_search", input: { query: "deployment" } },
+      ],
+      toolResults: [
+        {
+          toolCallId: "memory-call",
+          toolName: "memory_search",
+          output: { memories: [{ content: recalledContent }] },
+        },
+      ],
+      finishReason: "tool-calls",
+      rawFinishReason: "tool_calls",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      request: {},
+      response: {},
+      content: [],
+    } as unknown as StepResult<any>;
+    const rows = await appendTraceEvents([
+      ...mapStepToTraceEvents(context, step),
+      buildTerminalEvent(context, "completed"),
+    ]);
+    const recalled = rows.find((row) => row.eventType === "tool_result");
+    expect(recalled).toMatchObject({
+      trustClass: "third_party_content",
+      payload: { derivative: true },
+    });
+    const persisted = await persistMemoryCandidates({
+      agentId,
+      reviewKey: `review:${randomUUID()}`,
+      traceId,
+      candidates: [
+        draft([recalled?.id ?? "missing"], {
+          canonicalKey: `preference:recalled-${randomUUID()}`,
+          content: recalledContent,
+        }),
+      ],
+      windowEvents: rows,
+      extractorId: "integration-extractor",
+      modelId: "integration-model",
+      promptHash: "integration-prompt",
+      schemaVersion: 1,
+      policyVersion: "write-v1",
+    });
+    expect(persisted[0].candidate).toMatchObject({
+      gateStatus: "rejected",
+      gateReason: "derivative_retrieval_primary_evidence",
+    });
+    expect((await admitTurnReviewCandidates({ agentId, candidates: persisted })).proposed).toBe(0);
   });
 
   it("promotes strict evidence sensitivity into version one without the secret", async () => {

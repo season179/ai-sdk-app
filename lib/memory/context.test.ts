@@ -79,6 +79,19 @@ describe("renderMemoryContext", () => {
       items: [],
     });
   });
+
+  it("omits a truncated item unless its minimum ellipsis summary fits", () => {
+    const item = memory("boundary", "a summary that must be truncated");
+    const firstFit = Array.from({ length: 4_001 }, (_, maxChars) => maxChars).find(
+      (maxChars) => renderMemoryContext([item], { maxChars }).items.length === 1,
+    );
+    expect(firstFit).toBeTypeOf("number");
+    expect(renderMemoryContext([item], { maxChars: (firstFit as number) - 1 })).toEqual({
+      block: "",
+      items: [],
+    });
+    expect(renderMemoryContext([item], { maxChars: firstFit }).block).toContain(">…</memory>");
+  });
 });
 
 describe("appendTurnProjection", () => {

@@ -21,6 +21,7 @@ import {
   MEMORY_CANDIDATE_SCHEMA_VERSION,
   MEMORY_EXTRACTOR_ID,
 } from "@/lib/memory/config";
+import { isExtractionSafeTraceEvent } from "@/lib/memory/projection-safety";
 import { sha256 } from "@/lib/memory/redaction";
 import { assertCompletedTraceWindow, listCompletedTraceWindow } from "@/lib/memory/trace";
 import { getPool } from "@/lib/scheduler/db";
@@ -157,6 +158,10 @@ async function runUnreceiptedTurnReview(job: TurnReviewJobData): Promise<RunTurn
     ...(job.kind === "chat" ? { sessionId: job.sessionId } : { taskId: job.taskId }),
   });
 
+  // Read-derived and projection-contaminated rows remain in the journal for
+  // observability, but are absent from both the extractor prompt and its gate window.
+  const extractable = selected.filter(isExtractionSafeTraceEvent);
+
   const { apiKey, model } = requireReviewRunnerEnv();
   const openrouter = createOpenRouter({ apiKey });
   const skillCatalog = await getSkillCatalog(job.agentId).catch(() => []);
@@ -166,7 +171,7 @@ async function runUnreceiptedTurnReview(job: TurnReviewJobData): Promise<RunTurn
     output: Output.object({ schema: reviewVerdictSchema }),
   });
   const result = await agent.generate({
-    prompt: buildReviewPrompt(selected, skillCatalog),
+    prompt: buildReviewPrompt(extractable, skillCatalog),
   });
   if (!result.output) throw new Error("Turn review ended without a structured verdict.");
   const verdict = result.output;
@@ -180,7 +185,7 @@ async function runUnreceiptedTurnReview(job: TurnReviewJobData): Promise<RunTurn
         reviewKey: job.reviewKey,
         traceId: expectedTraceId,
         candidates: verdict.memoryCandidates,
-        windowEvents: selected,
+        windowEvents: extractable,
         extractorId: MEMORY_EXTRACTOR_ID,
         modelId: model,
         promptHash: REVIEW_PROMPT_HASH,

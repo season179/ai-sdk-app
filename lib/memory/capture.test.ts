@@ -48,6 +48,44 @@ describe("AI SDK trace capture mapping", () => {
     expect(serialized).not.toContain("requestBody");
   });
 
+  it("classifies retrieval results as derivative while keeping them journalable", () => {
+    const step = fakeStep() as unknown as {
+      toolResults: Array<{ toolCallId: string; toolName: string; output: unknown }>;
+    };
+    step.toolResults = [
+      {
+        toolCallId: "memory-1",
+        toolName: "memory_search",
+        output: { memories: [{ content: "recalled preference" }] },
+      },
+    ];
+    const result = mapStepToTraceEvents(context, step as unknown as StepResult<any>).find(
+      (item) => item.eventType === "tool_result",
+    );
+    expect(result).toMatchObject({
+      trustClass: "third_party_content",
+      payload: { toolName: "memory_search", derivative: true },
+    });
+    expect(result?.payload).toHaveProperty("output");
+  });
+
+  it("redacts exact read projection fences and marks contaminated generations", () => {
+    const step = fakeStep() as unknown as { text: string };
+    step.text = [
+      "Visible",
+      "<current_turn_metadata><available_skills>catalog</available_skills></current_turn_metadata>",
+      "<memory_context>recalled</memory_context>",
+      '<skill_content id="s1">instructions</skill_content>',
+      '<reference_content id="r1">reference</reference_content>',
+    ].join("\n");
+    const generation = mapStepToTraceEvents(context, step as unknown as StepResult<any>)[0];
+    expect(generation.payload).toMatchObject({ projectionContaminated: true });
+    expect(JSON.stringify(generation.payload)).not.toContain("catalog");
+    expect(JSON.stringify(generation.payload)).not.toContain("recalled");
+    expect(JSON.stringify(generation.payload)).not.toContain("instructions");
+    expect(JSON.stringify(generation.payload)).not.toContain("reference</");
+  });
+
   it("maps tool-error content without stack leakage", () => {
     const step = fakeStep() as unknown as { content: unknown[] };
     step.content = [

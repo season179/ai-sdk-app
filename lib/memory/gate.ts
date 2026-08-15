@@ -1,5 +1,9 @@
 import type { AgentTraceEvent, CandidateGateStatus, MemoryType } from "@/db/schema";
 import { getGateMinScoreBps } from "@/lib/memory/config";
+import {
+  isDerivativeRetrievalEvent,
+  isProjectionContaminatedEvent,
+} from "@/lib/memory/projection-safety";
 import { detectPromptInjection, detectSecret } from "@/lib/memory/redaction";
 
 export const GATE_WEIGHTS_BPS = {
@@ -46,6 +50,15 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
   if (options.citedEvents.length !== new Set(candidate.evidenceTraceEventIds).size) {
     return reject("unknown_or_outside_window_evidence");
   }
+  if (options.citedEvents.some(isProjectionContaminatedEvent)) {
+    return reject("read_projection_contaminated_evidence");
+  }
+  const primarySupport = options.citedEvents.find(
+    (row) => row.eventType !== "task_terminal_state" && row.eventType !== "tool_requested",
+  );
+  if (primarySupport && isDerivativeRetrievalEvent(primarySupport)) {
+    return reject("derivative_retrieval_primary_evidence");
+  }
 
   const latestTerminals = new Map<string, AgentTraceEvent>();
   for (const row of options.allWindowEvents) {
@@ -89,10 +102,12 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
     return reject("canonical_target_required");
   }
 
-  const support = options.citedEvents.filter((row) =>
-    ["user_message", "explicit_memory_write", "tool_result", "task_terminal_state"].includes(
-      row.eventType,
-    ),
+  const support = options.citedEvents.filter(
+    (row) =>
+      !isDerivativeRetrievalEvent(row) &&
+      ["user_message", "explicit_memory_write", "tool_result", "task_terminal_state"].includes(
+        row.eventType,
+      ),
   );
   const userSupport = support.some((row) =>
     ["user_message", "explicit_memory_write"].includes(row.eventType),
@@ -102,7 +117,9 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
     (row) => row.eventType === "task_terminal_state" && row.terminalStatus === "completed",
   );
   const requested = options.citedEvents.filter((row) => row.eventType === "tool_requested");
-  const results = options.citedEvents.filter((row) => row.eventType === "tool_result");
+  const results = options.citedEvents.filter(
+    (row) => row.eventType === "tool_result" && !isDerivativeRetrievalEvent(row),
+  );
   const matchedTool = requested.some((request) =>
     results.some((result) => result.toolCallId && result.toolCallId === request.toolCallId),
   );

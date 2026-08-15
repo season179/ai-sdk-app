@@ -79,6 +79,43 @@ describe("deterministic candidate gate", () => {
     ).toBe("unsupported_semantic_source");
   });
 
+  it("rejects recalled memory as sole or primary evidence", () => {
+    const recalled = event("recalled", "tool_result", {
+      actor: "tool",
+      trustClass: "third_party_content",
+      payload: {
+        toolName: "memory_search",
+        derivative: true,
+        output: { memories: [{ content: base.content }] },
+      },
+    });
+    expect(
+      run({ ...base, evidenceTraceEventIds: [recalled.id] }, [recalled], [recalled, terminal]),
+    ).toMatchObject({ status: "rejected", reason: "derivative_retrieval_primary_evidence" });
+    expect(
+      run(
+        { ...base, evidenceTraceEventIds: [recalled.id, user.id] },
+        [recalled, user],
+        [recalled, user, terminal],
+      ).reason,
+    ).toBe("derivative_retrieval_primary_evidence");
+  });
+
+  it("rejects projection-contaminated cited events", () => {
+    const contaminated = event("echo", "assistant_message", {
+      actor: "assistant",
+      trustClass: "model_inference",
+      payload: { text: "[read projection redacted]", projectionContaminated: true },
+    });
+    expect(
+      run(
+        { ...base, evidenceTraceEventIds: [contaminated.id] },
+        [contaminated],
+        [contaminated, terminal],
+      ).reason,
+    ).toBe("read_projection_contaminated_evidence");
+  });
+
   it("accepts semantic, episodic, and matched procedural source shapes", () => {
     expect(run(base)).toEqual({ status: "accepted", reason: "accepted", scoreBps: 9000 });
     expect(

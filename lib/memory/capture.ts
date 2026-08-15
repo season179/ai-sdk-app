@@ -2,6 +2,7 @@ import type { StepResult, UIMessage } from "ai";
 
 import type { TraceTerminalStatus } from "@/db/schema";
 import { getTraceRetentionDays } from "@/lib/memory/config";
+import { DERIVATIVE_RETRIEVAL_TOOLS, redactReadProjection } from "@/lib/memory/projection-safety";
 import { sanitizeTracePayload } from "@/lib/memory/redaction";
 import type { TraceEventInput } from "@/lib/memory/trace";
 
@@ -54,11 +55,13 @@ function event(
   };
 }
 
-function visibleText(message: Pick<UIMessage, "parts">): string {
-  return message.parts
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("\n")
-    .trim();
+function visibleText(message: Pick<UIMessage, "parts">) {
+  return redactReadProjection(
+    message.parts
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join("\n")
+      .trim(),
+  );
 }
 
 export function buildUserMessageEvent(
@@ -71,7 +74,7 @@ export function buildUserMessageEvent(
     eventType: "user_message",
     actor: "user",
     trustClass: "user_assertion",
-    payload: { messageId: message.id, text: visibleText(message) },
+    payload: messagePayload(message),
     // Attempt membership is independent from grounded-observation source
     // identity, so a successful retry carries its own user evidence event.
     idempotencyKey: `trace:${context.traceId}:message:${message.id}:user`,
@@ -90,7 +93,7 @@ export function buildAssistantMessageEvent(
     eventType: "assistant_message",
     actor: "assistant",
     trustClass: "model_inference",
-    payload: { messageId: message.id, text: visibleText(message) },
+    payload: messagePayload(message),
     idempotencyKey: `trace:${context.traceId}:message:${message.id}:assistant`,
     retentionClass: "standard",
   });
@@ -101,6 +104,7 @@ export function mapStepToTraceEvents(
   step: StepResult<any>,
 ): TraceEventInput[] {
   const base = step.stepNumber * 100 + 100;
+  const generation = redactReadProjection(step.text);
   const output: TraceEventInput[] = [
     event(context, {
       sequenceNo: base,
@@ -113,7 +117,10 @@ export function mapStepToTraceEvents(
         stepNumber: step.stepNumber,
         provider: step.model.provider,
         modelId: step.model.modelId,
-        text: step.text,
+        text: generation.text,
+        ...(generation.contaminated
+          ? { projectionContaminated: true, projectionMarkers: generation.markers }
+          : {}),
         finishReason: step.finishReason,
         rawFinishReason: step.rawFinishReason,
         usage: step.usage,
@@ -150,6 +157,7 @@ export function mapStepToTraceEvents(
       toolName: string;
       output?: unknown;
     };
+    const derivative = DERIVATIVE_RETRIEVAL_TOOLS.has(result.toolName);
     output.push(
       event(context, {
         sequenceNo: base + 50 + index,
@@ -157,8 +165,13 @@ export function mapStepToTraceEvents(
         toolCallId: result.toolCallId,
         eventType: "tool_result",
         actor: "tool",
-        trustClass: "tool_observation",
-        payload: { toolName: result.toolName, outcome: "success", output: result.output ?? null },
+        trustClass: derivative ? "third_party_content" : "tool_observation",
+        payload: {
+          toolName: result.toolName,
+          outcome: "success",
+          output: result.output ?? null,
+          ...(derivative ? { derivative: true, derivativeSource: "read_projection" } : {}),
+        },
         idempotencyKey: `trace:${context.traceId}:tool:${result.toolCallId}:result`,
         retentionClass: "standard",
       }),
@@ -182,6 +195,8 @@ export function mapStepToTraceEvents(
         : typeof toolError.error === "string"
           ? toolError.error
           : "Tool execution failed.";
+    const toolName = typeof toolError.toolName === "string" ? toolError.toolName : "unknown";
+    const derivative = DERIVATIVE_RETRIEVAL_TOOLS.has(toolName);
     output.push(
       event(context, {
         sequenceNo: base + 70 + index,
@@ -189,11 +204,12 @@ export function mapStepToTraceEvents(
         toolCallId: toolError.toolCallId,
         eventType: "tool_result",
         actor: "tool",
-        trustClass: "tool_observation",
+        trustClass: derivative ? "third_party_content" : "tool_observation",
         payload: {
-          toolName: typeof toolError.toolName === "string" ? toolError.toolName : "unknown",
+          toolName,
           outcome: "error",
           error: error.slice(0, 4_000),
+          ...(derivative ? { derivative: true, derivativeSource: "read_projection" } : {}),
         },
         idempotencyKey: `trace:${context.traceId}:tool:${toolError.toolCallId}:error`,
         retentionClass: "standard",
@@ -202,6 +218,17 @@ export function mapStepToTraceEvents(
   });
 
   return output.sort((a, b) => a.sequenceNo - b.sequenceNo);
+}
+
+function messagePayload(message: Pick<UIMessage, "id" | "parts">) {
+  const visible = visibleText(message);
+  return {
+    messageId: message.id,
+    text: visible.text,
+    ...(visible.contaminated
+      ? { projectionContaminated: true, projectionMarkers: visible.markers }
+      : {}),
+  };
 }
 
 export function buildTerminalEvent(
@@ -248,8 +275,16 @@ export function buildScheduledToolEvents(
       toolCallId,
       eventType: "tool_result",
       actor: "tool",
-      trustClass: "tool_observation",
-      payload: { toolName, output },
+      trustClass: DERIVATIVE_RETRIEVAL_TOOLS.has(toolName)
+        ? "third_party_content"
+        : "tool_observation",
+      payload: {
+        toolName,
+        output,
+        ...(DERIVATIVE_RETRIEVAL_TOOLS.has(toolName)
+          ? { derivative: true, derivativeSource: "read_projection" }
+          : {}),
+      },
       idempotencyKey: `trace:${context.traceId}:tool:result`,
       retentionClass: "audit",
     }),

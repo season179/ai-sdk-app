@@ -100,13 +100,13 @@ export function appendTurnProjection(
 function fitItem(item: RecallItem, maxLength: number): string | null {
   const full = renderItem(item, itemSummary(item));
   if (full.length <= maxLength) return full;
-  const empty = renderItem(item, "");
-  if (empty.length > maxLength) return null;
+  const minimum = renderItem(item, "…");
+  if (minimum.length > maxLength) return null;
 
   const points = Array.from(itemSummary(item));
   let low = 0;
   let high = points.length;
-  let best = empty;
+  let best = minimum;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const summary =
