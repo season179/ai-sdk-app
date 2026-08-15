@@ -7,6 +7,7 @@ import {
   type AgentTraceEvent,
   agentMemoryCandidates,
   agentMemoryCandidateTraceEvents,
+  type SensitivityClass,
 } from "@/db/schema";
 import { type GateResult, gateMemoryCandidate } from "@/lib/memory/gate";
 import { canonicalJson, sanitizeTracePayload, sha256 } from "@/lib/memory/redaction";
@@ -79,6 +80,7 @@ export type PersistedCandidateVerdict = {
   candidate: AgentMemoryCandidate;
   gate: GateResult;
   evidenceTraceEventIds: string[];
+  sensitivityClass: SensitivityClass;
 };
 
 export async function persistMemoryCandidates(
@@ -187,6 +189,11 @@ export async function persistMemoryCandidates(
         candidate,
         gate,
         evidenceTraceEventIds: citedEvents.map((event) => event.id),
+        sensitivityClass: citedEvents.some((event) => event.sensitivityClass === "restricted")
+          ? "restricted"
+          : citedEvents.some((event) => event.sensitivityClass === "sensitive")
+            ? "sensitive"
+            : "normal",
       });
     }
     return output;

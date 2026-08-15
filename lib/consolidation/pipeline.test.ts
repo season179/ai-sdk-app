@@ -142,6 +142,40 @@ describeIntegration("consolidation pipeline (integration)", () => {
     expect(eligible.some((row) => row.sourceMessageId === message.id)).toBe(false);
   });
 
+  it("repoints source-idempotent observations to a successful retry attempt", async () => {
+    const sessionId = randomUUID();
+    const message = {
+      id: `retry-${randomUUID()}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "Successful retry evidence remains usable." }],
+    };
+    const failedContext = { agentId: AGENT_ID, sessionId, traceId: randomUUID() };
+    const failed = await appendTraceEvents([
+      buildUserMessageEvent(failedContext, message),
+      buildTerminalEvent(failedContext, "failed"),
+    ]);
+    await ingestUserTurn(sessionId, [message], {
+      traceEventIds: new Map([[message.id, failed[0].id]]),
+    });
+
+    const completedContext = { agentId: AGENT_ID, sessionId, traceId: randomUUID() };
+    const completed = await appendTraceEvents([
+      buildUserMessageEvent(completedContext, message),
+      buildTerminalEvent(completedContext, "completed"),
+    ]);
+    await ingestUserTurn(sessionId, [message], {
+      traceEventIds: new Map([[message.id, completed[0].id]]),
+    });
+
+    const [observation] = await getDb()
+      .select()
+      .from(agentGroundedObservations)
+      .where(eq(agentGroundedObservations.sourceMessageId, message.id));
+    expect(observation.traceEventId).toBe(completed[0].id);
+    const eligible = await listGroundedObservations(AGENT_ID);
+    expect(eligible.some((row) => row.id === observation.id)).toBe(true);
+  });
+
   it("assistant content never produces a grounded observation (firewall)", async () => {
     const count = await ingestUserTurn("00000000-0000-4000-8000-0000000000a2", [
       {

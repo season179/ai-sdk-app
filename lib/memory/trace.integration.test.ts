@@ -115,6 +115,22 @@ integration("trace journal (integration)", () => {
       .where(eq(agentTraceArtifacts.artifactHash, event.artifact?.artifactHash ?? ""));
     expect(artifact.expiresAt?.toISOString()).toBe(event.expiresAt?.toISOString());
     expect(artifact.byteSize).toBeGreaterThan(artifact.content?.byteLength ?? 0);
+
+    const stricterExpiry = new Date((event.expiresAt as Date).getTime() - 86_400_000);
+    await appendTraceEvents([
+      {
+        ...event,
+        traceId: randomUUID(),
+        idempotencyKey: `integration:${randomUUID()}`,
+        expiresAt: stricterExpiry,
+        artifact: event.artifact ? { ...event.artifact, expiresAt: stricterExpiry } : undefined,
+      },
+    ]);
+    const [deduped] = await getDb()
+      .select()
+      .from(agentTraceArtifacts)
+      .where(eq(agentTraceArtifacts.artifactHash, event.artifact?.artifactHash ?? ""));
+    expect(deduped.expiresAt?.toISOString()).toBe(stricterExpiry.toISOString());
   });
 
   it("commits user message, trace, and grounded observation together", async () => {

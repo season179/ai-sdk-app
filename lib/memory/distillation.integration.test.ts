@@ -82,13 +82,16 @@ integration("typed trace distillation (integration)", () => {
     await closePool();
   });
 
-  async function window(status: "completed" | "failed" = "completed") {
+  async function window(
+    status: "completed" | "failed" = "completed",
+    text = "I prefer concise status updates.",
+  ) {
     const traceId = randomUUID();
     const sessionId = randomUUID();
     const message = {
       id: `msg-${randomUUID()}`,
       role: "user" as const,
-      parts: [{ type: "text" as const, text: "I prefer concise status updates." }],
+      parts: [{ type: "text" as const, text }],
     };
     const context = { agentId, traceId, sessionId };
     const rows = await appendTraceEvents([
@@ -166,6 +169,48 @@ integration("typed trace distillation (integration)", () => {
       .from(agentMemoryVersionTraceEvents)
       .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, root.currentVersionId as string));
     expect(provenance.length).toBeGreaterThan(0);
+  });
+
+  it("promotes strict evidence sensitivity into version one without the secret", async () => {
+    const evidence = await window("completed", "api_key=super-secret-value");
+    const persisted = await persistMemoryCandidates({
+      agentId,
+      reviewKey: `review:${randomUUID()}`,
+      traceId: evidence.traceId,
+      candidates: [
+        draft(
+          evidence.rows.map((row) => row.id),
+          {
+            canonicalKey: `fact:sensitive-${randomUUID()}`,
+            content: "The user configured a private integration credential.",
+            structured: { memoryKind: "fact", category: "integration" },
+          },
+        ),
+      ],
+      windowEvents: evidence.rows,
+      extractorId: "integration-extractor",
+      modelId: "integration-model",
+      promptHash: "integration-prompt",
+      schemaVersion: 1,
+      policyVersion: "write-v1",
+    });
+    expect(persisted[0].sensitivityClass).toBe("sensitive");
+    await admitTurnReviewCandidates({ agentId, candidates: persisted });
+    const [proposal] = await getDb()
+      .select()
+      .from(agentReviewProposals)
+      .where(eq(agentReviewProposals.sourceCandidateId, persisted[0].candidate.id));
+    await applyReviewProposal(proposal.id);
+    const [root] = await getDb()
+      .select()
+      .from(agentMemories)
+      .where(eq(agentMemories.reviewProposalId, proposal.id));
+    const [version] = await getDb()
+      .select()
+      .from(agentMemoryVersions)
+      .where(eq(agentMemoryVersions.id, root.currentVersionId as string));
+    expect(version.sensitivityClass).toBe("sensitive");
+    expect(JSON.stringify({ proposal, version })).not.toContain("super-secret-value");
   });
 
   it("dispatches UPDATE and INVALIDATE to the locked canonical root", async () => {
@@ -278,6 +323,31 @@ integration("typed trace distillation (integration)", () => {
     });
     expect(malformedRows[0].candidate.gateReason).toBe("malformed_validity_interval");
     expect(malformedRows[0].candidate.validDuring).toBeNull();
+
+    const unresolvedRows = await persistMemoryCandidates({
+      agentId,
+      reviewKey: `review:${randomUUID()}`,
+      traceId: completed.traceId,
+      candidates: [
+        draft(
+          completed.rows.map((row) => row.id),
+          {
+            canonicalKey: null,
+            proposedOperation: "UPDATE",
+          },
+        ),
+      ],
+      windowEvents: completed.rows,
+      extractorId: "integration-extractor",
+      modelId: "integration-model",
+      promptHash: "integration-prompt",
+      schemaVersion: 1,
+      policyVersion: "write-v1",
+    });
+    expect(unresolvedRows[0].candidate.gateReason).toBe("canonical_target_required");
+    expect(
+      (await admitTurnReviewCandidates({ agentId, candidates: unresolvedRows })).proposed,
+    ).toBe(0);
 
     const failed = await window("failed");
     const failedRows = await persistMemoryCandidates({
