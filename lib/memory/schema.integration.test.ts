@@ -38,6 +38,26 @@ describeIntegration("agent memory write-plane schema (integration)", () => {
     expect(result.rows[0]).toEqual({ extension_installed: true, table_count: 10 });
   });
 
+  it("makes versions the sole head authority and requires observation provenance", async () => {
+    const result = await getDb().execute<{
+      legacy_columns: number;
+      trace_nullable: string;
+    }>(`
+      select
+        (select count(*)::int
+         from information_schema.columns
+         where table_schema = 'public'
+           and table_name = 'agent_memories'
+           and column_name = any(array['content', 'source', 'confidence', 'deleted_at'])) as legacy_columns,
+        (select is_nullable
+         from information_schema.columns
+         where table_schema = 'public'
+           and table_name = 'agent_grounded_observations'
+           and column_name = 'trace_event_id') as trace_nullable
+    `);
+    expect(result.rows[0]).toEqual({ legacy_columns: 0, trace_nullable: "NO" });
+  });
+
   it("links every imported legacy-memory event to version provenance", async () => {
     const result = await getDb().execute<{ missing_count: number }>(`
       select count(*)::int as missing_count

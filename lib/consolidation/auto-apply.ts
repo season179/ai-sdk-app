@@ -1,7 +1,7 @@
 import { and, eq, isNull } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
-import { type AdmissionMetadata, agentMemories } from "@/db/schema";
+import { type AdmissionMetadataV1, agentMemories } from "@/db/schema";
 import {
   AUTO_APPLY_MIN_SCORE_BPS,
   isMemoryConsolidationAutoApply,
@@ -90,7 +90,10 @@ export async function hasExistingClaimHash(
       and(
         eq(agentMemories.agentId, agentId),
         eq(agentMemories.claimHash, claimHash),
-        isNull(agentMemories.deletedAt),
+        eq(agentMemories.status, "approved"),
+        isNull(agentMemories.revokedAt),
+        eq(agentMemories.tombstoned, false),
+        eq(agentMemories.injectionBlocked, false),
       ),
     )
     .limit(1);
@@ -119,7 +122,7 @@ export async function maybeAutoApplyConsolidation(
   if (input.proposal.sourceCandidateId) {
     return { applied: false, reason: "typed_candidate_requires_human_review" };
   }
-  const claimHash = meta?.claimHash;
+  const claimHash = meta?.version === 1 ? meta.claimHash : undefined;
 
   const [globalEnabled, globalAutoApply, existingClaim] = await Promise.all([
     isMemoryConsolidationEnabled(),
@@ -180,9 +183,9 @@ export { isDuplicateClaimHashError };
 
 /** Stamp the autoApply eligibility onto an AdmissionMetadata (for the UI). */
 export function stampAutoApply(
-  meta: AdmissionMetadata,
+  meta: AdmissionMetadataV1,
   decision: AutoApplyDecision,
-): AdmissionMetadata {
+): AdmissionMetadataV1 {
   return {
     ...meta,
     autoApply: {

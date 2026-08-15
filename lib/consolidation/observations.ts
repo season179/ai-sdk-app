@@ -7,11 +7,14 @@ import {
   agentGroundedObservations,
   agentIngestionCheckpoints,
   agentMemories,
+  agentMemoryVersions,
   type GroundedObservationOrigin,
   type NewAgentGroundedObservation,
 } from "@/db/schema";
 import type { ChatUIMessage } from "@/lib/chat/sessions";
 import { contentHash } from "@/lib/consolidation/normalize";
+import { buildUserMessageEvent } from "@/lib/memory/capture";
+import { appendTraceEvents } from "@/lib/memory/trace";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
 /**
@@ -82,6 +85,30 @@ export async function ingestUserTurn(
     return 0;
   }
 
+  const traceEventIds = new Map(opts.traceEventIds ?? []);
+  for (const item of userTexts) {
+    if (!traceEventIds.has(item.messageId)) {
+      const [event] = await appendTraceEvents(
+        [
+          buildUserMessageEvent(
+            {
+              agentId,
+              sessionId,
+              traceId: `grounded-chat:${sessionId}:${item.messageId}`,
+            },
+            {
+              id: item.messageId,
+              role: "user",
+              parts: [{ type: "text", text: item.text }],
+            },
+          ),
+        ],
+        db,
+      );
+      traceEventIds.set(item.messageId, event.id);
+    }
+  }
+
   const rows: NewAgentGroundedObservation[] = [];
   for (const item of userTexts) {
     const chunks = chunkText(item.text, OBSERVATION_CONTENT_MAX);
@@ -98,7 +125,7 @@ export async function ingestUserTurn(
         // original id and re-ingest stays idempotent.
         sourceMessageId: chunks.length > 1 ? `${item.messageId}#${index}` : item.messageId,
         sourceMemoryId: null,
-        traceEventId: opts.traceEventIds?.get(item.messageId) ?? null,
+        traceEventId: traceEventIds.get(item.messageId) as string,
         content: chunk,
         contentHash: contentHash(chunk),
       });
@@ -133,6 +160,9 @@ export async function ingestUserMemory(
 ): Promise<void> {
   const agentId = opts.agentId ?? DEFAULT_AGENT_ID;
   const db = opts.db ?? getDb();
+  if (!opts.traceEventId) {
+    throw new Error("User-memory observations require a trace event.");
+  }
 
   const chunk = content.trim().slice(0, OBSERVATION_CONTENT_MAX);
   if (!chunk) {
@@ -304,10 +334,10 @@ export async function scanSinceCheckpoint(
     )
     .limit(5000);
 
-  // Memories: order by (created_at, id). Only source='user' — review/curated/
-  // consolidated can never be an observation (§4.1 firewall).
+  // Memories: join the canonical current version. Only source='user' —
+  // review/curated/consolidated can never enter the grounded firewall.
   const memoryConds = [
-    eq(agentMemories.source, "user"),
+    eq(agentMemoryVersions.source, "user"),
     or(
       checkpoint.lastMemoryCreatedAt
         ? gt(agentMemories.createdAt, checkpoint.lastMemoryCreatedAt)
@@ -317,11 +347,12 @@ export async function scanSinceCheckpoint(
   const memories = await db
     .select({
       id: agentMemories.id,
-      content: agentMemories.content,
-      source: agentMemories.source,
+      content: agentMemoryVersions.content,
+      source: agentMemoryVersions.source,
       createdAt: agentMemories.createdAt,
     })
     .from(agentMemories)
+    .innerJoin(agentMemoryVersions, eq(agentMemoryVersions.id, agentMemories.currentVersionId))
     .where(and(...memoryConds))
     .orderBy(asc(agentMemories.createdAt), asc(agentMemories.id))
     .limit(5000);

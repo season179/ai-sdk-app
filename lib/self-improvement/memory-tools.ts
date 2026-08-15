@@ -40,7 +40,7 @@ export const memoryToolSpecs: RealisticToolSpec[] = [
     properties: {
       query: {
         type: "string",
-        description: "Text matched (case-insensitive substring) against memory content.",
+        description: "Text matched with full-text search and typo-tolerant fallback.",
       },
       kind: {
         type: "string",

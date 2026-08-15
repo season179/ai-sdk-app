@@ -15,6 +15,7 @@ export type GateCandidate = {
   evidenceTraceEventIds: string[];
   validFrom: string | null;
   validTo: string | null;
+  sourceReferenceTime?: string | null;
   confidence: number;
   proposedOperation: "ADD" | "UPDATE" | "INVALIDATE" | "NOOP" | "REVIEW";
 };
@@ -68,6 +69,12 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
   }
   if (candidate.validTo && Number.isNaN(Date.parse(candidate.validTo))) {
     return reject("malformed_validity_interval");
+  }
+  if (
+    candidate.sourceReferenceTime &&
+    Number.isNaN(Date.parse(candidate.sourceReferenceTime))
+  ) {
+    return reject("malformed_reference_time");
   }
   if (
     candidate.validFrom &&

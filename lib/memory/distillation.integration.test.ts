@@ -8,8 +8,12 @@ import {
   agentConsolidationCandidates,
   agentConsolidationRuns,
   agentConsolidationSettings,
+  agentMemories,
   agentMemoryCandidates,
   agentMemoryCandidateTraceEvents,
+  agentMemoryEvents,
+  agentMemoryVersions,
+  agentMemoryVersionTraceEvents,
   agentReviewProposals,
   agentTraceEvents,
 } from "@/db/schema";
@@ -20,6 +24,7 @@ import {
   persistMemoryCandidates,
 } from "@/lib/memory/candidates";
 import { appendTraceEvents } from "@/lib/memory/trace";
+import { applyReviewProposal } from "@/lib/self-improvement/apply";
 import { closePool, getPool } from "@/lib/scheduler/db";
 
 const available = Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
@@ -39,6 +44,28 @@ integration("typed trace distillation (integration)", () => {
   afterAll(async () => {
     const db = getDb();
     await db.delete(agentReviewProposals).where(eq(agentReviewProposals.agentId, agentId));
+    await db.delete(agentMemoryEvents).where(eq(agentMemoryEvents.agentId, agentId));
+    const roots = await db
+      .select({ id: agentMemories.id })
+      .from(agentMemories)
+      .where(eq(agentMemories.agentId, agentId));
+    for (const root of roots) {
+      const versions = await db
+        .select({ id: agentMemoryVersions.id })
+        .from(agentMemoryVersions)
+        .where(eq(agentMemoryVersions.memoryId, root.id));
+      for (const version of versions) {
+        await db
+          .delete(agentMemoryVersionTraceEvents)
+          .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+      }
+      await db
+        .update(agentMemories)
+        .set({ currentVersionId: null, status: "creating" })
+        .where(eq(agentMemories.id, root.id));
+      await db.delete(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, root.id));
+    }
+    await db.delete(agentMemories).where(eq(agentMemories.agentId, agentId));
     await db.delete(agentConsolidationRuns).where(eq(agentConsolidationRuns.agentId, agentId));
     const candidates = await db
       .select({ id: agentMemoryCandidates.id })
@@ -107,6 +134,11 @@ integration("typed trace distillation (integration)", () => {
     expect(first[0].candidate.gateStatus).toBe("accepted");
     const admitted = await admitTurnReviewCandidates({ agentId, candidates: first });
     expect(admitted.proposed).toBe(1);
+    const [proposal] = await getDb()
+      .select()
+      .from(agentReviewProposals)
+      .where(eq(agentReviewProposals.sourceCandidateId, first[0].candidate.id));
+    await applyReviewProposal(proposal.id);
 
     const retry = await persistMemoryCandidates(input);
     await admitTurnReviewCandidates({ agentId, candidates: retry });
@@ -116,6 +148,21 @@ integration("typed trace distillation (integration)", () => {
       .where(eq(agentReviewProposals.sourceCandidateId, first[0].candidate.id));
     expect(proposals).toHaveLength(1);
     expect(proposals[0].admissionPolicy).toBe("human_review");
+    const [root] = await getDb()
+      .select()
+      .from(agentMemories)
+      .where(eq(agentMemories.reviewProposalId, proposal.id));
+    expect(root.currentVersionId).toBeTruthy();
+    const versions = await getDb()
+      .select()
+      .from(agentMemoryVersions)
+      .where(eq(agentMemoryVersions.memoryId, root.id));
+    expect(versions).toHaveLength(1);
+    const provenance = await getDb()
+      .select()
+      .from(agentMemoryVersionTraceEvents)
+      .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, root.currentVersionId as string));
+    expect(provenance.length).toBeGreaterThan(0);
   });
 
   it("never stores a rejected secret body and never proposes failed traces", async () => {

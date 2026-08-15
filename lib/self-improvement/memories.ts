@@ -1,22 +1,35 @@
-import { and, asc, desc, eq, ilike, isNull, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+
+import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
-  type AgentMemory,
   agentMemories,
+  agentMemoryVersions,
   type MemoryKind,
   type MemorySource,
   type MemoryStatus,
-  type NewAgentMemory,
+  type MemoryType,
 } from "@/db/schema";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { ingestUserMemory } from "@/lib/consolidation/observations";
+import { getMemoryPolicyVersion } from "@/lib/memory/config";
+import { sanitizeTracePayload } from "@/lib/memory/redaction";
+import { appendTraceEvents } from "@/lib/memory/trace";
+import {
+  appendMemoryVersion,
+  createVersionedMemory,
+  invalidateMemory,
+  type VersionAuthority,
+} from "@/lib/memory/versions";
 import { MemoryNotFoundError, SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   parseMemoryConfidence,
   parseMemoryContent,
   parseMemoryKind,
   parseMemorySource,
+  parseMemoryType,
+  parseValidityBounds,
 } from "@/lib/self-improvement/validation";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
@@ -24,6 +37,7 @@ export type Memory = {
   id: string;
   agentId: string;
   kind: MemoryKind;
+  memoryType: MemoryType;
   content: string;
   source: MemorySource;
   confidence: number;
@@ -34,12 +48,14 @@ export type Memory = {
   protectedBy: string | null;
   sessionId: string | null;
   reviewProposalId: string | null;
+  currentVersionId: string;
   createdAt: string;
   updatedAt: string;
 };
 
 export type CreateMemoryInput = {
   kind: unknown;
+  memoryType?: unknown;
   content: unknown;
   source?: unknown;
   confidence?: unknown;
@@ -47,260 +63,242 @@ export type CreateMemoryInput = {
   reviewProposalId?: string | null;
   agentId?: string;
   claimHash?: string | null;
+  canonicalKey?: string | null;
+  validFrom?: unknown;
+  validTo?: unknown;
+  sourceEventIds?: string[];
+  authority?: VersionAuthority;
+  extractorId?: string | null;
+  modelId?: string | null;
+  promptHash?: string | null;
+  schemaVersion?: number;
 };
 
 export type UpdateMemoryInput = {
   kind?: unknown;
+  memoryType?: unknown;
   content?: unknown;
   source?: unknown;
   confidence?: unknown;
   status?: MemoryStatus;
   isProtected?: boolean;
   protectedBy?: string | null;
+  validFrom?: unknown;
+  validTo?: unknown;
+  sourceEventIds?: string[];
+  authority?: VersionAuthority;
 };
 
+type CurrentRow = {
+  root: typeof agentMemories.$inferSelect;
+  version: typeof agentMemoryVersions.$inferSelect;
+};
+
+const activeRoot = () =>
+  and(
+    eq(agentMemories.status, "approved"),
+    isNull(agentMemories.revokedAt),
+    eq(agentMemories.tombstoned, false),
+    eq(agentMemories.injectionBlocked, false),
+  );
+const activeVersion = () =>
+  and(
+    or(isNull(agentMemoryVersions.validDuring), sql`${agentMemoryVersions.validDuring} @> now()`),
+    or(isNull(agentMemoryVersions.expiresAt), sql`${agentMemoryVersions.expiresAt} > now()`),
+  );
+
 export async function listMemories(
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId = DEFAULT_AGENT_ID,
   db: AppDbClient = getDb(),
 ): Promise<Memory[]> {
-  const rows = await db
-    .select()
-    .from(agentMemories)
-    .where(and(eq(agentMemories.agentId, agentId), isNull(agentMemories.deletedAt)))
+  const rows = await currentQuery(db)
+    .where(and(eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()))
     .orderBy(desc(agentMemories.createdAt));
-
   return rows.map(mapMemoryRow);
 }
 
 export async function listApprovedMemories(
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId = DEFAULT_AGENT_ID,
   limit = 40,
   db: AppDbClient = getDb(),
 ): Promise<Memory[]> {
-  const rows = await db
-    .select()
-    .from(agentMemories)
-    .where(
-      and(
-        eq(agentMemories.agentId, agentId),
-        eq(agentMemories.status, "approved"),
-        isNull(agentMemories.deletedAt),
-      ),
-    )
-    .orderBy(asc(agentMemories.kind), desc(agentMemories.confidence), asc(agentMemories.createdAt))
+  const rows = await currentQuery(db)
+    .where(and(eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()))
+    .orderBy(asc(agentMemories.kind), desc(agentMemoryVersions.confidence), asc(agentMemories.createdAt))
     .limit(limit);
-
   return rows.map(mapMemoryRow);
 }
 
 export async function getMemoryById(
   id: string,
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId = DEFAULT_AGENT_ID,
   db: AppDbClient = getDb(),
 ): Promise<Memory | null> {
-  const rows = await db
-    .select()
-    .from(agentMemories)
-    .where(
-      and(
-        eq(agentMemories.id, id),
-        eq(agentMemories.agentId, agentId),
-        isNull(agentMemories.deletedAt),
-      ),
-    );
-
-  return rows[0] ? mapMemoryRow(rows[0]) : null;
+  const [row] = await currentQuery(db)
+    .where(and(eq(agentMemories.id, id), eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()))
+    .limit(1);
+  return row ? mapMemoryRow(row) : null;
 }
 
 export async function getMemoryByReviewProposalId(
   reviewProposalId: string,
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId = DEFAULT_AGENT_ID,
   db: AppDbClient = getDb(),
 ): Promise<Memory | null> {
-  const rows = await db
-    .select()
-    .from(agentMemories)
+  const [row] = await currentQuery(db)
     .where(
       and(
         eq(agentMemories.reviewProposalId, reviewProposalId),
         eq(agentMemories.agentId, agentId),
-        isNull(agentMemories.deletedAt),
+        sql`${agentMemories.status} <> 'creating'`,
       ),
     )
     .limit(1);
-
-  return rows[0] ? mapMemoryRow(rows[0]) : null;
+  return row ? mapMemoryRow(row) : null;
 }
 
 export async function createMemory(
   input: CreateMemoryInput,
-  db: AppDbClient = getDb(),
+  db?: AppDbClient,
 ): Promise<Memory> {
-  const value: NewAgentMemory = {
-    agentId: input.agentId ?? DEFAULT_AGENT_ID,
-    kind: parseMemoryKind(input.kind),
-    content: parseMemoryContent(input.content),
-    source: parseMemorySource(input.source),
-    confidence: parseMemoryConfidence(input.confidence),
-    sessionId: input.sessionId ?? null,
-    reviewProposalId: input.reviewProposalId ?? null,
-    claimHash: input.claimHash ?? null,
-  };
-
-  const inserted = await db.insert(agentMemories).values(value).returning();
-  const memory = mapMemoryRow(inserted[0]);
-
-  // §3a: a memory_user observation is ingested ONLY when the inserted row's
-  // final source is exactly "user". Review/curated/consolidated memories can
-  // never become evidence (§4.1 firewall). Fail-soft — ingestion must never
-  // break the create path.
-  if (memory.source === "user") {
-    await ingestUserMemory(memory.id, memory.content, { agentId: memory.agentId, db }).catch(
-      (error) => {
-        console.error("Ingesting user memory failed", error);
-      },
-    );
-  }
-
-  // Fire a `created` timeline event. Origin follows the memory's source so a
-  // user-authored memory is logged as `user`, a reviewed one as `review`, etc.
-  // Fail-soft: recordMemoryEvent swallows its own errors.
-  await recordMemoryEvent(
+  if (!db) return getDb().transaction((tx) => createMemory(input, tx));
+  const agentId = input.agentId ?? DEFAULT_AGENT_ID;
+  const kind = parseMemoryKind(input.kind);
+  const memoryType = parseMemoryType(input.memoryType, familyForKind(kind));
+  const content = parseMemoryContent(input.content);
+  const source = parseMemorySource(input.source);
+  const confidence = parseMemoryConfidence(input.confidence);
+  const bounds = parseValidityBounds(input.validFrom, input.validTo);
+  const evidence =
+    input.sourceEventIds?.length
+      ? input.sourceEventIds
+      : [await appendExplicitEvent(db, agentId, input.sessionId ?? null, "create", { kind, content })];
+  const result = await createVersionedMemory(
     {
-      eventType: "created",
-      origin: memoryEventOriginForSource(memory.source),
-      summary: `Created ${memory.kind} memory (${memory.source}).`,
-      memoryId: memory.id,
+      agentId,
+      kind,
+      memoryType,
+      content,
+      source,
+      confidence,
+      sourceEventIds: evidence,
+      authority: input.authority ?? authorityForSource(source),
+      sessionId: input.sessionId ?? null,
+      reviewProposalId: input.reviewProposalId ?? null,
+      claimHash: input.claimHash ?? null,
+      canonicalKey: input.canonicalKey ?? null,
+      validFrom: bounds.validFrom,
+      validTo: bounds.validTo,
+      extractorId: input.extractorId,
+      modelId: input.modelId,
+      promptHash: input.promptHash,
+      schemaVersion: input.schemaVersion,
     },
     db,
   );
-
-  return memory;
+  if (source === "user") {
+    await ingestUserMemory(result.root.id, content, { agentId, db, traceEventId: evidence[0] });
+  }
+  await recordMemoryEvent(
+    {
+      agentId,
+      eventType: "created",
+      origin: memoryEventOriginForSource(source),
+      summary: `Created ${kind} memory (${source}).`,
+      memoryId: result.root.id,
+      memoryVersionId: result.version.id,
+    },
+    db,
+  );
+  return mapMemoryRow({ root: result.root, version: result.version });
 }
 
 export async function updateMemory(
   id: string,
   input: UpdateMemoryInput,
-  agentId: string = DEFAULT_AGENT_ID,
-  db: AppDbClient = getDb(),
+  agentId = DEFAULT_AGENT_ID,
+  db?: AppDbClient,
 ): Promise<Memory> {
+  if (!db) return getDb().transaction((tx) => updateMemory(id, input, agentId, tx));
   const existing = await getMemoryById(id, agentId, db);
-
-  if (!existing) {
-    throw new MemoryNotFoundError(id);
-  }
-
-  const nextStatus = input.status ?? existing.status;
-
-  if (nextStatus !== "approved" && nextStatus !== "archived") {
-    throw new SelfImprovementInputError("Memory status must be approved or archived.");
-  }
-
+  if (!existing) throw new MemoryNotFoundError(id);
+  if (input.status === "archived") return archiveMemory(id, agentId, db, input.sourceEventIds);
   const isContentEdit =
     input.kind !== undefined || input.content !== undefined || input.confidence !== undefined;
-
-  // A protected row may not be content-edited or archived (§9.3). Protection
-  // toggles go through setMemoryProtection, never here; a pure re-approval
-  // (status only, no content change) stays allowed. The gate keys off the ACTION
-  // (edit/archive), not the status field — the old `status !== "approved"` form
-  // let a content edit slip through by sending status:"approved" alongside it.
-  if (existing.isProtected && (isContentEdit || nextStatus === "archived")) {
+  if (existing.isProtected && isContentEdit) {
     throw new SelfImprovementInputError("A protected memory cannot be edited or archived.");
   }
-
-  // §9.3: editing a `consolidated` memory flips ownership — set source='user'
-  // so the human's correction is ground truth and consolidation won't re-
-  // archive/"correct" it. A content/kind/confidence edit on a consolidated row
-  // is treated as a human correction.
-  const sourceBefore = existing.source;
-  const nextSource =
+  const kind = input.kind === undefined ? existing.kind : parseMemoryKind(input.kind);
+  const memoryType = parseMemoryType(input.memoryType, familyForKind(kind));
+  const content = input.content === undefined ? existing.content : parseMemoryContent(input.content);
+  const source =
     input.source !== undefined
       ? parseMemorySource(input.source, existing.source)
       : isContentEdit && existing.source === "consolidated"
         ? "user"
         : existing.source;
-
-  const rows = await db
-    .update(agentMemories)
-    .set({
-      kind: input.kind === undefined ? existing.kind : parseMemoryKind(input.kind),
-      content: input.content === undefined ? existing.content : parseMemoryContent(input.content),
-      source: nextSource,
-      confidence:
-        input.confidence === undefined
-          ? existing.confidence
-          : parseMemoryConfidence(input.confidence, existing.confidence),
-      status: nextStatus,
-      updatedAt: sql`now()`,
-    })
-    .where(
-      and(
-        eq(agentMemories.id, id),
-        eq(agentMemories.agentId, agentId),
-        isNull(agentMemories.deletedAt),
-      ),
-    )
-    .returning();
-
-  const updated = mapMemoryRow(rows[0]);
-
-  // Fire the appropriate timeline event. A status flip to archived is the
-  // compaction mechanism; otherwise it's an edit. Fail-soft.
-  if (nextStatus === "archived" && existing.status !== "archived") {
-    await recordMemoryEvent(
-      {
-        eventType: "archived",
-        origin: memoryEventOriginForSource(sourceBefore),
-        summary: `Archived ${updated.kind} memory.`,
-        memoryId: updated.id,
-        detail: { version: 1, before: { status: existing.status } },
+  const confidence =
+    input.confidence === undefined
+      ? existing.confidence
+      : parseMemoryConfidence(input.confidence, existing.confidence);
+  const bounds = parseValidityBounds(input.validFrom, input.validTo);
+  const evidence =
+    input.sourceEventIds?.length
+      ? input.sourceEventIds
+      : [await appendExplicitEvent(db, agentId, existing.sessionId, "update", { id, kind, content })];
+  const result = await appendMemoryVersion(
+    id,
+    {
+      agentId,
+      kind,
+      memoryType,
+      content,
+      source,
+      confidence,
+      sourceEventIds: evidence,
+      authority: input.authority ?? "user",
+      sessionId: existing.sessionId,
+      reviewProposalId: existing.reviewProposalId,
+      validFrom: bounds.validFrom,
+      validTo: bounds.validTo,
+    },
+    db,
+  );
+  await recordMemoryEvent(
+    {
+      agentId,
+      eventType: "edited",
+      origin: memoryEventOriginForSource(existing.source),
+      summary: `Edited ${kind} memory.`,
+      memoryId: id,
+      memoryVersionId: result.version.id,
+      detail: {
+        version: 1,
+        before: { kind: existing.kind, content: existing.content, source: existing.source },
+        after: { kind, content, source },
       },
-      db,
-    );
-  } else {
-    await recordMemoryEvent(
-      {
-        eventType: "edited",
-        origin: memoryEventOriginForSource(sourceBefore),
-        summary: `Edited ${updated.kind} memory.`,
-        memoryId: updated.id,
-        detail: {
-          version: 1,
-          before: { kind: existing.kind, content: existing.content, source: sourceBefore },
-          after: { kind: updated.kind, content: updated.content, source: updated.source },
-        },
-      },
-      db,
-    );
-  }
-
-  return updated;
+    },
+    db,
+  );
+  return mapMemoryRow({ root: result.root, version: result.version });
 }
 
-/**
- * Pin / unpin a memory (§9.3). Protected rows are excluded from
- * consolidation/curator archive + edit and show a lock badge. PATCH
- * /api/memories/:id with { isProtected } is the only path — there is no
- * /protect route.
- */
 export async function setMemoryProtection(
   id: string,
   isProtected: boolean,
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId = DEFAULT_AGENT_ID,
   protectedBy?: string,
-  db: AppDbClient = getDb(),
+  db?: AppDbClient,
 ): Promise<Memory> {
+  if (!db) {
+    return getDb().transaction((tx) =>
+      setMemoryProtection(id, isProtected, agentId, protectedBy, tx),
+    );
+  }
   const existing = await getMemoryById(id, agentId, db);
-
-  if (!existing) {
-    throw new MemoryNotFoundError(id);
-  }
-
-  if (existing.isProtected === isProtected) {
-    return existing;
-  }
-
-  const rows = await db
+  if (!existing) throw new MemoryNotFoundError(id);
+  if (existing.isProtected === isProtected) return existing;
+  await db
     .update(agentMemories)
     .set({
       isProtected,
@@ -308,44 +306,46 @@ export async function setMemoryProtection(
       protectedBy: isProtected ? (protectedBy ?? null) : null,
       updatedAt: sql`now()`,
     })
-    .where(
-      and(
-        eq(agentMemories.id, id),
-        eq(agentMemories.agentId, agentId),
-        isNull(agentMemories.deletedAt),
-      ),
-    )
-    .returning();
-
-  const updated = mapMemoryRow(rows[0]);
-
-  await recordMemoryEvent(
-    {
-      eventType: isProtected ? "protected" : "unprotected",
-      origin: "user",
-      summary: isProtected ? "Protected memory." : "Unprotected memory.",
-      memoryId: updated.id,
-    },
-    db,
-  );
-
-  return updated;
+    .where(and(eq(agentMemories.id, id), eq(agentMemories.agentId, agentId)));
+  await recordMemoryEvent({
+    agentId,
+    eventType: isProtected ? "protected" : "unprotected",
+    origin: "user",
+    summary: isProtected ? "Protected memory." : "Unprotected memory.",
+    memoryId: id,
+  }, db);
+  return { ...existing, isProtected, protectedAt: isProtected ? new Date().toISOString() : null, protectedBy: isProtected ? protectedBy ?? null : null };
 }
 
 export async function archiveMemory(
   id: string,
-  agentId: string = DEFAULT_AGENT_ID,
-  db: AppDbClient = getDb(),
+  agentId = DEFAULT_AGENT_ID,
+  db?: AppDbClient,
+  sourceEventIds?: string[],
 ): Promise<Memory> {
-  return updateMemory(id, { status: "archived" }, agentId, db);
+  if (!db) return getDb().transaction((tx) => archiveMemory(id, agentId, tx, sourceEventIds));
+  const existing = await getMemoryById(id, agentId, db);
+  if (!existing) throw new MemoryNotFoundError(id);
+  if (existing.isProtected) throw new SelfImprovementInputError("A protected memory cannot be edited or archived.");
+  const evidence = sourceEventIds?.length
+    ? sourceEventIds
+    : [await appendExplicitEvent(db, agentId, existing.sessionId, "archive", { id })];
+  const result = await invalidateMemory(
+    id,
+    { agentId, sourceEventIds: evidence, source: existing.source, authority: "user" },
+    db,
+  );
+  await recordMemoryEvent({
+    agentId,
+    eventType: "archived",
+    origin: memoryEventOriginForSource(existing.source),
+    summary: `Archived ${existing.kind} memory.`,
+    memoryId: id,
+    memoryVersionId: result.version.id,
+  }, db);
+  return mapMemoryRow({ root: result.root, version: result.version });
 }
 
-/**
- * Agent-facing memory retrieval (§10.2). Read-only, lexical first: ILIKE-escaped
- * %query% over status='approved' AND deleted_at IS NULL, optional kind, ranked
- * by relevance. NO inserts, NO events, NO checkpoint updates. pgvector semantic
- * recall is the deferred upgrade behind the same signature.
- */
 export async function searchMemories(
   agentId: string,
   query: string,
@@ -355,63 +355,92 @@ export async function searchMemories(
   const limit = Math.max(1, Math.min(20, opts.limit ?? 10));
   const trimmed = query.trim();
   if (!trimmed) return [];
-
-  const conditions = [
-    eq(agentMemories.agentId, agentId),
-    eq(agentMemories.status, "approved"),
-    isNull(agentMemories.deletedAt),
-  ];
-  if (opts.kind) {
-    conditions.push(eq(agentMemories.kind, opts.kind));
-  }
+  const conditions = [eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()];
+  if (opts.kind) conditions.push(eq(agentMemories.kind, opts.kind));
   if (trimmed !== "*") {
-    // Escape LIKE metacharacters so a query containing % or _ is literal.
-    const escaped = trimmed.replace(/[%_\\]/g, "\\$&");
-    conditions.push(ilike(agentMemories.content, `%${escaped}%`));
+    conditions.push(
+      or(
+        sql`${agentMemoryVersions.searchTsv} @@ websearch_to_tsquery('english', ${trimmed})`,
+        sql`similarity(${agentMemoryVersions.content}, ${trimmed}) > 0.2`,
+      ),
+    );
   }
-
-  const rows = await db
-    .select()
-    .from(agentMemories)
+  const rows = await currentQuery(db)
     .where(and(...conditions))
-    .orderBy(desc(agentMemories.confidence), desc(agentMemories.createdAt))
+    .orderBy(
+      trimmed === "*"
+        ? desc(agentMemoryVersions.confidence)
+        : sql`ts_rank_cd(${agentMemoryVersions.searchTsv}, websearch_to_tsquery('english', ${trimmed})) + similarity(${agentMemoryVersions.content}, ${trimmed}) desc`,
+      desc(agentMemories.createdAt),
+    )
     .limit(limit);
-
   return rows.map(mapMemoryRow);
 }
 
-function mapMemoryRow(row: AgentMemory): Memory {
+function currentQuery(db: AppDbClient) {
+  return db
+    .select({ root: agentMemories, version: agentMemoryVersions })
+    .from(agentMemories)
+    .innerJoin(agentMemoryVersions, eq(agentMemoryVersions.id, agentMemories.currentVersionId));
+}
+
+function mapMemoryRow(row: CurrentRow): Memory {
   return {
-    id: row.id,
-    agentId: row.agentId,
-    kind: row.kind,
-    content: row.content,
-    source: row.source,
-    confidence: row.confidence,
-    status: row.status,
-    claimHash: row.claimHash,
-    isProtected: row.isProtected,
-    protectedAt: row.protectedAt?.toISOString() ?? null,
-    protectedBy: row.protectedBy,
-    sessionId: row.sessionId,
-    reviewProposalId: row.reviewProposalId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
+    id: row.root.id,
+    agentId: row.root.agentId,
+    kind: row.root.kind,
+    memoryType: row.root.memoryType,
+    content: row.version.content,
+    source: row.version.source,
+    confidence: row.version.confidence,
+    status: row.root.status,
+    claimHash: row.root.claimHash,
+    isProtected: row.root.isProtected,
+    protectedAt: row.root.protectedAt?.toISOString() ?? null,
+    protectedBy: row.root.protectedBy,
+    sessionId: row.root.sessionId,
+    reviewProposalId: row.root.reviewProposalId,
+    currentVersionId: row.version.id,
+    createdAt: row.root.createdAt.toISOString(),
+    updatedAt: row.root.updatedAt.toISOString(),
   };
 }
 
-/** Map a memory's source onto a MemoryEventOrigin for the timeline. */
-function memoryEventOriginForSource(
-  source: MemorySource,
-): "user" | "review" | "consolidation" | "curator" {
-  switch (source) {
-    case "user":
-      return "user";
-    case "review":
-      return "review";
-    case "consolidated":
-      return "consolidation";
-    case "curated":
-      return "curator";
-  }
+async function appendExplicitEvent(
+  db: AppDbClient,
+  agentId: string,
+  sessionId: string | null,
+  operation: "create" | "update" | "archive",
+  payload: Record<string, unknown>,
+): Promise<string> {
+  const traceId = `explicit-memory:${randomUUID()}`;
+  const sanitized = sanitizeTracePayload({ operation, ...payload });
+  const [event] = await appendTraceEvents([
+    {
+      agentId,
+      traceId,
+      sequenceNo: 0,
+      sessionId,
+      eventType: "explicit_memory_write",
+      actor: "user",
+      trustClass: "user_assertion",
+      payload: sanitized.payload,
+      contentHash: sanitized.contentHash,
+      idempotencyKey: traceId,
+      retentionClass: "audit",
+      policyVersion: getMemoryPolicyVersion(),
+      occurredAt: new Date(),
+    },
+  ], db);
+  return event.id;
+}
+
+function familyForKind(kind: MemoryKind): MemoryType {
+  return kind === "episode" ? "episodic" : kind === "procedure" ? "procedural" : "semantic";
+}
+function authorityForSource(source: MemorySource): VersionAuthority {
+  return source === "user" ? "user" : source === "consolidated" ? "consolidated" : "reviewed";
+}
+function memoryEventOriginForSource(source: MemorySource): "user" | "review" | "consolidation" | "curator" {
+  return source === "user" ? "user" : source === "review" ? "review" : source === "consolidated" ? "consolidation" : "curator";
 }

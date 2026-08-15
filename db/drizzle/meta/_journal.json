@@ -43,6 +43,13 @@
       "when": 1786761934202,
       "tag": "0005_agent_memory_write_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786763899906,
+      "tag": "0006_agent_memory_version_authority",
+      "breakpoints": true
     }
   ]
 }

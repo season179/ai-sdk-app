@@ -132,7 +132,12 @@ export async function appendTraceEventsFailOpen(
   if (!isMemoryWriteEnabled() || events.length === 0) return [];
   try {
     if (outerDb) {
-      return await outerDb.transaction(async (savepoint) => appendTraceEvents(events, savepoint));
+      return await outerDb.transaction(async (savepoint) => {
+        await savepoint.execute(sql`set local statement_timeout = '750ms'`);
+        const rows = await appendTraceEvents(events, savepoint);
+        await savepoint.execute(sql`set local statement_timeout = 0`);
+        return rows;
+      });
     }
     return await getDb().transaction(async (tx) => {
       await tx.execute(sql`set local statement_timeout = '750ms'`);

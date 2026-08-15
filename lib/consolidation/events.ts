@@ -24,6 +24,7 @@ export async function recordMemoryEvent(
     origin: MemoryEventOrigin;
     summary: string;
     memoryId?: string | null;
+    memoryVersionId?: string | null;
     proposalId?: string | null;
     runId?: string | null;
     detail?: MemoryEventDetail | null;
@@ -37,13 +38,16 @@ export async function recordMemoryEvent(
     origin: input.origin,
     summary: input.summary,
     memoryId: input.memoryId ?? null,
+    memoryVersionId: input.memoryVersionId ?? null,
     proposalId: input.proposalId ?? null,
     runId: input.runId ?? null,
     detail: input.detail ?? null,
   };
 
   try {
-    await db.insert(agentMemoryEvents).values(value);
+    await db.transaction(async (savepoint) => {
+      await savepoint.insert(agentMemoryEvents).values(value);
+    });
   } catch (error) {
     console.error("recordMemoryEvent failed", { eventType: input.eventType, error });
   }

@@ -7,6 +7,7 @@ import { SiteHeader, SiteHeaderStatus } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
 import type {
   AdmissionMetadata,
+  AdmissionMetadataV1,
   AdmissionPolicy,
   ReviewProposalKind,
   ReviewProposalPayload,
@@ -229,7 +230,8 @@ export default function ProposalsPage() {
                           {selected.admissionMetadata.dryRun ? " · dry-run" : ""}
                         </p>
                       ) : null}
-                      {selected.admissionMetadata.score ? (
+                      {selected.admissionMetadata.version === 1 &&
+                      selected.admissionMetadata.score ? (
                         <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-4">
                           {Object.entries(selected.admissionMetadata.score).map(([key, bps]) => (
                             <div key={key}>
@@ -241,8 +243,15 @@ export default function ProposalsPage() {
                           ))}
                         </dl>
                       ) : null}
-                      {selected.admissionMetadata.gates ? (
+                      {selected.admissionMetadata.version === 1 &&
+                      selected.admissionMetadata.gates ? (
                         <GateResults gates={selected.admissionMetadata.gates} />
+                      ) : null}
+                      {selected.admissionMetadata.version === 2 ? (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {selected.admissionMetadata.memoryType} · {selected.admissionMetadata.gateReason} ·{" "}
+                          {selected.admissionMetadata.evidenceTraceEventIds.length} trace evidence event(s)
+                        </p>
                       ) : null}
                     </section>
                   ) : null}
@@ -322,10 +331,10 @@ function labelForScoreKey(key: string): string {
   }
 }
 
-function GateResults({ gates }: { gates: NonNullable<AdmissionMetadata["gates"]> }) {
+function GateResults({ gates }: { gates: NonNullable<AdmissionMetadataV1["gates"]> }) {
   const entries = Object.entries(gates) as [
-    keyof NonNullable<AdmissionMetadata["gates"]>,
-    NonNullable<AdmissionMetadata["gates"]>[keyof NonNullable<AdmissionMetadata["gates"]>],
+    keyof NonNullable<AdmissionMetadataV1["gates"]>,
+    NonNullable<AdmissionMetadataV1["gates"]>[keyof NonNullable<AdmissionMetadataV1["gates"]>],
   ][];
   return (
     <div className="mt-3">

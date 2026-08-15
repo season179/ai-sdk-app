@@ -25,6 +25,10 @@ export type CandidateExplanation = {
     passed: boolean;
     gateResults: NonNullable<(typeof agentConsolidationCandidates.$inferSelect)["gateResults"]>;
     proposalId: string | null;
+    candidateOrigin: "signal" | "turn_review";
+    sourceCandidateId: string | null;
+    memoryType: "semantic" | "episodic" | "procedural" | null;
+    evidenceTraceEventIds: string[];
     createdAt: string;
   };
   run: {
@@ -74,6 +78,7 @@ export async function explainCandidate(
   // live on the linked proposal's admissionMetadata (§1.1). Resolve them so the
   // "why did this promote" drawer can show the user-authored evidence.
   let observations: CandidateExplanation["observations"] = [];
+  let evidenceTraceEventIds: string[] = [];
   if (candidate.proposalId) {
     const proposalRows = await db
       .select({ admissionMetadata: agentReviewProposals.admissionMetadata })
@@ -81,7 +86,8 @@ export async function explainCandidate(
       .where(eq(agentReviewProposals.id, candidate.proposalId))
       .limit(1);
     const meta = proposalRows[0]?.admissionMetadata as AdmissionMetadata | null;
-    const obsIds = meta?.groundedObservationIds ?? [];
+    const obsIds = meta?.version === 1 ? (meta.groundedObservationIds ?? []) : [];
+    evidenceTraceEventIds = meta?.version === 2 ? meta.evidenceTraceEventIds : [];
     if (obsIds.length > 0) {
       const obsRows = await db
         .select({
@@ -116,6 +122,10 @@ export async function explainCandidate(
       passed: candidate.passed,
       gateResults: candidate.gateResults ?? emptyGates(),
       proposalId: candidate.proposalId,
+      candidateOrigin: candidate.candidateOrigin,
+      sourceCandidateId: candidate.sourceCandidateId,
+      memoryType: candidate.memoryType,
+      evidenceTraceEventIds,
       createdAt: candidate.createdAt.toISOString(),
     },
     run: {
@@ -168,6 +178,9 @@ export async function listCandidatesForRun(runId: string, limit = 200) {
     scoreBps: c.scoreBps,
     passed: c.passed,
     proposalId: c.proposalId,
+    candidateOrigin: c.candidateOrigin,
+    sourceCandidateId: c.sourceCandidateId,
+    memoryType: c.memoryType,
     gateResults: c.gateResults ?? emptyGates(),
     createdAt: c.createdAt.toISOString(),
   }));
@@ -191,6 +204,7 @@ export async function listRecentEvents(agentId: string = DEFAULT_AGENT_ID, limit
     origin: e.origin,
     summary: e.summary,
     memoryId: e.memoryId,
+    memoryVersionId: e.memoryVersionId,
     proposalId: e.proposalId,
     runId: e.runId,
     detail: e.detail,

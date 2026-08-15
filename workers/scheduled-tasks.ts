@@ -12,7 +12,10 @@ import {
 } from "@/lib/memory/capture";
 import { appendDecisionOutcome, recordScheduledDecision } from "@/lib/memory/decisions";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
-import { appendTraceEvents, type TraceEventInput } from "@/lib/memory/trace";
+import {
+  appendTraceEventsFailOpen,
+  type TraceEventInput,
+} from "@/lib/memory/trace";
 import { getBoss, stopBoss, TASK_QUEUE_NAME, taskSendOptions } from "@/lib/scheduler/boss";
 import { recoverMissedRuns } from "@/lib/scheduler/catchup";
 import { closePool } from "@/lib/scheduler/db";
@@ -23,8 +26,10 @@ import {
   type InstructionTaskPayload,
 } from "@/lib/scheduler/execute";
 import {
+  classifyInstructionVerdictAction,
   INSTRUCTION_PROMPT_HASH,
   type InstructionVerdict,
+  type InstructionWorkerAction,
   requireInstructionRunnerEnv,
   runInstructionRound,
 } from "@/lib/scheduler/instruction";
@@ -49,11 +54,7 @@ import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 const INSTRUCTION_FAILURE_LIMIT = 3;
 type TaskJobData = { taskId?: string };
 type TaskJob = JobWithMetadata<TaskJobData>;
-export type InstructionChainAction =
-  | "next_round_scheduled"
-  | "task_completed"
-  | "task_cancelled"
-  | "chain_halted";
+export type InstructionChainAction = InstructionWorkerAction;
 
 function traceContext(job: TaskJob, task: ScheduledTask): TraceContext {
   return {
@@ -78,7 +79,7 @@ async function processJob(job: TaskJob) {
     await getDb().transaction(async (tx) => {
       await markRunSkipped(task.id, job.id, `Task was ${task.status} when the job ran.`, tx);
       if (isMemoryWriteEnabled()) {
-        await appendTraceEvents([buildTerminalEvent(context, "skipped")], tx);
+        await appendTraceEventsFailOpen([buildTerminalEvent(context, "skipped")], tx);
       }
     });
     return;
@@ -97,7 +98,7 @@ async function processToolCallJob(job: TaskJob, task: ScheduledTask, context: Tr
     await getDb().transaction(async (tx) => {
       await markRunCompleted(job.id, output, tx);
       if (isMemoryWriteEnabled() && task.payload.kind === "tool_call") {
-        await appendTraceEvents(
+        await appendTraceEventsFailOpen(
           [
             ...buildScheduledToolEvents(
               context,
@@ -120,7 +121,7 @@ async function processToolCallJob(job: TaskJob, task: ScheduledTask, context: Tr
     await getDb().transaction(async (tx) => {
       await markRunFailed(job.id, message, tx);
       if (isMemoryWriteEnabled() && task.payload.kind === "tool_call") {
-        await appendTraceEvents(
+        await appendTraceEventsFailOpen(
           [
             ...buildScheduledToolEvents(
               context,
@@ -167,27 +168,38 @@ async function processInstructionJob(
     await getDb().transaction(async (tx) => {
       await markRunCompleted(job.id, { round: payload.round, ...currentVerdict }, tx);
       if (isMemoryWriteEnabled()) {
-        await appendTraceEvents([...round.traceEvents, terminal], tx);
-        const decision = await recordScheduledDecision(
-          {
-            agentId: DEFAULT_AGENT_ID,
-            taskId: task.id,
-            sessionId: task.homeSessionId,
-            pgBossJobId: job.id,
-            traceId: context.traceId,
-            round: payload.round,
-            retryCount: job.retryCount,
-            selectedOption: currentVerdict.continue ? "continue_chain" : "stop_chain",
-            declaredOptions: ["continue_chain", "stop_chain"],
-            declaredRationale: currentVerdict.declaredRationale,
-            expectedOutcome: currentVerdict.expectedOutcome,
-            successCriteria: currentVerdict.successCriteria,
-            modelId: round.modelId,
-            promptHash: INSTRUCTION_PROMPT_HASH,
-          },
+        const traceRows = await appendTraceEventsFailOpen(
+          [...round.traceEvents, terminal],
           tx,
         );
-        decisionId = decision.id;
+        if (traceRows.length > 0) {
+          try {
+            const decision = await tx.transaction((savepoint) =>
+              recordScheduledDecision(
+                {
+                  agentId: DEFAULT_AGENT_ID,
+                  taskId: task.id,
+                  sessionId: task.homeSessionId,
+                  pgBossJobId: job.id,
+                  traceId: context.traceId,
+                  round: payload.round,
+                  retryCount: job.retryCount,
+                  selectedOption: currentVerdict.continue ? "continue_chain" : "stop_chain",
+                  declaredOptions: ["continue_chain", "stop_chain"],
+                  declaredRationale: currentVerdict.declaredRationale,
+                  expectedOutcome: currentVerdict.expectedOutcome,
+                  successCriteria: currentVerdict.successCriteria,
+                  modelId: round.modelId,
+                  promptHash: INSTRUCTION_PROMPT_HASH,
+                },
+                savepoint,
+              ),
+            );
+            decisionId = decision.id;
+          } catch (error) {
+            console.error("Scheduled decision capture failed; run completion continues", error);
+          }
+        }
       }
     });
   } catch (error) {
@@ -195,7 +207,7 @@ async function processInstructionJob(
     await getDb().transaction(async (tx) => {
       await markRunFailed(job.id, message, tx);
       if (isMemoryWriteEnabled()) {
-        await appendTraceEvents(
+        await appendTraceEventsFailOpen(
           [...captured, buildTerminalEvent(context, "failed", { error: message })],
           tx,
         );
@@ -285,21 +297,19 @@ export async function advanceInstructionChain(
     await chainNextRound(task, payload, null);
     return "next_round_scheduled";
   }
-  const shouldContinue = verdict.continue && !reachedCap;
-  if (task.scheduleType === "once") {
-    if (shouldContinue) {
+  const action = classifyInstructionVerdictAction(task.scheduleType, payload, verdict);
+  if (action === "next_round_scheduled") {
+    if (task.scheduleType === "once") {
       await chainNextRound(task, payload, verdict.nextDelaySeconds);
-      return "next_round_scheduled";
+    } else {
+      await setInstructionRound(task.id, payload.round + 1);
     }
+  } else if (action === "task_completed") {
     await markTaskCompleted(task.id);
-    return "task_completed";
+  } else {
+    await cancelScheduledTask(task.id);
   }
-  if (shouldContinue) {
-    await setInstructionRound(task.id, payload.round + 1);
-    return "next_round_scheduled";
-  }
-  await cancelScheduledTask(task.id);
-  return "task_cancelled";
+  return action;
 }
 
 async function chainNextRound(

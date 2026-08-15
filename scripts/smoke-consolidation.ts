@@ -1,5 +1,6 @@
 import "@/lib/scheduler/load-env";
 
+import { getDb } from "@/db";
 import {
   isMemoryConsolidationDryRun,
   isMemoryConsolidationEnabled,
@@ -33,7 +34,37 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Smoke OK: run + candidates created, zero proposals.");
+  const evidenceCheck = await getDb().execute<{ invalid_count: number }>(`
+    select count(*)::int as invalid_count
+    from agent_review_proposals p
+    left join agent_memories m on m.review_proposal_id = p.id
+    left join agent_memory_versions v on v.id = m.current_version_id
+    where p.kind = 'memory_create'
+      and p.status = 'applied'
+      and (
+        v.id is null
+        or not exists (
+          select 1 from agent_memory_version_trace_events mt
+          where mt.memory_version_id = v.id
+        )
+      )
+  `);
+  if ((evidenceCheck.rows[0]?.invalid_count ?? 0) > 0) {
+    throw new Error("Applied memory exists without a current version and trace provenance.");
+  }
+  const failedTraceCheck = await getDb().execute<{ invalid_count: number }>(`
+    select count(*)::int as invalid_count
+    from agent_review_proposals p
+    join agent_memory_candidate_trace_events ct on ct.candidate_id = p.source_candidate_id
+    join agent_trace_events e on e.id = ct.event_id
+    where e.event_type = 'task_terminal_state'
+      and e.terminal_status in ('failed', 'interrupted')
+  `);
+  if ((failedTraceCheck.rows[0]?.invalid_count ?? 0) > 0) {
+    throw new Error("Failed/interrupted trace produced a memory proposal.");
+  }
+
+  console.log("Smoke OK: run/candidates valid; applied memories have trace-backed current versions.");
   await closePool();
 }
 

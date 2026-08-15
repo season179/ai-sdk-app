@@ -6,6 +6,7 @@ import {
   agentChatMessages,
   agentGroundedObservations,
   agentMemories,
+  agentMemoryVersions,
 } from "@/db/schema";
 import type { ChatUIMessage } from "@/lib/chat/sessions";
 import {
@@ -57,12 +58,13 @@ async function main() {
   const memoryRows = await db
     .select({
       id: agentMemories.id,
-      content: agentMemories.content,
-      source: agentMemories.source,
+      content: agentMemoryVersions.content,
+      source: agentMemoryVersions.source,
       createdAt: agentMemories.createdAt,
     })
     .from(agentMemories)
-    .where(and(eq(agentMemories.source, "user"), isNull(agentMemories.deletedAt)))
+    .innerJoin(agentMemoryVersions, eq(agentMemoryVersions.id, agentMemories.currentVersionId))
+    .where(eq(agentMemoryVersions.source, "user"))
     .orderBy(asc(agentMemories.createdAt), asc(agentMemories.id));
 
   // Also report how many NON-user rows exist, so the operator can confirm the
@@ -76,7 +78,8 @@ async function main() {
   const nonUserMemoryCount = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(agentMemories)
-    .where(and(sql`${agentMemories.source} <> 'user'`, isNull(agentMemories.deletedAt)));
+    .innerJoin(agentMemoryVersions, eq(agentMemoryVersions.id, agentMemories.currentVersionId))
+    .where(sql`${agentMemoryVersions.source} <> 'user'`);
 
   console.log("Backfill grounded-observations scan:");
   console.log(`  user chat messages:        ${chatRows.length}`);

@@ -131,9 +131,10 @@ export async function persistMemoryCandidates(
         structured: gate.status === "accepted" ? draft.structured : {},
         sourceStance: draft.sourceStance,
         validDuring,
-        sourceReferenceTime: draft.sourceReferenceTime
-          ? new Date(draft.sourceReferenceTime)
-          : null,
+        sourceReferenceTime:
+          draft.sourceReferenceTime && !Number.isNaN(Date.parse(draft.sourceReferenceTime))
+            ? new Date(draft.sourceReferenceTime)
+            : null,
         timePrecision: draft.timePrecision,
         confidence: draft.confidence,
         proposedOperation: draft.proposedOperation,

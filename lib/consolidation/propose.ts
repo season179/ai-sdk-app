@@ -1,6 +1,6 @@
 import type { AppDbClient } from "@/db";
 import type {
-  AdmissionMetadata,
+  AdmissionMetadataV1,
   AdmissionMetadataV2,
   AdmissionPolicy,
   MemoryKind,
@@ -36,7 +36,7 @@ export async function proposeCandidate(
     agentId: string;
     claimKey: string;
     snippet: string;
-    metadata: AdmissionMetadata;
+    metadata: AdmissionMetadataV1;
     runId: string;
     candidateId?: string;
   },
@@ -155,7 +155,7 @@ function pickAdmissionPolicy(scoreBps: number | undefined): AdmissionPolicy {
 }
 
 /** Cheap kind inference from concept tags — never authoritative. */
-function inferKind(metadata: AdmissionMetadata): "preference" | "fact" | "correction" | "persona" {
+function inferKind(metadata: AdmissionMetadataV1): "preference" | "fact" | "correction" | "persona" {
   // The candidate metadata doesn't carry concept tags directly; the caller can
   // extend this later. Default to 'fact' — the safest general bucket.
   void metadata;

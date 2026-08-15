@@ -57,27 +57,24 @@ describeIntegration("searchMemories behavioral (integration)", () => {
     expect(results.length).toBeLessThanOrEqual(3);
   });
 
-  it("ranks by confidence desc then createdAt desc", async () => {
-    const marker = `searchtest-rank-${Date.now()}`;
+  it("ranks exact FTS matches ahead of trigram-only typo matches", async () => {
+    const marker = `lexicalrank${Date.now()}`;
     await createMemory({
       agentId: AGENT_ID,
       kind: "fact",
-      content: `${marker} low`,
+      content: `${marker} exact searchable phrase`,
       source: "user",
       confidence: 10,
     });
     await createMemory({
       agentId: AGENT_ID,
       kind: "fact",
-      content: `${marker} high`,
+      content: `${marker.slice(0, -1)}x fuzzy alternative`,
       source: "user",
       confidence: 90,
     });
     const results = await searchMemories(AGENT_ID, marker);
-    if (results.length >= 2) {
-      // Higher-confidence row should come first.
-      expect(results[0].confidence).toBeGreaterThanOrEqual(results[1].confidence);
-    }
+    expect(results[0]?.content).toContain("exact searchable phrase");
   });
 
   it("treats LIKE metacharacters in the query as literal", async () => {

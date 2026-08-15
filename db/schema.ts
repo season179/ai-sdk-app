@@ -159,15 +159,6 @@ export type AdmissionMetadataV2 = {
   validTo?: string | null;
   timePrecision?: "instant" | "day" | "month" | "year" | "unknown";
   dryRun?: boolean;
-  // Optional explainability fields keep existing review surfaces compatible;
-  // sourceCandidateId + evidenceTraceEventIds remain the v2 authority.
-  candidateId?: string;
-  claimKey?: string;
-  claimHash?: string;
-  score?: AdmissionMetadataV1["score"];
-  gates?: AdmissionMetadataV1["gates"];
-  groundedObservationIds?: string[];
-  autoApply?: { eligible: boolean; reasons: string[] };
 };
 
 export type AdmissionMetadata = AdmissionMetadataV1 | AdmissionMetadataV2;
@@ -763,10 +754,6 @@ export const agentMemories = pgTable(
     currentVersionId: uuid("current_version_id").references(
       (): AnyPgColumn => agentMemoryVersions.id,
     ),
-    content: text("content").notNull(),
-    source: text("source").$type<MemorySource>().notNull(),
-    // 0..100 keeps confidence sortable and avoids provider-specific float quirks.
-    confidence: integer("confidence").notNull().default(100),
     // Human-approved memory proposals become live immediately; archive is the rollback path.
     status: text("status").$type<MemoryStatus>().notNull().default("approved"),
     sessionId: uuid("session_id").references(() => agentChatSessions.id, { onDelete: "set null" }),
@@ -785,7 +772,6 @@ export const agentMemories = pgTable(
     protectedBy: text("protected_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     tombstoned: boolean("tombstoned").notNull().default(false),
     tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
@@ -806,27 +792,29 @@ export const agentMemories = pgTable(
     ),
     check("agent_memories_scope_type_check", sql`${t.scopeType} in ('agent', 'session', 'task')`),
     check(
-      "agent_memories_source_check",
-      sql`${t.source} in ('user', 'review', 'curated', 'consolidated')`,
-    ),
-    check(
       "agent_memories_status_check",
       sql`${t.status} in ('creating', 'approved', 'archived')`,
     ),
-    check("agent_memories_content_check", sql`char_length(${t.content}) between 1 and 2000`),
-    check("agent_memories_confidence_check", sql`${t.confidence} between 0 and 100`),
+    check(
+      "agent_memories_current_version_shape_check",
+      sql`(${t.status} = 'creating' and ${t.currentVersionId} is null) or (${t.status} <> 'creating' and ${t.currentVersionId} is not null)`,
+    ),
     check(
       "agent_memories_tombstone_shape_check",
       sql`(${t.tombstoned} = true and ${t.tombstonedAt} is not null) or (${t.tombstoned} = false and ${t.tombstonedAt} is null)`,
     ),
     index("agent_memories_prompt_idx")
       .on(t.agentId, t.kind, t.createdAt)
-      .where(sql`${t.status} = 'approved' and ${t.deletedAt} is null`),
+      .where(
+        sql`${t.status} = 'approved' and ${t.revokedAt} is null and ${t.tombstoned} = false and ${t.injectionBlocked} = false`,
+      ),
     // Dedupe by durable identity. The index (not app logic) is what prevents
     // duplicate durable facts and makes auto-apply races safe (§4.4).
     uniqueIndex("agent_memories_claim_hash_uniq")
       .on(t.agentId, t.kind, t.claimHash)
-      .where(sql`${t.deletedAt} is null and ${t.claimHash} is not null`),
+      .where(
+        sql`${t.claimHash} is not null and ${t.status} <> 'creating' and ${t.revokedAt} is null and ${t.tombstoned} = false`,
+      ),
     index("agent_memories_active_current_idx")
       .on(t.agentId, t.scopeType, t.scopeId, t.memoryType, t.kind, t.status)
       .where(
@@ -1066,7 +1054,9 @@ export const agentGroundedObservations = pgTable(
     originKind: text("origin_kind").$type<GroundedObservationOrigin>().notNull(),
     sourceMessageId: text("source_message_id"),
     sourceMemoryId: uuid("source_memory_id").references(() => agentMemories.id),
-    traceEventId: uuid("trace_event_id").references(() => agentTraceEvents.id),
+    traceEventId: uuid("trace_event_id")
+      .notNull()
+      .references(() => agentTraceEvents.id),
     content: text("content").notNull(),
     contentHash: text("content_hash").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1289,7 +1279,7 @@ export const agentConsolidationCandidates = pgTable(
     sourceCandidateId: uuid("source_candidate_id").references(() => agentMemoryCandidates.id),
     memoryType: text("memory_type").$type<MemoryType>(),
     scoreBps: integer("score_bps").notNull(),
-    gateResults: jsonb("gate_results").$type<AdmissionMetadata["gates"]>(),
+    gateResults: jsonb("gate_results").$type<AdmissionMetadataV1["gates"]>(),
     passed: boolean("passed").notNull(),
     proposalId: uuid("proposal_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

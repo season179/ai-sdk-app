@@ -15,6 +15,12 @@ import type { ScheduledTask } from "@/lib/scheduler/tasks";
  * required so strict structured-output providers accept the schema —
  * nextDelaySeconds is ignored when continue is false.
  */
+export type InstructionWorkerAction =
+  | "next_round_scheduled"
+  | "task_completed"
+  | "task_cancelled"
+  | "chain_halted";
+
 export type InstructionVerdict = {
   statusUpdate: string;
   declaredRationale: string;
@@ -23,6 +29,16 @@ export type InstructionVerdict = {
   continue: boolean;
   nextDelaySeconds: number;
 };
+
+export function classifyInstructionVerdictAction(
+  scheduleType: "once" | "cron",
+  payload: InstructionTaskPayload,
+  verdict: InstructionVerdict,
+): Exclude<InstructionWorkerAction, "chain_halted"> {
+  const shouldContinue = verdict.continue && payload.round < payload.maxRounds;
+  if (shouldContinue) return "next_round_scheduled";
+  return scheduleType === "once" ? "task_completed" : "task_cancelled";
+}
 
 export class MissingInstructionRunnerEnvError extends Error {
   constructor(readonly variableName: "OPENROUTER_API_KEY" | "OPENROUTER_DEFAULT_MODEL") {

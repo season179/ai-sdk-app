@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
-  type AdmissionMetadata,
+  type AdmissionMetadataV1,
   type AdmissionMetadataV2,
   agentConsolidationCandidates,
   agentConsolidationRuns,
@@ -230,9 +230,9 @@ export async function runConsolidation(
       claimKey: string;
       snippet: string;
       scoreBps: number;
-      gates: AdmissionMetadata["gates"];
+      gates: AdmissionMetadataV1["gates"];
       passed: boolean;
-      metadata: AdmissionMetadata;
+      metadata: AdmissionMetadataV1;
     };
     const scored: ScoredCandidate[] = [];
 
@@ -252,7 +252,7 @@ export async function runConsolidation(
       const result = scoreAndGate(claimSignal, cfg, now);
       await recordScore(signal.id, result.breakdown.totalBps, signal.maxScoreBps, db);
 
-      const metadata: AdmissionMetadata = {
+      const metadata: AdmissionMetadataV1 = {
         version: 1,
         origin: "consolidation",
         claimKey: signal.claimKey,

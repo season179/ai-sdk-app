@@ -45,7 +45,7 @@ export async function applyReviewProposal(id: string): Promise<ReviewProposal> {
       // "applying" state; side effects and the status write share this transaction.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${id}))`);
 
-      const proposal = await requireProposal(id, undefined, tx);
+      const proposal = await requireProposal(id, null, tx);
 
       if (proposal.status !== "pending") {
         throw new SelfImprovementInputError("Only pending proposals can be applied.");
@@ -109,7 +109,7 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
       if (await getMemoryByReviewProposalId(proposal.id, proposal.agentId, db)) {
         return;
       }
-      await resolveProposalEvidence(proposal, payload, db);
+      const sourceEventIds = await resolveProposalEvidence(proposal, payload, db);
 
       // Derive the memory source from the proposal and guard the privileged
       // `consolidated` source (§1.1): only consolidation proposals may mint a
@@ -128,7 +128,10 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
       // Consolidation proposals carry a claim_hash in admission_metadata; stamp
       // it on the memory so the agent_memories_claim_hash_uniq partial unique
       // index makes auto-apply races safe (§4.4).
-      const claimHash = proposal.admissionMetadata?.claimHash ?? null;
+      const claimHash =
+        proposal.admissionMetadata?.version === 1
+          ? (proposal.admissionMetadata.claimHash ?? null)
+          : null;
 
       try {
         // Isolate a uniqueness race in a savepoint. PostgreSQL marks the
@@ -145,6 +148,17 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
               sessionId: proposal.sessionId,
               reviewProposalId: proposal.id,
               claimHash,
+              memoryType: payload.memoryType,
+              canonicalKey:
+                typeof payload.canonicalKey === "string" ? payload.canonicalKey : null,
+              validFrom: payload.validFrom,
+              validTo: payload.validTo,
+              sourceEventIds,
+              authority: memorySource === "consolidated" ? "consolidated" : "reviewed",
+              extractorId:
+                proposal.admissionMetadata?.version === 2 ? "turn-review-v1" : null,
+              modelId: proposal.reviewerModel,
+              promptHash: null,
             },
             savepoint,
           ),
@@ -173,22 +187,36 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
       return;
     }
 
-    case "memory_edit":
+    case "memory_edit": {
+      const sourceEventIds = await resolveProposalEvidence(proposal, payload, db);
       await updateMemory(
         readRequiredString(payload, "memoryId"),
         {
           kind: payload.memoryKind ?? payload.kind,
           content: payload.content,
           confidence: payload.confidence,
+          memoryType: payload.memoryType,
+          validFrom: payload.validFrom,
+          validTo: payload.validTo,
+          sourceEventIds,
+          authority: "reviewed",
         },
         proposal.agentId,
         db,
       );
       return;
+    }
 
-    case "memory_archive":
-      await archiveMemory(readRequiredString(payload, "memoryId"), proposal.agentId, db);
+    case "memory_archive": {
+      const sourceEventIds = await resolveProposalEvidence(proposal, payload, db);
+      await archiveMemory(
+        readRequiredString(payload, "memoryId"),
+        proposal.agentId,
+        db,
+        sourceEventIds,
+      );
       return;
+    }
 
     case "skill_create":
       await createSkill(
@@ -263,7 +291,10 @@ async function resolveProposalEvidence(
     return rows.map((row) => row.eventId);
   }
 
-  const observationIds = proposal.admissionMetadata?.groundedObservationIds ?? [];
+  const observationIds =
+    proposal.admissionMetadata?.version === 1
+      ? (proposal.admissionMetadata.groundedObservationIds ?? [])
+      : [];
   if (observationIds.length > 0) {
     const observations = await db
       .select({ traceEventId: agentGroundedObservations.traceEventId })

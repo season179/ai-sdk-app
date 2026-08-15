@@ -97,13 +97,15 @@ export async function listReviewProposals({
 
 export async function getReviewProposalById(
   id: string,
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId: string | null = DEFAULT_AGENT_ID,
   db: AppDbClient = getDb(),
 ): Promise<ReviewProposal | null> {
+  const conditions = [eq(agentReviewProposals.id, id)];
+  if (agentId) conditions.push(eq(agentReviewProposals.agentId, agentId));
   const rows = await db
     .select()
     .from(agentReviewProposals)
-    .where(and(eq(agentReviewProposals.id, id), eq(agentReviewProposals.agentId, agentId)));
+    .where(and(...conditions));
 
   return rows[0] ? mapProposalRow(rows[0]) : null;
 }
@@ -216,7 +218,7 @@ export async function markProposalFailed(
 
 export async function requireProposal(
   id: string,
-  agentId: string = DEFAULT_AGENT_ID,
+  agentId: string | null = DEFAULT_AGENT_ID,
   db: AppDbClient = getDb(),
 ): Promise<ReviewProposal> {
   const proposal = await getReviewProposalById(id, agentId, db);

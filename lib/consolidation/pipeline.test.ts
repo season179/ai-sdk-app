@@ -8,6 +8,7 @@ import {
   agentGroundedObservations,
   agentMemories,
   agentMemoryEvents,
+  agentMemoryVersions,
   agentRecallSignals,
 } from "@/db/schema";
 import { claimHash } from "@/lib/consolidation/normalize";
@@ -143,12 +144,13 @@ describeIntegration("consolidation pipeline (integration)", () => {
     await applyReviewProposal(proposal.id);
 
     const rows = await db
-      .select()
+      .select({ root: agentMemories, version: agentMemoryVersions })
       .from(agentMemories)
+      .innerJoin(agentMemoryVersions, eq(agentMemoryVersions.id, agentMemories.currentVersionId))
       .where(eq(agentMemories.reviewProposalId, proposal.id));
     expect(rows.length).toBe(1);
-    expect(rows[0].source).toBe("consolidated");
-    expect(rows[0].claimHash).toBe(claimHash(content));
+    expect(rows[0].version.source).toBe("consolidated");
+    expect(rows[0].root.claimHash).toBe(claimHash(content));
 
     // The consolidated memory should appear in the events timeline as 'applied'.
     const events = await db
