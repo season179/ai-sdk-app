@@ -1,0 +1,2 @@
+ALTER TABLE "agent_chat_sessions" ADD COLUMN "branch_revision" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "agent_chat_sessions" ADD CONSTRAINT "agent_chat_sessions_branch_revision_check" CHECK ("agent_chat_sessions"."branch_revision" >= 0);

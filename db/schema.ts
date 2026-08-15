@@ -321,6 +321,9 @@ export const agentChatSessions = pgTable(
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // Optimistic branch generation. Regenerate truncation increments it; a
+    // stream may append its assistant only against the generation it read.
+    branchRevision: integer("branch_revision").notNull().default(0),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     deletedBy: uuid("deleted_by"),
   },
@@ -330,6 +333,7 @@ export const agentChatSessions = pgTable(
       sql`${t.title} is null or char_length(${t.title}) between 1 and 200`,
     ),
     check("agent_chat_sessions_origin_check", sql`${t.origin} in ('chat', 'scheduled_task')`),
+    check("agent_chat_sessions_branch_revision_check", sql`${t.branchRevision} >= 0`),
     // One dedicated session per task; partial so the many origin='chat' rows
     // (taskId null) don't collide.
     uniqueIndex("agent_chat_sessions_task_id_uniq")

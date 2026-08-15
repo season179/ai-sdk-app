@@ -12,12 +12,13 @@ import {
 import { notifySessionAppended } from "@/lib/chat/notify";
 import {
   appendSessionMessages,
+  ChatBranchConflictError,
+  ChatMessagePartsMismatchError,
   getChatSessionForRun,
-  getMessageOrdinal,
   materializeMessageApiParts,
   sessionNeedsTitle,
   setSessionTitleIfUnset,
-  truncateConversationAfter,
+  truncateConversationAfterMessage,
 } from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
@@ -167,6 +168,7 @@ async function buildRunMessages({
   apiPartMessageIds: string[];
   targetMessageId: string | null;
   userCaptured: boolean;
+  branchRevision: number | null;
 }> {
   if (!sessionId) {
     const messages = incomingMessage ? [incomingMessage] : [];
@@ -176,45 +178,36 @@ async function buildRunMessages({
       apiPartMessageIds: [],
       targetMessageId: incomingMessage?.id ?? null,
       userCaptured: false,
+      branchRevision: null,
     };
   }
 
   if (trigger === "regenerate-message") {
-    if (incomingMessage) {
-      const forkOrdinal = await getMessageOrdinal(sessionId, incomingMessage.id);
-      if (forkOrdinal != null) {
-        await truncateConversationAfter(sessionId, forkOrdinal, { preserveScheduled: true });
-      }
+    if (!incomingMessage) {
+      throw new ChatBranchConflictError("Regenerate requires a current fork message.");
     }
-
-    const history = await getChatSessionForRun(sessionId);
-    const cleanMessages = history?.cleanMessages.length
-      ? history.cleanMessages
-      : incomingMessage
-        ? [incomingMessage]
-        : [];
-    const modelMessages = history?.modelMessages.length
-      ? history.modelMessages
-      : incomingMessage
-        ? [incomingMessage]
-        : [];
+    const branchRevision = await truncateConversationAfterMessage(sessionId, incomingMessage.id, {
+      preserveScheduled: true,
+    });
+    const history = await getChatSessionForRun(sessionId, DEFAULT_AGENT_ID, branchRevision);
+    if (!history?.cleanMessages.some((message) => message.id === incomingMessage.id)) {
+      throw new ChatBranchConflictError("The regenerate target is no longer available.");
+    }
     return {
-      cleanMessages,
-      modelMessages,
-      apiPartMessageIds: history?.apiPartMessageIds ?? [],
-      targetMessageId: incomingMessage?.id ?? null,
+      cleanMessages: history.cleanMessages,
+      modelMessages: history.modelMessages,
+      apiPartMessageIds: history.apiPartMessageIds,
+      targetMessageId: incomingMessage.id,
       userCaptured: false,
+      branchRevision,
     };
   }
 
-  const prior = await getChatSessionForRun(sessionId);
-  const priorClean = prior?.cleanMessages ?? [];
-  const priorModel = prior?.modelMessages ?? [];
-
   if (incomingMessage) {
     const captureEnabled = Boolean(traceContext && isMemoryWriteEnabled());
-    // Persist and journal the raw incoming parts before any model-only projection.
-    const capture = await appendSessionMessages(sessionId, [incomingMessage], {
+    // The insert winner is authoritative. A duplicate request never contributes
+    // request-local parts to run history, projection, trace, or observations.
+    const append = await appendSessionMessages(sessionId, [incomingMessage], {
       createIfMissing: true,
       ...(captureEnabled && traceContext
         ? {
@@ -225,21 +218,28 @@ async function buildRunMessages({
           }
         : {}),
     });
+    const history = await getChatSessionForRun(sessionId, DEFAULT_AGENT_ID, append.branchRevision);
+    if (!history?.cleanMessages.some((message) => message.id === incomingMessage.id)) {
+      throw new ChatBranchConflictError("The submitted message is no longer on this branch.");
+    }
     return {
-      cleanMessages: [...priorClean, incomingMessage],
-      modelMessages: [...priorModel, incomingMessage],
-      apiPartMessageIds: prior?.apiPartMessageIds ?? [],
+      cleanMessages: history.cleanMessages,
+      modelMessages: history.modelMessages,
+      apiPartMessageIds: history.apiPartMessageIds,
       targetMessageId: incomingMessage.id,
-      userCaptured: capture.traceCaptured,
+      userCaptured: append.traceCaptured,
+      branchRevision: append.branchRevision,
     };
   }
 
+  const history = await getChatSessionForRun(sessionId);
   return {
-    cleanMessages: priorClean,
-    modelMessages: priorModel,
-    apiPartMessageIds: prior?.apiPartMessageIds ?? [],
+    cleanMessages: history?.cleanMessages ?? [],
+    modelMessages: history?.modelMessages ?? [],
+    apiPartMessageIds: history?.apiPartMessageIds ?? [],
     targetMessageId: null,
     userCaptured: false,
+    branchRevision: history?.branchRevision ?? null,
   };
 }
 
@@ -358,41 +358,62 @@ export async function POST(req: Request) {
     // current/fork user message; historical messages are never recomputed.
     if (target && run.targetMessageId && !hasSidecar) {
       const asOf = new Date();
-      const targetText = messageText(target);
-      let projectedTarget = await injectUserActivatedSkill(target);
-      let memoryBlock = "";
-      if (isSelfImprovementEnabled() && shouldRecall(targetText)) {
-        const recalled = await recallForTurn({
-          agentId: DEFAULT_AGENT_ID,
-          sessionId: sessionId ?? undefined,
-          query: targetText,
-          asOf,
+      const project = async (cleanTarget: ChatUIMessage) => {
+        const targetText = messageText(cleanTarget);
+        const projected = await injectUserActivatedSkill(cleanTarget);
+        let memoryBlock = "";
+        if (isSelfImprovementEnabled() && shouldRecall(targetText)) {
+          const recalled = await recallForTurn({
+            agentId: DEFAULT_AGENT_ID,
+            sessionId: sessionId ?? undefined,
+            query: targetText,
+            asOf,
+          });
+          recallStatus = recalled.status;
+          recallCount = recalled.items.length;
+          memoryBlock = recalled.renderedBlock;
+        }
+        return appendTurnProjection(projected, {
+          utc: asOf.toISOString(),
+          skillCatalogBlock,
+          memoryBlock,
         });
-        recallStatus = recalled.status;
-        recallCount = recalled.items.length;
-        memoryBlock = recalled.renderedBlock;
-      }
-      projectedTarget = appendTurnProjection(projectedTarget, {
-        utc: asOf.toISOString(),
-        skillCatalogBlock,
-        memoryBlock,
-      });
+      };
+      let cleanTarget = target;
+      let projectedTarget = await project(cleanTarget);
 
       if (sessionId) {
         try {
-          const winningParts = await materializeMessageApiParts(
-            sessionId,
-            run.targetMessageId,
-            projectedTarget.parts,
-          );
+          let winningParts: ChatUIMessage["parts"];
+          try {
+            winningParts = await materializeMessageApiParts(
+              sessionId,
+              run.targetMessageId,
+              cleanTarget.parts,
+              projectedTarget.parts,
+              run.branchRevision ?? undefined,
+            );
+          } catch (error) {
+            if (!(error instanceof ChatMessagePartsMismatchError)) throw error;
+            cleanTarget = { ...cleanTarget, parts: error.winningParts };
+            projectedTarget = await project(cleanTarget);
+            winningParts = await materializeMessageApiParts(
+              sessionId,
+              run.targetMessageId,
+              cleanTarget.parts,
+              projectedTarget.parts,
+              run.branchRevision ?? undefined,
+            );
+          }
           uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, winningParts);
         } catch (error) {
-          // Never send an enriched form that cannot be replayed. The clean turn
-          // was already persisted and remains the fail-open model input.
+          // A branch miss is a conflict, never permission to stream from stale
+          // request-local parts. Other DB failures retain the clean fail-open path.
+          if (error instanceof ChatBranchConflictError) throw error;
           console.error("Materializing model-facing message parts failed", error);
           recallStatus = "degraded";
           recallCount = 0;
-          uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, target.parts);
+          uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, cleanTarget.parts);
         }
       } else {
         uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, projectedTarget.parts);
@@ -496,6 +517,7 @@ export async function POST(req: Request) {
         try {
           const terminalEvent = buildTerminalEvent(traceContext, "completed", { finishReason });
           await appendSessionMessages(sessionId, [responseMessage], {
+            expectedBranchRevision: run.branchRevision ?? undefined,
             traceCapture: {
               events: [buildAssistantMessageEvent(traceContext, responseMessage), terminalEvent],
             },
@@ -566,6 +588,9 @@ export async function POST(req: Request) {
           error: error instanceof Error ? error.message : String(error),
         }),
       ]);
+    }
+    if (error instanceof ChatBranchConflictError) {
+      return Response.json({ error: error.message, code: "chat_branch_conflict" }, { status: 409 });
     }
     return Response.json(
       { error: "Chat request failed before the stream could start." },

@@ -7,10 +7,12 @@ import { getDb } from "@/db";
 import { agentChatSessions, agentGroundedObservations, agentTraceEvents } from "@/db/schema";
 import {
   appendSessionMessages,
+  ChatBranchConflictError,
   getChatSession,
   getChatSessionForRun,
   getSessionMessagesAfter,
   materializeMessageApiParts,
+  truncateConversationAfterMessage,
 } from "@/lib/chat/sessions";
 import { buildUserMessageEvent } from "@/lib/memory/capture";
 import { closePool, getPool } from "@/lib/scheduler/db";
@@ -67,8 +69,8 @@ integration("chat api_parts replay boundary", () => {
 
   it("materializes first-writer-wins under concurrency", async () => {
     const [first, second] = await Promise.all([
-      materializeMessageApiParts(sessionId, messageId, projectedA),
-      materializeMessageApiParts(sessionId, messageId, projectedB),
+      materializeMessageApiParts(sessionId, messageId, cleanParts, projectedA),
+      materializeMessageApiParts(sessionId, messageId, cleanParts, projectedB),
     ]);
     expect(first).toEqual(second);
     expect([projectedA, projectedB]).toContainEqual(first);
@@ -88,12 +90,106 @@ integration("chat api_parts replay boundary", () => {
 
   it("replays the exact winning sidecar on later materialization/regenerate", async () => {
     const before = await getChatSessionForRun(sessionId, agentId);
-    const replayed = await materializeMessageApiParts(sessionId, messageId, [
+    const replayed = await materializeMessageApiParts(sessionId, messageId, cleanParts, [
       { type: "text", text: "different recomputation" },
     ]);
     const after = await getChatSessionForRun(sessionId, agentId);
     expect(replayed).toEqual(before?.modelMessages[0]?.parts);
     expect(after?.modelMessages[0]?.parts).toEqual(before?.modelMessages[0]?.parts);
+  });
+
+  it("binds concurrent duplicate submits and their sidecar to the clean winner", async () => {
+    const duplicateSessionId = randomUUID();
+    const duplicateMessageId = `user-${randomUUID()}`;
+    const bodyA = [{ type: "text" as const, text: "winner candidate A" }];
+    const bodyB = [{ type: "text" as const, text: "loser candidate B" }];
+    try {
+      const [appendA, appendB] = await Promise.all([
+        appendSessionMessages(
+          duplicateSessionId,
+          [{ id: duplicateMessageId, role: "user", parts: bodyA }],
+          { agentId, createIfMissing: true },
+        ),
+        appendSessionMessages(
+          duplicateSessionId,
+          [{ id: duplicateMessageId, role: "user", parts: bodyB }],
+          { agentId, createIfMissing: true },
+        ),
+      ]);
+      const persistedA = appendA.persistedMessages[0]?.parts;
+      const persistedB = appendB.persistedMessages[0]?.parts;
+      expect(persistedA).toEqual(persistedB);
+      expect([bodyA, bodyB]).toContainEqual(persistedA);
+      const projected = [
+        {
+          type: "text" as const,
+          text: `${text(persistedA)}\n\n<memory_context>bound winner</memory_context>`,
+        },
+      ];
+      await Promise.all([
+        materializeMessageApiParts(
+          duplicateSessionId,
+          duplicateMessageId,
+          persistedA ?? [],
+          projected,
+          appendA.branchRevision,
+        ),
+        materializeMessageApiParts(
+          duplicateSessionId,
+          duplicateMessageId,
+          persistedB ?? [],
+          projected,
+          appendB.branchRevision,
+        ),
+      ]);
+      const run = await getChatSessionForRun(duplicateSessionId, agentId);
+      expect(run?.cleanMessages).toHaveLength(1);
+      expect(run?.cleanMessages[0]?.parts).toEqual(persistedA);
+      expect(text(run?.modelMessages[0]?.parts)).toContain(text(persistedA));
+      expect(text(run?.modelMessages[0]?.parts)).not.toContain(
+        text(persistedA) === "winner candidate A" ? "loser candidate B" : "winner candidate A",
+      );
+    } finally {
+      await getDb().delete(agentChatSessions).where(eq(agentChatSessions.id, duplicateSessionId));
+    }
+  });
+
+  it("rejects an assistant append after regenerate advances and truncates its branch", async () => {
+    const branchSessionId = randomUUID();
+    const forkId = `user-${randomUUID()}`;
+    const staleId = `user-${randomUUID()}`;
+    try {
+      await appendSessionMessages(
+        branchSessionId,
+        [{ id: forkId, role: "user", parts: [{ type: "text", text: "fork" }] }],
+        { agentId, createIfMissing: true },
+      );
+      const stale = await appendSessionMessages(branchSessionId, [
+        { id: staleId, role: "user", parts: [{ type: "text", text: "stale branch" }] },
+      ]);
+      const revised = await truncateConversationAfterMessage(branchSessionId, forkId);
+      expect(revised).toBe(stale.branchRevision + 1);
+      await expect(
+        appendSessionMessages(
+          branchSessionId,
+          [{ id: "assistant-stale", role: "assistant", parts: [{ type: "text", text: "orphan" }] }],
+          { expectedBranchRevision: stale.branchRevision },
+        ),
+      ).rejects.toBeInstanceOf(ChatBranchConflictError);
+      await expect(
+        materializeMessageApiParts(
+          branchSessionId,
+          staleId,
+          [{ type: "text", text: "stale branch" }],
+          [{ type: "text", text: "stale projected" }],
+          stale.branchRevision,
+        ),
+      ).rejects.toBeInstanceOf(ChatBranchConflictError);
+      const run = await getChatSessionForRun(branchSessionId, agentId);
+      expect(run?.cleanMessages.map((message) => message.id)).toEqual([forkId]);
+    } finally {
+      await getDb().delete(agentChatSessions).where(eq(agentChatSessions.id, branchSessionId));
+    }
   });
 
   it("journals and grounds only clean parts, never the recall projection", async () => {

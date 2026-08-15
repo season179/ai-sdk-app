@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import { safeValidateUIMessages, type UIMessage } from "ai";
-import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import { agentChatMessages, agentChatSessions } from "@/db/schema";
 import { ingestUserTurn } from "@/lib/consolidation/observations";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
+import { canonicalJson } from "@/lib/memory/redaction";
 import { appendTraceEvents, type TraceEventInput } from "@/lib/memory/trace";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
@@ -40,6 +41,7 @@ export type ChatSessionForRun = {
   cleanMessages: ChatUIMessage[];
   modelMessages: ChatUIMessage[];
   apiPartMessageIds: string[];
+  branchRevision: number;
 };
 
 export class ChatSessionInputError extends Error {
@@ -53,6 +55,20 @@ export class ChatSessionNotFoundError extends ChatSessionInputError {
   constructor(id: string) {
     super(`No chat session with id '${id}' was found.`);
     this.name = "ChatSessionNotFoundError";
+  }
+}
+
+export class ChatBranchConflictError extends ChatSessionInputError {
+  constructor(message = "The conversation changed while this turn was running. Retry the turn.") {
+    super(message);
+    this.name = "ChatBranchConflictError";
+  }
+}
+
+export class ChatMessagePartsMismatchError extends ChatBranchConflictError {
+  constructor(readonly winningParts: ChatUIMessage["parts"]) {
+    super("The persisted message body differs from the projection source. Recompute and retry.");
+    this.name = "ChatMessagePartsMismatchError";
   }
 }
 
@@ -137,67 +153,97 @@ export async function getChatSession(
 export async function getChatSessionForRun(
   id: string,
   agentId: string = DEFAULT_AGENT_ID,
+  expectedBranchRevision?: number,
 ): Promise<ChatSessionForRun | null> {
-  const db = getDb();
-  const [session] = await db
-    .select()
-    .from(agentChatSessions)
-    .where(
-      and(
-        eq(agentChatSessions.id, id),
-        eq(agentChatSessions.agentId, agentId),
-        isNull(agentChatSessions.deletedAt),
-      ),
-    );
-  if (!session) return null;
+  return getDb().transaction(async (tx) => {
+    const [session] = await tx
+      .select()
+      .from(agentChatSessions)
+      .where(
+        and(
+          eq(agentChatSessions.id, id),
+          eq(agentChatSessions.agentId, agentId),
+          isNull(agentChatSessions.deletedAt),
+        ),
+      )
+      .for("share");
+    if (!session) return null;
+    if (expectedBranchRevision !== undefined && session.branchRevision !== expectedBranchRevision) {
+      throw new ChatBranchConflictError();
+    }
 
-  const rows = await db
-    .select()
-    .from(agentChatMessages)
-    .where(eq(agentChatMessages.sessionId, id))
-    .orderBy(agentChatMessages.ordinal);
-  const cleanMessages = rows.map((row) => mapMessage(row, row.parts));
-  const modelMessages = rows.map((row) => mapMessage(row, row.apiParts ?? row.parts));
-  const validation = await safeValidateUIMessages<ChatUIMessage>({ messages: modelMessages });
-  if (!validation.success) {
-    console.error(`Model messages for chat session '${id}' failed validation`, validation.error);
-  }
+    const rows = await tx
+      .select()
+      .from(agentChatMessages)
+      .where(eq(agentChatMessages.sessionId, id))
+      .orderBy(agentChatMessages.ordinal);
+    const cleanMessages = rows.map((row) => mapMessage(row, row.parts));
+    const modelMessages = rows.map((row) => mapMessage(row, row.apiParts ?? row.parts));
+    const validation = await safeValidateUIMessages<ChatUIMessage>({ messages: modelMessages });
+    if (!validation.success) {
+      console.error(`Model messages for chat session '${id}' failed validation`, validation.error);
+    }
 
-  return {
-    session: mapSession(session),
-    cleanMessages,
-    modelMessages: validation.success ? validation.data : modelMessages,
-    apiPartMessageIds: rows.filter((row) => row.apiParts !== null).map((row) => row.id),
-  };
+    return {
+      session: mapSession(session),
+      cleanMessages,
+      modelMessages: validation.success ? validation.data : modelMessages,
+      apiPartMessageIds: rows.filter((row) => row.apiParts !== null).map((row) => row.id),
+      branchRevision: session.branchRevision,
+    };
+  });
 }
 
-/** First-writer-wins sidecar materialization, followed by a winner read. */
+/** First-writer-wins sidecar, bound to both the clean winner and branch generation. */
 export async function materializeMessageApiParts(
   sessionId: string,
   messageId: string,
-  parts: ChatUIMessage["parts"],
+  expectedCleanParts: ChatUIMessage["parts"],
+  projectedParts: ChatUIMessage["parts"],
+  expectedBranchRevision?: number,
 ): Promise<ChatUIMessage["parts"]> {
-  const db = getDb();
-  await db
-    .update(agentChatMessages)
-    .set({ apiParts: parts })
-    .where(
-      and(
-        eq(agentChatMessages.sessionId, sessionId),
-        eq(agentChatMessages.id, messageId),
-        isNull(agentChatMessages.apiParts),
-      ),
-    );
-  const [winner] = await db
-    .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
-    .from(agentChatMessages)
-    .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
-  if (!winner) {
-    throw new ChatSessionInputError(
-      `Message '${messageId}' does not exist in chat session '${sessionId}'.`,
-    );
-  }
-  return winner.apiParts ?? winner.parts;
+  return getDb().transaction(async (tx) => {
+    const [session] = await tx
+      .select({ branchRevision: agentChatSessions.branchRevision })
+      .from(agentChatSessions)
+      .where(and(eq(agentChatSessions.id, sessionId), isNull(agentChatSessions.deletedAt)))
+      .for("update");
+    if (!session) throw new ChatBranchConflictError("The chat session no longer exists.");
+    if (expectedBranchRevision !== undefined && session.branchRevision !== expectedBranchRevision) {
+      throw new ChatBranchConflictError();
+    }
+
+    const [winner] = await tx
+      .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
+      .from(agentChatMessages)
+      .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
+    if (!winner) {
+      throw new ChatBranchConflictError(
+        `Message '${messageId}' is no longer on the current conversation branch.`,
+      );
+    }
+    if (canonicalJson(winner.parts) !== canonicalJson(expectedCleanParts)) {
+      throw new ChatMessagePartsMismatchError(winner.parts);
+    }
+
+    if (winner.apiParts === null) {
+      await tx
+        .update(agentChatMessages)
+        .set({ apiParts: projectedParts })
+        .where(
+          and(
+            eq(agentChatMessages.sessionId, sessionId),
+            eq(agentChatMessages.id, messageId),
+            isNull(agentChatMessages.apiParts),
+          ),
+        );
+    }
+    const [materialized] = await tx
+      .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
+      .from(agentChatMessages)
+      .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
+    return materialized?.apiParts ?? materialized?.parts ?? winner.parts;
+  });
 }
 
 /**
@@ -217,18 +263,27 @@ export async function appendSessionMessages(
   opts: {
     agentId?: string;
     createIfMissing?: boolean;
+    expectedBranchRevision?: number;
     traceCapture?: {
       events: TraceEventInput[];
       groundedUserMessages?: ChatUIMessage[];
     };
   } = {},
-): Promise<{ traceCaptured: boolean }> {
+): Promise<{
+  traceCaptured: boolean;
+  persistedMessages: ChatUIMessage[];
+  insertedMessageIds: string[];
+  branchRevision: number;
+}> {
   if (messages.length === 0) {
-    return { traceCaptured: false };
+    return {
+      traceCaptured: false,
+      persistedMessages: [],
+      insertedMessageIds: [],
+      branchRevision: 0,
+    };
   }
 
-  // The composite PK (sessionId, id) would make the bulk insert throw on a
-  // duplicate id within this batch, so reject it up front with a typed error.
   const uniqueIds = new Set(messages.map((message) => message.id));
   if (uniqueIds.size !== messages.length) {
     throw new ChatSessionInputError("Chat messages must have unique ids within a batch.");
@@ -236,15 +291,7 @@ export async function appendSessionMessages(
 
   return getDb().transaction(async (tx) => {
     let traceCaptured = false;
-    const existing = await tx
-      .select({ deletedAt: agentChatSessions.deletedAt })
-      .from(agentChatSessions)
-      .where(eq(agentChatSessions.id, sessionId));
-
-    if (existing.length === 0) {
-      if (!opts.createIfMissing) {
-        throw new ChatSessionNotFoundError(sessionId);
-      }
+    if (opts.createIfMissing) {
       await tx
         .insert(agentChatSessions)
         .values({
@@ -253,13 +300,29 @@ export async function appendSessionMessages(
           lastMessageAt: sql`now()`,
         })
         .onConflictDoNothing();
-    } else if (existing[0]?.deletedAt) {
+    }
+    const [session] = await tx
+      .select({
+        deletedAt: agentChatSessions.deletedAt,
+        branchRevision: agentChatSessions.branchRevision,
+      })
+      .from(agentChatSessions)
+      .where(eq(agentChatSessions.id, sessionId))
+      .for("update");
+    if (!session) throw new ChatSessionNotFoundError(sessionId);
+    if (session.deletedAt) {
       throw new ChatSessionInputError(
         `Chat session '${sessionId}' was deleted; refusing to append.`,
       );
     }
+    if (
+      opts.expectedBranchRevision !== undefined &&
+      session.branchRevision !== opts.expectedBranchRevision
+    ) {
+      throw new ChatBranchConflictError();
+    }
 
-    // Continue ordinals from the current max. -1 + 1 = 0 for an empty session.
+    // The session row lock serializes ordinal allocation and transcript mutation.
     const [{ nextOrdinal }] = await tx
       .select({
         nextOrdinal: sql<number>`coalesce(max(${agentChatMessages.ordinal}), -1) + 1`,
@@ -267,7 +330,7 @@ export async function appendSessionMessages(
       .from(agentChatMessages)
       .where(eq(agentChatMessages.sessionId, sessionId));
 
-    await tx
+    const inserted = await tx
       .insert(agentChatMessages)
       .values(
         messages.map((message, index) => ({
@@ -279,20 +342,29 @@ export async function appendSessionMessages(
           ordinal: Number(nextOrdinal) + index,
         })),
       )
-      .onConflictDoNothing();
+      .onConflictDoNothing()
+      .returning({ id: agentChatMessages.id });
+    const insertedIds = new Set(inserted.map((row) => row.id));
 
-    if (opts.traceCapture && isMemoryWriteEnabled()) {
+    // A losing duplicate request cannot journal or ground its request-local body.
+    if (opts.traceCapture && insertedIds.size > 0 && isMemoryWriteEnabled()) {
       try {
         await tx.transaction(async (savepoint) => {
           await savepoint.execute(sql`set local statement_timeout = '750ms'`);
-          const traceRows = await appendTraceEvents(opts.traceCapture?.events ?? [], savepoint);
+          const events = opts.traceCapture?.events.filter(
+            (event) => !event.sourceMessageId || insertedIds.has(event.sourceMessageId),
+          );
+          const traceRows = await appendTraceEvents(events ?? [], savepoint);
           const traceEventIds = new Map(
             traceRows.flatMap((row) =>
               row.sourceMessageId ? ([[row.sourceMessageId, row.id]] as const) : [],
             ),
           );
-          if (opts.traceCapture?.groundedUserMessages?.length) {
-            await ingestUserTurn(sessionId, opts.traceCapture.groundedUserMessages, {
+          const grounded = opts.traceCapture?.groundedUserMessages?.filter((message) =>
+            insertedIds.has(message.id),
+          );
+          if (grounded?.length) {
+            await ingestUserTurn(sessionId, grounded, {
               agentId: opts.agentId ?? DEFAULT_AGENT_ID,
               db: savepoint,
               traceEventIds,
@@ -306,11 +378,34 @@ export async function appendSessionMessages(
       }
     }
 
-    await tx
-      .update(agentChatSessions)
-      .set({ lastMessageAt: sql`now()`, updatedAt: sql`now()` })
-      .where(eq(agentChatSessions.id, sessionId));
-    return { traceCaptured };
+    if (insertedIds.size > 0) {
+      await tx
+        .update(agentChatSessions)
+        .set({ lastMessageAt: sql`now()`, updatedAt: sql`now()` })
+        .where(eq(agentChatSessions.id, sessionId));
+    }
+    const rows = await tx
+      .select()
+      .from(agentChatMessages)
+      .where(
+        and(
+          eq(agentChatMessages.sessionId, sessionId),
+          inArray(
+            agentChatMessages.id,
+            messages.map((message) => message.id),
+          ),
+        ),
+      );
+    const byId = new Map(rows.map((row) => [row.id, mapMessage(row, row.parts)]));
+    return {
+      traceCaptured,
+      persistedMessages: messages.flatMap((message) => {
+        const persisted = byId.get(message.id);
+        return persisted ? [persisted] : [];
+      }),
+      insertedMessageIds: [...insertedIds],
+      branchRevision: session.branchRevision,
+    };
   });
 }
 
@@ -329,7 +424,53 @@ export async function truncateConversationAfter(
   sessionId: string,
   ordinal: number,
   opts: { preserveScheduled?: boolean } = {},
-): Promise<void> {
+): Promise<number> {
+  return getDb().transaction(async (tx) => {
+    await lockLiveSession(tx, sessionId);
+    await deleteConversationAfter(tx, sessionId, ordinal, opts);
+    return incrementBranchRevision(tx, sessionId);
+  });
+}
+
+/** Atomically verifies the regenerate fork, truncates, and advances the branch. */
+export async function truncateConversationAfterMessage(
+  sessionId: string,
+  messageId: string,
+  opts: { preserveScheduled?: boolean } = {},
+): Promise<number> {
+  return getDb().transaction(async (tx) => {
+    await lockLiveSession(tx, sessionId);
+    const [target] = await tx
+      .select({ ordinal: agentChatMessages.ordinal })
+      .from(agentChatMessages)
+      .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
+    if (!target) {
+      throw new ChatBranchConflictError(
+        `Regenerate target '${messageId}' is no longer on the current conversation branch.`,
+      );
+    }
+    await deleteConversationAfter(tx, sessionId, target.ordinal, opts);
+    return incrementBranchRevision(tx, sessionId);
+  });
+}
+
+type SessionTransaction = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
+
+async function lockLiveSession(tx: SessionTransaction, sessionId: string) {
+  const [session] = await tx
+    .select({ deletedAt: agentChatSessions.deletedAt })
+    .from(agentChatSessions)
+    .where(eq(agentChatSessions.id, sessionId))
+    .for("update");
+  if (!session || session.deletedAt) throw new ChatBranchConflictError("The chat session is gone.");
+}
+
+async function deleteConversationAfter(
+  tx: SessionTransaction,
+  sessionId: string,
+  ordinal: number,
+  opts: { preserveScheduled?: boolean },
+) {
   const conds = [
     eq(agentChatMessages.sessionId, sessionId),
     gt(agentChatMessages.ordinal, ordinal),
@@ -337,9 +478,20 @@ export async function truncateConversationAfter(
   if (opts.preserveScheduled) {
     conds.push(sql`(${agentChatMessages.metadata} ->> 'origin') is distinct from 'scheduled'`);
   }
-  await getDb()
-    .delete(agentChatMessages)
-    .where(and(...conds));
+  await tx.delete(agentChatMessages).where(and(...conds));
+}
+
+async function incrementBranchRevision(tx: SessionTransaction, sessionId: string) {
+  const [updated] = await tx
+    .update(agentChatSessions)
+    .set({
+      branchRevision: sql`${agentChatSessions.branchRevision} + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(eq(agentChatSessions.id, sessionId))
+    .returning({ branchRevision: agentChatSessions.branchRevision });
+  if (!updated) throw new ChatBranchConflictError("The chat session is gone.");
+  return updated.branchRevision;
 }
 
 /** A stored turn paired with its ordinal — the unit the SSE listener pushes. */
