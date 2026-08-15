@@ -14,6 +14,40 @@ export type RecallDependencies = {
   logger?: (event: Record<string, unknown>) => void;
 };
 
+export async function searchRankedRecall(
+  input: Pick<RecallRequest, "agentId" | "sessionId" | "query" | "kind"> & {
+    limit?: number;
+    asOf?: Date;
+  },
+  dependencies: Pick<RecallDependencies, "repository" | "clock" | "deadlineMs"> = {},
+) {
+  const repository = dependencies.repository ?? postgresRecallRepository;
+  const clock = dependencies.clock ?? (() => new Date());
+  const limit = Math.max(1, Math.min(20, Math.trunc(input.limit ?? 10)));
+  const result = await withDeadline(
+    repository.recall({
+      agentId: input.agentId,
+      sessionId: input.sessionId,
+      query: input.query,
+      kind: input.kind,
+      asOf: input.asOf ?? clock(),
+      includeDecisions: input.kind === undefined,
+      decisionLimit: 3,
+      generalLimit: limit,
+    }),
+    dependencies.deadlineMs ?? OUTER_DEADLINE_MS,
+  );
+  const decisionIntent = /\b(decision|decide|decided|choice|chosen|outcome|rationale)\b/i.test(
+    input.query,
+  );
+  const normalizedQuery = input.query.toLocaleLowerCase("en-US");
+  const relevantDecisions = result.decisions.filter(
+    (item) =>
+      decisionIntent || normalizedQuery.includes(item.subjectKey.toLocaleLowerCase("en-US")),
+  );
+  return [...relevantDecisions, ...result.general].slice(0, limit);
+}
+
 export async function recallForTurn(
   input: Omit<RecallRequest, "asOf"> & { asOf?: Date },
   dependencies: RecallDependencies = {},

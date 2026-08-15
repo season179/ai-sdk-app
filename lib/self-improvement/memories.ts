@@ -370,37 +370,6 @@ export async function archiveMemory(
   return mapMemoryRow({ root: result.root, version: result.version });
 }
 
-export async function searchMemories(
-  agentId: string,
-  query: string,
-  opts: { kind?: MemoryKind; limit?: number; db?: AppDbClient } = {},
-): Promise<Memory[]> {
-  const db = opts.db ?? getDb();
-  const limit = Math.max(1, Math.min(20, opts.limit ?? 10));
-  const trimmed = query.trim();
-  if (!trimmed) return [];
-  const conditions = [eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()];
-  if (opts.kind) conditions.push(eq(agentMemories.kind, opts.kind));
-  if (trimmed !== "*") {
-    conditions.push(
-      or(
-        sql`${agentMemoryVersions.searchTsv} @@ websearch_to_tsquery('english', ${trimmed})`,
-        sql`similarity(${agentMemoryVersions.content}, ${trimmed}) > 0.2`,
-      ),
-    );
-  }
-  const rows = await currentQuery(db)
-    .where(and(...conditions))
-    .orderBy(
-      trimmed === "*"
-        ? desc(agentMemoryVersions.confidence)
-        : sql`ts_rank_cd(${agentMemoryVersions.searchTsv}, websearch_to_tsquery('english', ${trimmed})) + similarity(${agentMemoryVersions.content}, ${trimmed}) desc`,
-      desc(agentMemories.createdAt),
-    )
-    .limit(limit);
-  return rows.map(mapMemoryRow);
-}
-
 function currentQuery(db: AppDbClient) {
   return db
     .select({ root: agentMemories, version: agentMemoryVersions })

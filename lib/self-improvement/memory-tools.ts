@@ -1,12 +1,12 @@
 import type { ToolSet } from "ai";
 import type { MemoryKind } from "@/db/schema";
+import { searchRankedRecall } from "@/lib/memory/recall";
 import {
   buildSpecToolSet,
   type RealisticToolInput,
   type RealisticToolSpec,
 } from "@/lib/mock-tools";
 import { SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE } from "@/lib/self-improvement/errors";
-import { searchMemories } from "@/lib/self-improvement/memories";
 import { MEMORY_KINDS, parseMemoryKind } from "@/lib/self-improvement/validation";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
@@ -36,7 +36,7 @@ export const memoryToolSpecs: RealisticToolSpec[] = [
     service: "memory",
     action: "search",
     description:
-      "Search this agent's approved durable memories. Returns matching memories inline (id, kind, content, confidence, source). Use this when the pushed <declarative_memory> block doesn't already show what you need.",
+      "Search ranked current memory with full-text and typo-aware lexical matching. Returns compact current decisions when relevant plus approved memories (id, type/kind, summary, date, provenance, confidence, score). Use this when <memory_context> is incomplete or absent.",
     properties: {
       query: {
         type: "string",
@@ -59,55 +59,70 @@ export const memoryToolSpecs: RealisticToolSpec[] = [
 ];
 
 type MemoryToolHandler = (input: RealisticToolInput) => Promise<unknown>;
+type RankedSearch = typeof searchRankedRecall;
 
-const memoryToolBodies: Record<string, MemoryToolHandler> = {
-  memory_search: async (input) => {
-    const query = typeof input.query === "string" ? input.query.trim() : "";
-    if (!query) {
-      return { success: false, error: "query is required." };
-    }
+async function executeMemorySearch(input: RealisticToolInput, search: RankedSearch) {
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  if (!query) return { success: false, error: "query is required." };
+  const kind = parseKind(input.kind);
+  const limit = clampLimit(input.limit);
+  const memories = await search({ agentId: DEFAULT_AGENT_ID, query, kind, limit });
 
-    const kind = parseKind(input.kind);
-    const limit = clampLimit(input.limit);
+  return {
+    success: true,
+    query,
+    count: memories.length,
+    memories: memories.map((item) =>
+      item.category === "decision"
+        ? {
+            id: item.id,
+            type: "decision",
+            kind: "decision",
+            summary: item.summary,
+            content: item.summary,
+            status: item.status,
+            date: item.eventDate,
+            provenance: item.provenanceTraceIds,
+            confidence: item.confidence,
+            score: roundedScore(item.score.composite),
+            outcome: item.outcome,
+          }
+        : {
+            id: item.id,
+            versionId: item.versionId,
+            type: item.memoryType,
+            kind: item.type,
+            summary: item.summary,
+            content: item.summary,
+            date: item.eventDate,
+            provenance: item.provenanceTraceIds,
+            confidence: item.confidence,
+            source: item.sourceKind,
+            score: roundedScore(item.score.composite),
+          },
+    ),
+  };
+}
 
-    const memories = await searchMemories(DEFAULT_AGENT_ID, query, { kind, limit });
-
-    return {
-      success: true,
-      query,
-      count: memories.length,
-      memories: memories.map((m) => ({
-        id: m.id,
-        kind: m.kind,
-        content: m.content,
-        confidence: m.confidence,
-        source: m.source,
-      })),
-    };
-  },
-};
-
-export const memoryToolHandlers: Record<string, MemoryToolHandler> = Object.fromEntries(
-  Object.entries(memoryToolBodies).map(([name, body]) => [
-    name,
-    async (input: RealisticToolInput) => {
-      try {
-        return await body(input);
-      } catch (error) {
-        console.error(`Memory tool ${name} failed`, error);
-        return { success: false, error: SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE };
-      }
-    },
-  ]),
-);
-
-export async function executeMemoryTool(name: string, input: RealisticToolInput) {
-  const handler = memoryToolHandlers[name];
-  if (!handler) {
+export async function executeMemoryTool(
+  name: string,
+  input: RealisticToolInput,
+  dependencies: { search?: RankedSearch; logger?: typeof console.error } = {},
+) {
+  if (name !== "memory_search") {
     return { success: false, error: `'${name}' is not a memory tool.` };
   }
-  return handler(input);
+  try {
+    return await executeMemorySearch(input, dependencies.search ?? searchRankedRecall);
+  } catch (error) {
+    (dependencies.logger ?? console.error)(`Memory tool ${name} failed`, error);
+    return { success: false, error: SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE };
+  }
 }
+
+export const memoryToolHandlers: Record<string, MemoryToolHandler> = {
+  memory_search: (input) => executeMemoryTool("memory_search", input),
+};
 
 /** Real AI SDK tools, exposed directly (NOT via the shared registry) when the flag is on. */
 export const memoryTools: ToolSet = buildSpecToolSet(memoryToolSpecs, executeMemoryTool);
@@ -118,6 +133,10 @@ function parseKind(value: unknown): MemoryKind | undefined {
   // maps to the unavailable message).
   if (value == null) return undefined;
   return parseMemoryKind(value);
+}
+
+function roundedScore(value: number) {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 function clampLimit(value: unknown) {

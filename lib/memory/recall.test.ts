@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { recallForTurn } from "@/lib/memory/recall";
+import { recallForTurn, searchRankedRecall } from "@/lib/memory/recall";
 import type {
   DecisionRecallItem,
   GeneralRecallItem,
@@ -79,6 +79,49 @@ describe("recallForTurn", () => {
     );
     expect(result).toMatchObject({ status: "miss", renderedBlock: "", items: [] });
     expect(logger).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("searchRankedRecall", () => {
+  it("includes decisions only for deterministic decision intent or subject relevance", async () => {
+    const repository: RecallRepository = {
+      recall: vi.fn().mockResolvedValue({
+        decisions: [decision("deployment")],
+        general: [memory("m1")],
+        candidateIds: ["deployment", "m1"],
+      }),
+    };
+    expect(
+      (
+        await searchRankedRecall(
+          { agentId: "agent", query: "what deployment decision was chosen?" },
+          { repository },
+        )
+      ).map((item) => item.category),
+    ).toEqual(["decision", "memory"]);
+    expect(
+      (
+        await searchRankedRecall({ agentId: "agent", query: "unrelated telemetry" }, { repository })
+      ).map((item) => item.category),
+    ).toEqual(["memory"]);
+  });
+
+  it("bounds tool results to twenty and suppresses decisions for a kind filter", async () => {
+    const repository: RecallRepository = {
+      recall: vi.fn().mockResolvedValue({
+        decisions: [decision("d1")],
+        general: Array.from({ length: 20 }, (_, index) => memory(`m${index}`)),
+        candidateIds: [],
+      }),
+    };
+    const result = await searchRankedRecall(
+      { agentId: "agent", query: "decision", kind: "fact", limit: 99 },
+      { repository },
+    );
+    expect(result).toHaveLength(20);
+    expect(repository.recall).toHaveBeenCalledWith(
+      expect.objectContaining({ includeDecisions: false, generalLimit: 20 }),
+    );
   });
 });
 

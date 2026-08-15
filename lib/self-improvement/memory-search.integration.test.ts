@@ -1,88 +1,90 @@
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getDb } from "@/db";
+import {
+  agentMemories,
+  agentMemoryEvents,
+  agentMemoryVersions,
+  agentMemoryVersionTraceEvents,
+  agentTraceEvents,
+} from "@/db/schema";
 import { closePool, getPool } from "@/lib/scheduler/db";
-import { createMemory, searchMemories } from "@/lib/self-improvement/memories";
+import { createMemory } from "@/lib/self-improvement/memories";
+import { executeMemoryTool } from "@/lib/self-improvement/memory-tools";
+import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
-/**
- * memory_search behavioral tests (§10.5): returns only approved/non-deleted
- * rows, respects kind/limit, ranks by relevance. Opt-in integration tests —
- * skipped without CONSOLIDATION_INTEGRATION=1 + DATABASE_URL.
- */
-const DATABASE_AVAILABLE =
+const available =
   Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
+const integration = available ? describe : describe.skip;
 
-const describeIntegration = DATABASE_AVAILABLE ? describe : describe.skip;
+integration("memory_search ranked backend mapping", () => {
+  const marker = `toolrecall${Date.now()}`;
+  let memoryId = "";
 
-const AGENT_ID = "00000000-0000-0000-0000-000000000001";
+  beforeAll(async () => {
+    getPool();
+    const memory = await createMemory({
+      agentId: DEFAULT_AGENT_ID,
+      kind: "procedure",
+      memoryType: "procedural",
+      content: `${marker} verify deployment telemetry`,
+      source: "curated",
+      confidence: 87,
+    });
+    memoryId = memory.id;
+  });
 
-describeIntegration("searchMemories behavioral (integration)", () => {
-  beforeAll(() => getPool());
   afterAll(async () => {
+    const db = getDb();
+    const versions = await db
+      .select({ id: agentMemoryVersions.id })
+      .from(agentMemoryVersions)
+      .where(eq(agentMemoryVersions.memoryId, memoryId));
+    const eventIds: string[] = [];
+    for (const version of versions) {
+      const provenance = await db
+        .select({ eventId: agentMemoryVersionTraceEvents.eventId })
+        .from(agentMemoryVersionTraceEvents)
+        .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+      eventIds.push(...provenance.map((row) => row.eventId));
+      await db
+        .delete(agentMemoryVersionTraceEvents)
+        .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+    }
+    await db.delete(agentMemoryEvents).where(eq(agentMemoryEvents.memoryId, memoryId));
+    await db
+      .update(agentMemories)
+      .set({ currentVersionId: null, status: "creating" })
+      .where(eq(agentMemories.id, memoryId));
+    await db.delete(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, memoryId));
+    await db.delete(agentMemories).where(eq(agentMemories.id, memoryId));
+    for (const eventId of eventIds) {
+      await db.delete(agentTraceEvents).where(eq(agentTraceEvents.id, eventId));
+    }
     await closePool();
   });
 
-  it("returns only approved, non-deleted rows matching the query", async () => {
-    const marker = `searchtest-approved-${Date.now()}`;
-    await createMemory({
-      agentId: AGENT_ID,
-      kind: "fact",
-      content: `${marker} visible fact`,
-      source: "user",
-      confidence: 80,
+  it("maps kind/limit and compact ranked fields from the shared repository", async () => {
+    const result = (await executeMemoryTool("memory_search", {
+      query: `${marker} telemetry`,
+      kind: "procedure",
+      limit: 1,
+    })) as {
+      success: boolean;
+      count: number;
+      memories: Array<Record<string, unknown>>;
+    };
+    expect(result.success).toBe(true);
+    expect(result.count).toBe(1);
+    expect(result.memories[0]).toMatchObject({
+      id: memoryId,
+      type: "procedural",
+      kind: "procedure",
+      content: expect.stringContaining(marker),
+      confidence: 87,
+      provenance: expect.any(Array),
+      score: expect.any(Number),
     });
-    const results = await searchMemories(AGENT_ID, marker);
-    expect(results.length).toBeGreaterThan(0);
-    expect(results.every((m) => m.status === "approved")).toBe(true);
-    expect(results.some((m) => m.content.includes(marker))).toBe(true);
-  });
-
-  it("respects the kind filter", async () => {
-    const marker = `searchtest-kind-${Date.now()}`;
-    await createMemory({
-      agentId: AGENT_ID,
-      kind: "preference",
-      content: `${marker} kind preference`,
-      source: "user",
-    });
-    const prefs = await searchMemories(AGENT_ID, marker, { kind: "preference" });
-    expect(prefs.every((m) => m.kind === "preference")).toBe(true);
-
-    const facts = await searchMemories(AGENT_ID, marker, { kind: "fact" });
-    expect(facts.every((m) => m.kind === "fact")).toBe(true);
-  });
-
-  it("respects the limit", async () => {
-    const results = await searchMemories(AGENT_ID, "the", { limit: 3 });
-    expect(results.length).toBeLessThanOrEqual(3);
-  });
-
-  it("ranks exact FTS matches ahead of trigram-only typo matches", async () => {
-    const marker = `lexicalrank${Date.now()}`;
-    await createMemory({
-      agentId: AGENT_ID,
-      kind: "fact",
-      content: `${marker} exact searchable phrase`,
-      source: "user",
-      confidence: 10,
-    });
-    await createMemory({
-      agentId: AGENT_ID,
-      kind: "fact",
-      content: `${marker.slice(0, -1)}x fuzzy alternative`,
-      source: "user",
-      confidence: 90,
-    });
-    const results = await searchMemories(AGENT_ID, marker);
-    expect(results[0]?.content).toContain("exact searchable phrase");
-  });
-
-  it("treats LIKE metacharacters in the query as literal", async () => {
-    // A query containing % or _ must not match everything.
-    const results = await searchMemories(AGENT_ID, "%_this_should_not_match_anything_xyz");
-    expect(results.length).toBe(0);
   });
 });
-
-/** Reference getDb so the import isn't tree-shaken in non-integration runs. */
-void getDb;

@@ -12,6 +12,7 @@ import {
   agentMemoryVersionTraceEvents,
   agentTraceEvents,
 } from "@/db/schema";
+import { searchRankedRecall } from "@/lib/memory/recall";
 import { createVersionedMemory } from "@/lib/memory/versions";
 import { closePool, getPool } from "@/lib/scheduler/db";
 import {
@@ -19,7 +20,6 @@ import {
   createMemory,
   getMemoryById,
   listApprovedMemories,
-  searchMemories,
   updateMemory,
 } from "@/lib/self-improvement/memories";
 
@@ -166,11 +166,14 @@ integration("versioned memory authority (integration)", () => {
       content: `${marker} verify deployment telemetry`,
       source: "user",
     });
+    const asOf = new Date(Date.now() + 1_000);
     expect(
-      (await searchMemories(agentId, `${marker} telemetry`)).some((row) => row.id === memory.id),
+      (await searchRankedRecall({ agentId, query: `${marker} telemetry`, asOf })).some(
+        (row) => row.id === memory.id,
+      ),
     ).toBe(true);
     expect(
-      (await searchMemories(agentId, `${marker.slice(0, -1)}x`)).some(
+      (await searchRankedRecall({ agentId, query: `${marker.slice(0, -1)}x`, asOf })).some(
         (row) => row.id === memory.id,
       ),
     ).toBe(true);

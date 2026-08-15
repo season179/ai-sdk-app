@@ -1,49 +1,114 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { executeMemoryTool, memoryToolSpecs } from "@/lib/self-improvement/memory-tools";
 
-/**
- * memory_search tool tests (§10.5). The tool is read-only; the database path is
- * integration territory (gated in pipeline.test.ts). Here we assert the tool's
- * input contract — it validates query/kind/limit and never inserts.
- */
 describe("memory_search tool spec", () => {
-  it("exposes exactly one tool named memory_search", () => {
+  it("exposes exactly one direct-only tool contract requiring query", () => {
     expect(memoryToolSpecs).toHaveLength(1);
     expect(memoryToolSpecs[0].name).toBe("memory_search");
-  });
-
-  it("requires a query", () => {
     expect(memoryToolSpecs[0].required).toEqual(["query"]);
+    expect(memoryToolSpecs[0].description).toContain("<memory_context>");
+    expect(memoryToolSpecs[0].description).toContain("typo-aware");
   });
 });
 
-describe("memory_search tool input validation", () => {
-  it("rejects an empty query", async () => {
-    const result = (await executeMemoryTool("memory_search", { query: "   " })) as {
-      success: boolean;
-      error?: string;
-    };
-    expect(result.success).toBe(false);
-    expect(result.error).toBe("query is required.");
+describe("memory_search tool mapping", () => {
+  it("forwards query, kind, and a bounded limit to ranked recall", async () => {
+    const search = vi.fn(async () => [memoryItem()]);
+    const result = await executeMemoryTool(
+      "memory_search",
+      {
+        query: "  deployment telemetry  ",
+        kind: "procedure",
+        limit: 99,
+      },
+      { search },
+    );
+    expect(search).toHaveBeenCalledWith({
+      agentId: "00000000-0000-0000-0000-000000000001",
+      query: "deployment telemetry",
+      kind: "procedure",
+      limit: 20,
+    });
+    expect(result).toMatchObject({
+      success: true,
+      count: 1,
+      memories: [
+        {
+          id: "memory-id",
+          versionId: "version-id",
+          type: "procedural",
+          kind: "procedure",
+          content: "check telemetry",
+          provenance: ["event-id"],
+          score: 0.712346,
+        },
+      ],
+    });
   });
 
-  it("rejects an unknown tool name", async () => {
-    const result = (await executeMemoryTool("memory_insert", { query: "x" })) as {
-      success: boolean;
-      error?: string;
-    };
+  it("maps backend rejection to the fail-soft error", async () => {
+    const result = (await executeMemoryTool(
+      "memory_search",
+      { query: "x" },
+      {
+        search: async () => {
+          throw new Error("database unavailable");
+        },
+        logger: vi.fn(),
+      },
+    )) as { success: boolean; error?: string };
     expect(result.success).toBe(false);
+    expect(result.error).toBeTruthy();
   });
 
-  it("rejects an invalid kind with the unavailable message (fail-soft wrapper)", async () => {
-    // parseKind throws SelfImprovementInputError, which the handler wrapper maps
-    // to the unavailable message. Either way the tool returns success:false and
-    // never inserts.
-    const result = (await executeMemoryTool("memory_search", {
-      query: "x",
-      kind: "bogus",
-    })) as { success: boolean };
-    expect(result.success).toBe(false);
+  it("rejects empty query, invalid kind, and unknown tool without searching", async () => {
+    const search = vi.fn(async () => [memoryItem()]);
+    expect(await executeMemoryTool("memory_search", { query: "   " }, { search })).toMatchObject({
+      success: false,
+      error: "query is required.",
+    });
+    expect(
+      await executeMemoryTool(
+        "memory_search",
+        { query: "x", kind: "bogus" },
+        { search, logger: vi.fn() },
+      ),
+    ).toMatchObject({ success: false });
+    expect(await executeMemoryTool("memory_insert", { query: "x" }, { search })).toMatchObject({
+      success: false,
+    });
+    expect(search).not.toHaveBeenCalled();
   });
 });
+
+function memoryItem() {
+  return {
+    category: "memory" as const,
+    id: "memory-id",
+    versionId: "version-id",
+    lineageId: "memory-id",
+    type: "procedure" as const,
+    memoryType: "procedural" as const,
+    sourceKind: "curated",
+    summary: "check telemetry",
+    status: "approved" as const,
+    eventDate: "2026-01-01T00:00:00.000Z",
+    validDate: null,
+    provenanceTraceIds: ["event-id"],
+    authority: "reviewed",
+    confidence: 90,
+    contentKey: "check telemetry",
+    score: {
+      lexicalRank: 1,
+      trigramRank: null,
+      rrf: 0.01,
+      normalizedRrf: 0.61,
+      importance: 0.8,
+      confidence: 0.9,
+      freshness: 1,
+      riskPenalty: 0,
+      composite: 0.71234567,
+    },
+  };
+}
