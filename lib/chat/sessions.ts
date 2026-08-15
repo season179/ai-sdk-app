@@ -35,6 +35,13 @@ export type ChatSessionWithMessages = {
   messages: ChatUIMessage[];
 };
 
+export type ChatSessionForRun = {
+  session: ChatSession;
+  cleanMessages: ChatUIMessage[];
+  modelMessages: ChatUIMessage[];
+  apiPartMessageIds: string[];
+};
+
 export class ChatSessionInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -121,15 +128,76 @@ export async function getChatSession(
   }
 
   return {
-    session: {
-      id: session.id,
-      title: session.title,
-      lastMessageAt: session.lastMessageAt?.toISOString() ?? null,
-      createdAt: session.createdAt.toISOString(),
-      updatedAt: session.updatedAt.toISOString(),
-    },
+    session: mapSession(session),
     messages: validation.success ? validation.data : stored,
   };
+}
+
+/** Server-only history: clean transcript plus exact model-facing replay parts. */
+export async function getChatSessionForRun(
+  id: string,
+  agentId: string = DEFAULT_AGENT_ID,
+): Promise<ChatSessionForRun | null> {
+  const db = getDb();
+  const [session] = await db
+    .select()
+    .from(agentChatSessions)
+    .where(
+      and(
+        eq(agentChatSessions.id, id),
+        eq(agentChatSessions.agentId, agentId),
+        isNull(agentChatSessions.deletedAt),
+      ),
+    );
+  if (!session) return null;
+
+  const rows = await db
+    .select()
+    .from(agentChatMessages)
+    .where(eq(agentChatMessages.sessionId, id))
+    .orderBy(agentChatMessages.ordinal);
+  const cleanMessages = rows.map((row) => mapMessage(row, row.parts));
+  const modelMessages = rows.map((row) => mapMessage(row, row.apiParts ?? row.parts));
+  const validation = await safeValidateUIMessages<ChatUIMessage>({ messages: modelMessages });
+  if (!validation.success) {
+    console.error(`Model messages for chat session '${id}' failed validation`, validation.error);
+  }
+
+  return {
+    session: mapSession(session),
+    cleanMessages,
+    modelMessages: validation.success ? validation.data : modelMessages,
+    apiPartMessageIds: rows.filter((row) => row.apiParts !== null).map((row) => row.id),
+  };
+}
+
+/** First-writer-wins sidecar materialization, followed by a winner read. */
+export async function materializeMessageApiParts(
+  sessionId: string,
+  messageId: string,
+  parts: ChatUIMessage["parts"],
+): Promise<ChatUIMessage["parts"]> {
+  const db = getDb();
+  await db
+    .update(agentChatMessages)
+    .set({ apiParts: parts })
+    .where(
+      and(
+        eq(agentChatMessages.sessionId, sessionId),
+        eq(agentChatMessages.id, messageId),
+        isNull(agentChatMessages.apiParts),
+      ),
+    );
+  const [winner] = await db
+    .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
+    .from(agentChatMessages)
+    .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
+  if (!winner) {
+    throw new ChatSessionInputError(
+      `Message '${messageId}' does not exist in chat session '${sessionId}'.`,
+    );
+  }
+  return winner.apiParts ?? winner.parts;
 }
 
 /**
@@ -518,6 +586,28 @@ export async function deleteChatSession(
   if (rows.length === 0) {
     throw new ChatSessionNotFoundError(id);
   }
+}
+
+function mapSession(session: typeof agentChatSessions.$inferSelect): ChatSession {
+  return {
+    id: session.id,
+    title: session.title,
+    lastMessageAt: session.lastMessageAt?.toISOString() ?? null,
+    createdAt: session.createdAt.toISOString(),
+    updatedAt: session.updatedAt.toISOString(),
+  };
+}
+
+function mapMessage(
+  row: typeof agentChatMessages.$inferSelect,
+  parts: ChatUIMessage["parts"],
+): ChatUIMessage {
+  return {
+    id: row.id,
+    role: row.role,
+    parts,
+    ...(row.metadata ? { metadata: row.metadata } : {}),
+  };
 }
 
 /** Top of the sidebar list — drives auto-resume on load. */

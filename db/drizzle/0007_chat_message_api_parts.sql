@@ -1,0 +1,1 @@
+ALTER TABLE "agent_chat_messages" ADD COLUMN "api_parts" jsonb;

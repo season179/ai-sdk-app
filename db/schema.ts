@@ -350,6 +350,9 @@ export const agentChatMessages = pgTable(
       .references(() => agentChatSessions.id, { onDelete: "cascade" }),
     role: text("role").$type<ChatMessageRole>().notNull(),
     parts: jsonb("parts").$type<UIMessage<ChatMessageMetadata>["parts"]>().notNull(),
+    // Exact model-facing projection for replay. UI/evidence paths read `parts`;
+    // run history reads this first-writer-wins sidecar when present.
+    apiParts: jsonb("api_parts").$type<UIMessage<ChatMessageMetadata>["parts"]>(),
     metadata: jsonb("metadata").$type<ChatMessageMetadata>(),
     // Ordering only: equals the array index at save time. Deliberately NOT
     // unique — saveChatSession rewrites the whole transcript (delete-all then
@@ -1156,9 +1159,9 @@ export const agentIngestionCheckpoints = pgTable("agent_ingestion_checkpoints", 
 });
 
 /**
- * The two-state fix (§0.4, §3c). One snapshot per session (session_id UNIQUE).
- * The chat route renders from renderedBlock so the in-session prompt is frozen;
- * durable writes affect the NEXT session's snapshot.
+ * Legacy rollout table. Per-session snapshots are no longer read or written;
+ * per-message api_parts is the replay authority. Keep the table for rollback
+ * compatibility until a later destructive cleanup migration.
  */
 export const agentMemorySnapshots = pgTable(
   "agent_memory_snapshots",

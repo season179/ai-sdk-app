@@ -1,3 +1,4 @@
+import { renderMemoryContext } from "@/lib/memory/context";
 import { postgresRecallRepository } from "@/lib/memory/repository";
 import type { RecallRepository, RecallRequest, RecallResult } from "@/lib/memory/types";
 
@@ -35,7 +36,12 @@ export async function recallForTurn(
     );
     const decisions = repositoryResult.decisions.slice(0, DECISION_SLOTS);
     const general = repositoryResult.general.slice(0, GENERAL_SLOTS);
-    const items = [...decisions, ...general].slice(0, TOTAL_SLOTS);
+    const candidates = [...decisions, ...general].slice(0, TOTAL_SLOTS);
+    const packed = renderMemoryContext(candidates, {
+      maxItems: input.maxItems ?? TOTAL_SLOTS,
+      maxChars: input.maxChars ?? 4_000,
+    });
+    const items = packed.items;
     const rejected = [
       ...repositoryResult.decisions.slice(DECISION_SLOTS).map((item) => ({
         id: item.id,
@@ -45,11 +51,14 @@ export async function recallForTurn(
         id: item.id,
         reason: "general_slot_cap",
       })),
+      ...candidates
+        .filter((candidate) => !items.includes(candidate))
+        .map((item) => ({ id: item.id, reason: "character_budget" })),
     ];
     const elapsedMs = Math.max(0, clock().getTime() - startedAt);
     const result: RecallResult = {
       items,
-      renderedBlock: "",
+      renderedBlock: packed.block,
       status: items.length > 0 ? "hit" : "miss",
       elapsedMs,
       debug: {

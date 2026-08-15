@@ -50,6 +50,13 @@
       "when": 1786763899906,
       "tag": "0006_agent_memory_version_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786765414548,
+      "tag": "0007_chat_message_api_parts",
+      "breakpoints": true
     }
   ]
 }

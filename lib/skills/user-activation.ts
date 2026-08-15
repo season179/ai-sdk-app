@@ -21,6 +21,17 @@ type ChatMessage = UIMessage<ChatMessageMetadata>;
  * instructions. Unknown or disabled names fail soft: the model sees the raw
  * /skill-name text and can fall back to skill_search.
  */
+export async function injectUserActivatedSkill(
+  message: ChatMessage,
+  agentId: string = DEFAULT_AGENT_ID,
+): Promise<ChatMessage> {
+  const skillName = readActivatedSkillName(message);
+  if (!skillName) return message;
+  const content = await loadSkillContentByName(skillName, agentId);
+  return content ? prependToFirstTextPart(message, content) : message;
+}
+
+/** Legacy bulk helper retained for non-route callers. New chat runs project only the target turn. */
 export async function injectUserActivatedSkills(
   messages: ChatMessage[],
   agentId: string = DEFAULT_AGENT_ID,
