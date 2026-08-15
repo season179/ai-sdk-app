@@ -13,19 +13,14 @@ async function processJob(job: Job<TurnReviewJobData>) {
     console.warn(`Turn-review job ${job.id} has invalid data; skipping.`);
     return;
   }
-  if (data.kind === "scheduled") {
-    // Typed trace distillation lands in the next commit. The write flag is dark
-    // by default, so intermediate deployments do not enqueue this shape.
-    console.warn(`Scheduled trace review ${data.reviewKey} deferred until typed distillation.`);
-    return;
-  }
   try {
     const result = await runTurnReview(data);
     console.log(
-      `Reviewed session ${data.sessionId} through ${data.triggerMessageId}: ${result.proposalCount} proposal(s).`,
+      `Reviewed ${data.reviewKey}: ${result.candidatesAccepted} accepted, ${result.candidatesRejected} rejected, ${result.candidatesProposed} memory proposal(s), ${result.proposalCount} total proposal(s).`,
     );
   } catch (error) {
     console.error(`Turn-review job ${job.id} failed`, error);
+    throw error;
   }
 }
 

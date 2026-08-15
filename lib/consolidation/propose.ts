@@ -1,12 +1,22 @@
 import type { AppDbClient } from "@/db";
-import type { AdmissionMetadata, AdmissionPolicy } from "@/db/schema";
+import type {
+  AdmissionMetadata,
+  AdmissionMetadataV2,
+  AdmissionPolicy,
+  MemoryKind,
+  MemoryType,
+} from "@/db/schema";
 import {
   AUTO_APPLY_MIN_SCORE_BPS,
   isMemoryConsolidationAutoApply,
   isMemoryConsolidationEnabled,
 } from "@/lib/consolidation/config";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
-import { createReviewProposal, type ReviewProposal } from "@/lib/self-improvement/proposals";
+import {
+  createCandidateReviewProposal,
+  createReviewProposal,
+  type ReviewProposal,
+} from "@/lib/self-improvement/proposals";
 
 /**
  * Turn a passed candidate into an agent_review_proposal (§2 propose.ts). Writes
@@ -67,6 +77,62 @@ export async function proposeCandidate(
   });
 
   return proposal;
+}
+
+export async function proposeTypedCandidate(
+  input: {
+    agentId: string;
+    sourceCandidateId: string;
+    memoryType: MemoryType;
+    content: string;
+    canonicalKey: string | null;
+    confidence: number;
+    validFrom: string | null;
+    validTo: string | null;
+    metadata: AdmissionMetadataV2;
+    runId: string;
+  },
+  db: AppDbClient,
+): Promise<ReviewProposal> {
+  const kind = typedKind(input.memoryType, input.metadata.memoryKind);
+  const proposal = await createCandidateReviewProposal(
+    {
+      kind: "memory_create",
+      payload: {
+        memoryKind: kind,
+        memoryType: input.memoryType,
+        content: input.content,
+        source: "consolidated",
+        confidence: input.confidence,
+        canonicalKey: input.canonicalKey,
+        validFrom: input.validFrom,
+        validTo: input.validTo,
+      },
+      rationale: `Evidence-backed ${input.memoryType} candidate (${input.metadata.evidenceTraceEventIds.length} trace event(s), ${input.metadata.scoreBps} bps).`,
+      proposerOrigin: "consolidation",
+      admissionPolicy: "human_review",
+      admissionMetadata: input.metadata,
+      agentId: input.agentId,
+    },
+    input.sourceCandidateId,
+    db,
+  );
+  await recordMemoryEvent({
+    agentId: input.agentId,
+    eventType: "proposed",
+    origin: "consolidation",
+    summary: `Proposed evidence-backed ${kind} for human review.`,
+    proposalId: proposal.id,
+    runId: input.runId,
+    detail: { version: 1, admissionMetadata: input.metadata },
+  });
+  return proposal;
+}
+
+function typedKind(memoryType: MemoryType, proposed: MemoryKind): MemoryKind {
+  if (memoryType === "episodic") return "episode";
+  if (memoryType === "procedural") return "procedure";
+  return ["preference", "correction", "persona"].includes(proposed) ? proposed : "fact";
 }
 
 /**

@@ -95,7 +95,7 @@ async function startAndPrepare(boss: PgBoss) {
     policy: "stately",
     retryBackoff: true,
     retryDelay: 5,
-    retryLimit: 1,
+    retryLimit: 2,
   });
   // The consolidation sweep queue. 'stately' + singletonKey(agentId) keeps at
   // most one queued sweep per agent. Not the user-facing task queue.

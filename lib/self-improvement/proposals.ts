@@ -36,6 +36,7 @@ export type ReviewProposal = {
   rationale: string;
   status: ReviewProposalStatus;
   reviewerModel: string | null;
+  sourceCandidateId: string | null;
   // Who/what minted this proposal (§1.1). Default 'turn_review' matches current behavior.
   proposerOrigin: ReviewProposalOrigin;
   // How this proposal is admitted (§1.1). Default 'human_review'.
@@ -111,6 +112,23 @@ export async function createReviewProposal(
   input: CreateReviewProposalInput,
   db: AppDbClient = getDb(),
 ): Promise<ReviewProposal> {
+  return insertReviewProposal(input, null, db);
+}
+
+/** Internal provenance-bearing path; manual/API callers cannot set candidate ids. */
+export async function createCandidateReviewProposal(
+  input: CreateReviewProposalInput,
+  sourceCandidateId: string,
+  db: AppDbClient = getDb(),
+): Promise<ReviewProposal> {
+  return insertReviewProposal(input, sourceCandidateId, db);
+}
+
+async function insertReviewProposal(
+  input: CreateReviewProposalInput,
+  sourceCandidateId: string | null,
+  db: AppDbClient,
+): Promise<ReviewProposal> {
   const value: NewAgentReviewProposal = {
     agentId: input.agentId ?? DEFAULT_AGENT_ID,
     sessionId: input.sessionId ?? null,
@@ -119,13 +137,27 @@ export async function createReviewProposal(
     payload: readPayloadObject(input.payload),
     rationale: parseRationale(input.rationale),
     reviewerModel: input.reviewerModel ?? null,
+    sourceCandidateId,
     proposerOrigin: parseProposerOrigin(input.proposerOrigin),
     admissionPolicy: parseAdmissionPolicy(input.admissionPolicy),
     admissionMetadata: input.admissionMetadata ?? null,
   };
 
-  const inserted = await db.insert(agentReviewProposals).values(value).returning();
-  return mapProposalRow(inserted[0]);
+  const inserted = await db
+    .insert(agentReviewProposals)
+    .values(value)
+    .onConflictDoNothing()
+    .returning();
+  if (inserted[0]) return mapProposalRow(inserted[0]);
+  if (sourceCandidateId) {
+    const [existing] = await db
+      .select()
+      .from(agentReviewProposals)
+      .where(eq(agentReviewProposals.sourceCandidateId, sourceCandidateId))
+      .limit(1);
+    if (existing) return mapProposalRow(existing);
+  }
+  throw new Error("Review proposal insert conflicted without an idempotent candidate row.");
 }
 
 function parseProposerOrigin(value: unknown): ReviewProposalOrigin {
@@ -241,6 +273,7 @@ function mapProposalRow(row: AgentReviewProposal): ReviewProposal {
     rationale: row.rationale,
     status: row.status,
     reviewerModel: row.reviewerModel,
+    sourceCandidateId: row.sourceCandidateId,
     proposerOrigin: row.proposerOrigin,
     admissionPolicy: row.admissionPolicy,
     admissionMetadata: row.admissionMetadata,

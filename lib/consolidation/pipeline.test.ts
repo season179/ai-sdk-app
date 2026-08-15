@@ -12,6 +12,8 @@ import {
 } from "@/db/schema";
 import { claimHash } from "@/lib/consolidation/normalize";
 import { ingestUserTurn } from "@/lib/consolidation/observations";
+import { buildTerminalEvent, buildUserMessageEvent } from "@/lib/memory/capture";
+import { appendTraceEvents } from "@/lib/memory/trace";
 import { runConsolidation } from "@/lib/consolidation/run";
 import { closePool, getPool } from "@/lib/scheduler/db";
 import { applyReviewProposal } from "@/lib/self-improvement/apply";
@@ -35,6 +37,30 @@ const describeIntegration = DATABASE_AVAILABLE ? describe : describe.skip;
 const AGENT_ID = "00000000-0000-0000-0000-000000000001";
 
 describeIntegration("consolidation pipeline (integration)", () => {
+  async function createGroundedEvidence(content: string): Promise<string[]> {
+    const sessionId = randomUUID();
+    const message = {
+      id: `msg-grounded-${randomUUID()}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: content }],
+    };
+    const context = { agentId: AGENT_ID, sessionId, traceId: randomUUID() };
+    const events = await appendTraceEvents([
+      buildUserMessageEvent(context, message),
+      buildTerminalEvent(context, "completed"),
+    ]);
+    const userEvent = events.find((event) => event.eventType === "user_message");
+    if (!userEvent) throw new Error("Grounded test evidence did not persist.");
+    await ingestUserTurn(sessionId, [message], {
+      traceEventIds: new Map([[message.id, userEvent.id]]),
+    });
+    const rows = await getDb()
+      .select({ id: agentGroundedObservations.id })
+      .from(agentGroundedObservations)
+      .where(eq(agentGroundedObservations.sourceMessageId, message.id));
+    return rows.map((row) => row.id);
+  }
+
   beforeAll(() => {
     getPool();
   });
@@ -99,6 +125,7 @@ describeIntegration("consolidation pipeline (integration)", () => {
     // we can exercise the apply path's source guard + claim_hash stamping.
     const { createReviewProposal } = await import("@/lib/self-improvement/proposals");
     const content = `Consolidated fact ${Date.now()}`;
+    const groundedObservationIds = await createGroundedEvidence(content);
     const proposal = await createReviewProposal({
       kind: "memory_create",
       payload: { memoryKind: "fact", content, source: "consolidated", confidence: 100 },
@@ -109,6 +136,7 @@ describeIntegration("consolidation pipeline (integration)", () => {
         origin: "consolidation",
         claimHash: claimHash(content),
         scoreBps: 9500,
+        groundedObservationIds,
       },
     });
 
@@ -135,13 +163,20 @@ describeIntegration("consolidation pipeline (integration)", () => {
     const { createReviewProposal } = await import("@/lib/self-improvement/proposals");
     const content = `Dup-test consolidated fact ${Date.now()}`;
     const hash = claimHash(content);
+    const groundedObservationIds = await createGroundedEvidence(content);
 
     const p1 = await createReviewProposal({
       kind: "memory_create",
       payload: { memoryKind: "fact", content, source: "consolidated", confidence: 100 },
       rationale: "First proposal.",
       proposerOrigin: "consolidation",
-      admissionMetadata: { version: 1, origin: "consolidation", claimHash: hash, scoreBps: 9500 },
+      admissionMetadata: {
+        version: 1,
+        origin: "consolidation",
+        claimHash: hash,
+        scoreBps: 9500,
+        groundedObservationIds,
+      },
     });
     await applyReviewProposal(p1.id);
 
@@ -151,7 +186,13 @@ describeIntegration("consolidation pipeline (integration)", () => {
       payload: { memoryKind: "fact", content, source: "consolidated", confidence: 100 },
       rationale: "Second proposal — should no-op via the unique index.",
       proposerOrigin: "consolidation",
-      admissionMetadata: { version: 1, origin: "consolidation", claimHash: hash, scoreBps: 9500 },
+      admissionMetadata: {
+        version: 1,
+        origin: "consolidation",
+        claimHash: hash,
+        scoreBps: 9500,
+        groundedObservationIds,
+      },
     });
     // Applying the second must not throw and must not create a second memory.
     await applyReviewProposal(p2.id);

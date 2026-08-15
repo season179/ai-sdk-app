@@ -1,4 +1,4 @@
-import type { MemoryKind, MemorySource, ReviewProposalKind } from "@/db/schema";
+import type { MemoryKind, MemorySource, MemoryType, ReviewProposalKind } from "@/db/schema";
 import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 
 export const MEMORY_CONTENT_MAX = 2000;
@@ -6,7 +6,15 @@ export const MEMORY_CONFIDENCE_MIN = 0;
 export const MEMORY_CONFIDENCE_MAX = 100;
 export const REVIEW_PROPOSAL_PAYLOAD_MAX = 8192;
 
-export const MEMORY_KINDS = ["preference", "fact", "correction", "persona"] as const;
+export const MEMORY_KINDS = [
+  "preference",
+  "fact",
+  "correction",
+  "persona",
+  "episode",
+  "procedure",
+] as const;
+export const MEMORY_TYPES = ["semantic", "episodic", "procedural"] as const;
 const MEMORY_SOURCES = ["user", "review", "curated", "consolidated"] as const;
 const REVIEW_PROPOSAL_KINDS = [
   "memory_create",
@@ -26,6 +34,32 @@ export function parseMemoryKind(value: unknown): MemoryKind {
   }
 
   throw new SelfImprovementInputError(`Memory kind must be one of: ${MEMORY_KINDS.join(", ")}.`);
+}
+
+export function parseMemoryType(value: unknown, fallback: MemoryType = "semantic"): MemoryType {
+  if (value == null) return fallback;
+  if (typeof value === "string" && MEMORY_TYPES.includes(value as MemoryType)) {
+    return value as MemoryType;
+  }
+  throw new SelfImprovementInputError(`Memory type must be one of: ${MEMORY_TYPES.join(", ")}.`);
+}
+
+export function parseValidityBounds(
+  from: unknown,
+  to: unknown,
+): { validFrom: Date | null; validTo: Date | null } {
+  const validFrom = typeof from === "string" && from ? new Date(from) : null;
+  const validTo = typeof to === "string" && to ? new Date(to) : null;
+  if (validFrom && Number.isNaN(validFrom.getTime())) {
+    throw new SelfImprovementInputError("validFrom must be an ISO timestamp or null.");
+  }
+  if (validTo && Number.isNaN(validTo.getTime())) {
+    throw new SelfImprovementInputError("validTo must be an ISO timestamp or null.");
+  }
+  if (validFrom && validTo && validFrom >= validTo) {
+    throw new SelfImprovementInputError("validFrom must be earlier than validTo.");
+  }
+  return { validFrom, validTo };
 }
 
 export function parseMemorySource(value: unknown, fallback: MemorySource = "user"): MemorySource {

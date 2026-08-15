@@ -1,7 +1,15 @@
-import { sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
+import {
+  agentGroundedObservations,
+  agentMemoryCandidates,
+  agentMemoryCandidateTraceEvents,
+} from "@/db/schema";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
+import { getMemoryPolicyVersion } from "@/lib/memory/config";
+import { sanitizeTracePayload } from "@/lib/memory/redaction";
+import { appendTraceEvents, assertCompletedTraceWindow } from "@/lib/memory/trace";
 import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   archiveMemory,
@@ -101,6 +109,7 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
       if (await getMemoryByReviewProposalId(proposal.id, proposal.agentId, db)) {
         return;
       }
+      await resolveProposalEvidence(proposal, payload, db);
 
       // Derive the memory source from the proposal and guard the privileged
       // `consolidated` source (§1.1): only consolidation proposals may mint a
@@ -217,6 +226,90 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
       );
       return;
   }
+}
+
+async function resolveProposalEvidence(
+  proposal: ReviewProposal,
+  payload: Record<string, unknown>,
+  db: AppDbClient,
+): Promise<string[]> {
+  if (proposal.sourceCandidateId) {
+    const rows = await db
+      .select({
+        eventId: agentMemoryCandidateTraceEvents.eventId,
+        traceId: agentMemoryCandidates.traceId,
+      })
+      .from(agentMemoryCandidateTraceEvents)
+      .innerJoin(
+        agentMemoryCandidates,
+        eq(agentMemoryCandidates.id, agentMemoryCandidateTraceEvents.candidateId),
+      )
+      .where(
+        and(
+          eq(agentMemoryCandidateTraceEvents.candidateId, proposal.sourceCandidateId),
+          eq(agentMemoryCandidates.agentId, proposal.agentId),
+          eq(agentMemoryCandidates.gateStatus, "accepted"),
+        ),
+      );
+    if (rows.length === 0) throw new SelfImprovementInputError("Typed proposal has no evidence.");
+    await assertCompletedTraceWindow(
+      {
+        agentId: proposal.agentId,
+        eventIds: rows.map((row) => row.eventId),
+        traceIds: [...new Set(rows.map((row) => row.traceId))],
+      },
+      db,
+    );
+    return rows.map((row) => row.eventId);
+  }
+
+  const observationIds = proposal.admissionMetadata?.groundedObservationIds ?? [];
+  if (observationIds.length > 0) {
+    const observations = await db
+      .select({ traceEventId: agentGroundedObservations.traceEventId })
+      .from(agentGroundedObservations)
+      .where(
+        and(
+          eq(agentGroundedObservations.agentId, proposal.agentId),
+          inArray(agentGroundedObservations.id, observationIds),
+        ),
+      );
+    const eventIds = observations.flatMap((row) => (row.traceEventId ? [row.traceEventId] : []));
+    if (eventIds.length !== observationIds.length) {
+      throw new SelfImprovementInputError("Consolidation proposal has incomplete trace evidence.");
+    }
+    return eventIds;
+  }
+
+  if (proposal.proposerOrigin !== "manual") {
+    throw new SelfImprovementInputError("Memory proposal has no trace evidence.");
+  }
+  const sanitized = sanitizeTracePayload({
+    proposalId: proposal.id,
+    memoryKind: payload.memoryKind ?? payload.kind,
+    content: payload.content,
+  });
+  const [event] = await appendTraceEvents(
+    [
+      {
+        agentId: proposal.agentId,
+        traceId: `manual-proposal:${proposal.id}`,
+        sequenceNo: 0,
+        sessionId: proposal.sessionId,
+        eventType: "explicit_memory_write",
+        actor: "user",
+        trustClass: "user_assertion",
+        payload: sanitized.payload,
+        contentHash: sanitized.contentHash,
+        idempotencyKey: `manual-proposal:${proposal.id}:explicit-memory-write`,
+        retentionClass: "audit",
+        policyVersion: getMemoryPolicyVersion(),
+        occurredAt: new Date(),
+      },
+    ],
+    db,
+  );
+  return [event.id];
 }
 
 function readReferences(value: unknown): SkillReferenceInput[] | undefined {

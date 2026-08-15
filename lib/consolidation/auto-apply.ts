@@ -116,6 +116,9 @@ export async function maybeAutoApplyConsolidation(
   db: AppDbClient = getDb(),
 ): Promise<{ applied: boolean; reason?: string }> {
   const meta = input.proposal.admissionMetadata ?? undefined;
+  if (input.proposal.sourceCandidateId) {
+    return { applied: false, reason: "typed_candidate_requires_human_review" };
+  }
   const claimHash = meta?.claimHash;
 
   const [globalEnabled, globalAutoApply, existingClaim] = await Promise.all([

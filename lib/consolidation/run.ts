@@ -3,6 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { type AppDbClient, getDb } from "@/db";
 import {
   type AdmissionMetadata,
+  type AdmissionMetadataV2,
   agentConsolidationCandidates,
   agentConsolidationRuns,
   type ConsolidationRunStatus,
@@ -20,7 +21,8 @@ import {
 } from "@/lib/consolidation/config";
 import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { listGroundedObservations } from "@/lib/consolidation/observations";
-import { proposeCandidate } from "@/lib/consolidation/propose";
+import { proposeCandidate, proposeTypedCandidate } from "@/lib/consolidation/propose";
+import type { PersistedCandidateVerdict } from "@/lib/memory/candidates";
 import { type ClaimSignal, scoreAndGate } from "@/lib/consolidation/scoring";
 import {
   groupByClaim,
@@ -40,6 +42,128 @@ import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
  * created. Candidates are written for every scored claim (passed or not) so the
  * /consolidation explain-why surface can show what didn't promote and why.
  */
+export async function admitTurnReviewCandidates(
+  input: {
+    agentId: string;
+    candidates: PersistedCandidateVerdict[];
+  },
+  db: AppDbClient = getDb(),
+): Promise<{ runId: string; accepted: number; rejected: number; proposed: number }> {
+  const cfg = await getConsolidationConfig(input.agentId, db);
+  const [run] = await db
+    .insert(agentConsolidationRuns)
+    .values({ agentId: input.agentId, status: "running", trigger: "turn_review" })
+    .returning();
+  let accepted = 0;
+  let rejected = 0;
+  let proposed = 0;
+
+  for (const item of input.candidates) {
+    const passed = item.candidate.gateStatus === "accepted";
+    if (passed) accepted += 1;
+    else rejected += 1;
+    const [row] = await db
+      .insert(agentConsolidationCandidates)
+      .values({
+        runId: run.id,
+        agentId: input.agentId,
+        claimKey: item.candidate.canonicalKey ?? `candidate:${item.candidate.id}`,
+        snippet: passed ? (item.candidate.content ?? "") : `[rejected:${item.candidate.gateReason}]`,
+        candidateOrigin: "turn_review",
+        sourceCandidateId: item.candidate.id,
+        memoryType: item.candidate.memoryType,
+        scoreBps: item.candidate.scoreBps,
+        gateResults: null,
+        passed,
+      })
+      .onConflictDoNothing()
+      .returning();
+
+    if (!passed || cfg.dryRun) continue;
+    const structured = item.candidate.structured as Record<string, unknown>;
+    const proposedKind =
+      typeof structured.memoryKind === "string" &&
+      ["preference", "fact", "correction", "persona", "episode", "procedure"].includes(
+        structured.memoryKind,
+      )
+        ? (structured.memoryKind as AdmissionMetadataV2["memoryKind"])
+        : item.candidate.memoryType === "episodic"
+          ? "episode"
+          : item.candidate.memoryType === "procedural"
+            ? "procedure"
+            : "fact";
+    const range = item.candidate.validDuring;
+    const [validFrom, validTo] = parseTstzRange(range);
+    const metadata: AdmissionMetadataV2 = {
+      version: 2,
+      origin: "turn_review",
+      sourceCandidateId: item.candidate.id,
+      evidenceTraceEventIds: item.evidenceTraceEventIds,
+      memoryType: item.candidate.memoryType,
+      memoryKind: proposedKind,
+      proposedOperation: item.candidate.proposedOperation,
+      sourceStance: item.candidate.sourceStance,
+      scoreBps: item.candidate.scoreBps,
+      gateStatus: item.candidate.gateStatus,
+      gateReason: item.candidate.gateReason,
+      canonicalKey: item.candidate.canonicalKey,
+      validFrom,
+      validTo,
+      timePrecision: item.candidate.timePrecision,
+      dryRun: false,
+    };
+    const proposal = await proposeTypedCandidate(
+      {
+        agentId: input.agentId,
+        sourceCandidateId: item.candidate.id,
+        memoryType: item.candidate.memoryType,
+        content: item.candidate.content ?? "",
+        canonicalKey: item.candidate.canonicalKey,
+        confidence: item.candidate.confidence,
+        validFrom,
+        validTo,
+        metadata,
+        runId: run.id,
+      },
+      db,
+    );
+    proposed += 1;
+    if (row) {
+      await db
+        .update(agentConsolidationCandidates)
+        .set({ proposalId: proposal.id })
+        .where(eq(agentConsolidationCandidates.id, row.id));
+    }
+  }
+
+  await db
+    .update(agentConsolidationRuns)
+    .set({
+      status: "completed",
+      finishedAt: sql`now()`,
+      observationsScanned: 0,
+      candidatesEvaluated: input.candidates.length,
+      candidatesPassed: accepted,
+      proposalsCreated: proposed,
+    })
+    .where(eq(agentConsolidationRuns.id, run.id));
+  return { runId: run.id, accepted, rejected, proposed };
+}
+
+export function parseTstzRange(value: string | null): [string | null, string | null] {
+  if (!value) return [null, null];
+  const match = /^\[([^,]*),([^)]*)\)$/.exec(value);
+  if (!match) throw new Error("Malformed tstzrange returned for a memory candidate.");
+  const parseBound = (raw: string): string | null => {
+    if (!raw) return null;
+    const unquoted = raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+    const timestamp = Date.parse(unquoted);
+    if (Number.isNaN(timestamp)) throw new Error("Invalid tstzrange bound returned for a memory candidate.");
+    return new Date(timestamp).toISOString();
+  };
+  return [parseBound(match[1]), parseBound(match[2])];
+}
+
 export async function runConsolidation(
   agentId: string = DEFAULT_AGENT_ID,
   opts: { trigger?: ConsolidationTrigger; db?: AppDbClient } = {},
