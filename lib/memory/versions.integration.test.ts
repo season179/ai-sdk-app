@@ -23,7 +23,8 @@ import {
   updateMemory,
 } from "@/lib/self-improvement/memories";
 
-const available = Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
+const available =
+  Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
 const integration = available ? describe : describe.skip;
 
 integration("versioned memory authority (integration)", () => {
@@ -31,15 +32,28 @@ integration("versioned memory authority (integration)", () => {
   beforeAll(() => getPool());
   afterAll(async () => {
     const db = getDb();
-    await db.delete(agentGroundedObservations).where(eq(agentGroundedObservations.agentId, agentId));
+    await db
+      .delete(agentGroundedObservations)
+      .where(eq(agentGroundedObservations.agentId, agentId));
     await db.delete(agentMemoryEvents).where(eq(agentMemoryEvents.agentId, agentId));
-    const roots = await db.select({ id: agentMemories.id }).from(agentMemories).where(eq(agentMemories.agentId, agentId));
+    const roots = await db
+      .select({ id: agentMemories.id })
+      .from(agentMemories)
+      .where(eq(agentMemories.agentId, agentId));
     for (const root of roots) {
-      const versions = await db.select({ id: agentMemoryVersions.id }).from(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, root.id));
+      const versions = await db
+        .select({ id: agentMemoryVersions.id })
+        .from(agentMemoryVersions)
+        .where(eq(agentMemoryVersions.memoryId, root.id));
       for (const version of versions) {
-        await db.delete(agentMemoryVersionTraceEvents).where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
+        await db
+          .delete(agentMemoryVersionTraceEvents)
+          .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, version.id));
       }
-      await db.update(agentMemories).set({ currentVersionId: null, status: "creating" }).where(eq(agentMemories.id, root.id));
+      await db
+        .update(agentMemories)
+        .set({ currentVersionId: null, status: "creating" })
+        .where(eq(agentMemories.id, root.id));
       await db.delete(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, root.id));
     }
     await db.delete(agentMemories).where(eq(agentMemories.agentId, agentId));
@@ -62,10 +76,14 @@ integration("versioned memory authority (integration)", () => {
       .where(eq(agentMemoryVersionTraceEvents.memoryVersionId, created.currentVersionId));
     expect(provenance.length).toBeGreaterThan(0);
 
-    const updated = await updateMemory(created.id, {
-      content: "The deployment region is Sydney.",
-      confidence: 90,
-    }, agentId);
+    const updated = await updateMemory(
+      created.id,
+      {
+        content: "The deployment region is Sydney.",
+        confidence: 90,
+      },
+      agentId,
+    );
     expect(updated.content).toContain("Sydney");
     const versions = await getDb()
       .select({
@@ -82,7 +100,12 @@ integration("versioned memory authority (integration)", () => {
   });
 
   it("invalidates by appending history and excludes the root from current reads", async () => {
-    const memory = await createMemory({ agentId, kind: "fact", content: "Temporary project state.", source: "user" });
+    const memory = await createMemory({
+      agentId,
+      kind: "fact",
+      content: "Temporary project state.",
+      source: "user",
+    });
     const archived = await archiveMemory(memory.id, agentId);
     expect(archived.status).toBe("archived");
     const versions = await getDb()
@@ -107,24 +130,49 @@ integration("versioned memory authority (integration)", () => {
         authority: "reviewed",
       }),
     ).rejects.toThrow(/evidence/);
-    const roots = await getDb().select().from(agentMemories).where(and(eq(agentMemories.agentId, agentId), eq(agentMemories.canonicalKey, "unsupported")));
+    const roots = await getDb()
+      .select()
+      .from(agentMemories)
+      .where(
+        and(eq(agentMemories.agentId, agentId), eq(agentMemories.canonicalKey, "unsupported")),
+      );
     expect(roots).toHaveLength(0);
   });
 
   it("serializes concurrent updates into unique monotonic versions", async () => {
-    const memory = await createMemory({ agentId, kind: "preference", content: "Use blue charts.", source: "user" });
+    const memory = await createMemory({
+      agentId,
+      kind: "preference",
+      content: "Use blue charts.",
+      source: "user",
+    });
     await Promise.all([
       updateMemory(memory.id, { content: "Use green charts." }, agentId),
       updateMemory(memory.id, { content: "Use amber charts." }, agentId),
     ]);
-    const versions = await getDb().select({ versionNo: agentMemoryVersions.versionNo }).from(agentMemoryVersions).where(eq(agentMemoryVersions.memoryId, memory.id)).orderBy(agentMemoryVersions.versionNo);
+    const versions = await getDb()
+      .select({ versionNo: agentMemoryVersions.versionNo })
+      .from(agentMemoryVersions)
+      .where(eq(agentMemoryVersions.memoryId, memory.id))
+      .orderBy(agentMemoryVersions.versionNo);
     expect(versions.map((row) => row.versionNo)).toEqual([1, 2, 3]);
   });
 
   it("searches canonical current versions with FTS and trigram fallback", async () => {
     const marker = `observability${Date.now()}`;
-    const memory = await createMemory({ agentId, kind: "procedure", content: `${marker} verify deployment telemetry`, source: "user" });
-    expect((await searchMemories(agentId, `${marker} telemetry`)).some((row) => row.id === memory.id)).toBe(true);
-    expect((await searchMemories(agentId, `${marker.slice(0, -1)}x`)).some((row) => row.id === memory.id)).toBe(true);
+    const memory = await createMemory({
+      agentId,
+      kind: "procedure",
+      content: `${marker} verify deployment telemetry`,
+      source: "user",
+    });
+    expect(
+      (await searchMemories(agentId, `${marker} telemetry`)).some((row) => row.id === memory.id),
+    ).toBe(true);
+    expect(
+      (await searchMemories(agentId, `${marker.slice(0, -1)}x`)).some(
+        (row) => row.id === memory.id,
+      ),
+    ).toBe(true);
   });
 });

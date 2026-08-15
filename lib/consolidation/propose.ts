@@ -155,7 +155,9 @@ function pickAdmissionPolicy(scoreBps: number | undefined): AdmissionPolicy {
 }
 
 /** Cheap kind inference from concept tags — never authoritative. */
-function inferKind(metadata: AdmissionMetadataV1): "preference" | "fact" | "correction" | "persona" {
+function inferKind(
+  metadata: AdmissionMetadataV1,
+): "preference" | "fact" | "correction" | "persona" {
   // The candidate metadata doesn't carry concept tags directly; the caller can
   // extend this later. Default to 'fact' — the safest general bucket.
   void metadata;

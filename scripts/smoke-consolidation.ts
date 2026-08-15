@@ -64,7 +64,9 @@ async function main() {
     throw new Error("Failed/interrupted trace produced a memory proposal.");
   }
 
-  console.log("Smoke OK: run/candidates valid; applied memories have trace-backed current versions.");
+  console.log(
+    "Smoke OK: run/candidates valid; applied memories have trace-backed current versions.",
+  );
   await closePool();
 }
 

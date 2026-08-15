@@ -249,8 +249,10 @@ export default function ProposalsPage() {
                       ) : null}
                       {selected.admissionMetadata.version === 2 ? (
                         <p className="mt-2 text-xs text-muted-foreground">
-                          {selected.admissionMetadata.memoryType} · {selected.admissionMetadata.gateReason} ·{" "}
-                          {selected.admissionMetadata.evidenceTraceEventIds.length} trace evidence event(s)
+                          {selected.admissionMetadata.memoryType} ·{" "}
+                          {selected.admissionMetadata.gateReason} ·{" "}
+                          {selected.admissionMetadata.evidenceTraceEventIds.length} trace evidence
+                          event(s)
                         </p>
                       ) : null}
                     </section>

@@ -26,10 +26,7 @@ const REVIEW_PROPOSAL_KINDS = [
 ] as const;
 
 export function parseMemoryKind(value: unknown): MemoryKind {
-  if (
-    typeof value === "string" &&
-    MEMORY_KINDS.includes(value as (typeof MEMORY_KINDS)[number])
-  ) {
+  if (typeof value === "string" && MEMORY_KINDS.includes(value as (typeof MEMORY_KINDS)[number])) {
     return value as MemoryKind;
   }
 

@@ -164,10 +164,7 @@ export type DecisionOutcomeInput = {
   occurredAt?: Date;
 };
 
-export async function appendDecisionOutcome(
-  input: DecisionOutcomeInput,
-  outerDb?: AppDbClient,
-) {
+export async function appendDecisionOutcome(input: DecisionOutcomeInput, outerDb?: AppDbClient) {
   const run = async (db: AppDbClient) => {
     const key = `task:${input.taskId}:round:${input.round}:attempt:${input.retryCount}:outcome`;
     await db.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
@@ -207,7 +204,9 @@ export async function appendDecisionOutcome(
     const [decision] = await db
       .select()
       .from(agentDecisions)
-      .where(and(eq(agentDecisions.id, input.decisionId), eq(agentDecisions.agentId, input.agentId)))
+      .where(
+        and(eq(agentDecisions.id, input.decisionId), eq(agentDecisions.agentId, input.agentId)),
+      )
       .limit(1);
     if (!decision) throw new Error("Decision outcome requires a same-agent decision.");
 

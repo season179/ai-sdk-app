@@ -70,10 +70,7 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
   if (candidate.validTo && Number.isNaN(Date.parse(candidate.validTo))) {
     return reject("malformed_validity_interval");
   }
-  if (
-    candidate.sourceReferenceTime &&
-    Number.isNaN(Date.parse(candidate.sourceReferenceTime))
-  ) {
+  if (candidate.sourceReferenceTime && Number.isNaN(Date.parse(candidate.sourceReferenceTime))) {
     return reject("malformed_reference_time");
   }
   if (
@@ -109,7 +106,10 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
   if (candidate.memoryType === "episodic" && (!terminalSupport || (!userSupport && !toolSupport))) {
     return reject("unsupported_episodic_source");
   }
-  if (candidate.memoryType === "procedural" && (!terminalSupport || (!matchedTool && !userSupport))) {
+  if (
+    candidate.memoryType === "procedural" &&
+    (!terminalSupport || (!matchedTool && !userSupport))
+  ) {
     return reject("unsupported_procedural_source");
   }
 
@@ -128,16 +128,21 @@ export function gateMemoryCandidate(candidate: GateCandidate, options: GateOptio
   score -= Math.max(0, options.sensitivityPenaltyBps ?? 0);
 
   if (candidate.validTo) {
-    const days = (Date.parse(candidate.validTo) - (options.now ?? new Date()).getTime()) / 86_400_000;
+    const days =
+      (Date.parse(candidate.validTo) - (options.now ?? new Date()).getTime()) / 86_400_000;
     if (days <= 1) score -= 2000;
   }
   score = Math.max(0, Math.min(10_000, score));
   const threshold = options.minScoreBps ?? getGateMinScoreBps();
-  if (options.exactDuplicate) return { status: "rejected", reason: "exact_duplicate", scoreBps: score };
+  if (options.exactDuplicate)
+    return { status: "rejected", reason: "exact_duplicate", scoreBps: score };
   if (options.contradiction && score < threshold) {
     return { status: "rejected", reason: "contradiction", scoreBps: score };
   }
-  if (candidate.validTo && Date.parse(candidate.validTo) - (options.now ?? new Date()).getTime() <= 86_400_000) {
+  if (
+    candidate.validTo &&
+    Date.parse(candidate.validTo) - (options.now ?? new Date()).getTime() <= 86_400_000
+  ) {
     if (score < threshold) return { status: "rejected", reason: "near_expiry", scoreBps: score };
   }
   return score >= threshold

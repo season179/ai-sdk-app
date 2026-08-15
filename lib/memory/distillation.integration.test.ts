@@ -18,16 +18,14 @@ import {
   agentTraceEvents,
 } from "@/db/schema";
 import { admitTurnReviewCandidates } from "@/lib/consolidation/run";
+import { type ExtractedMemoryCandidate, persistMemoryCandidates } from "@/lib/memory/candidates";
 import { buildTerminalEvent, buildUserMessageEvent } from "@/lib/memory/capture";
-import {
-  type ExtractedMemoryCandidate,
-  persistMemoryCandidates,
-} from "@/lib/memory/candidates";
 import { appendTraceEvents } from "@/lib/memory/trace";
-import { applyReviewProposal } from "@/lib/self-improvement/apply";
 import { closePool, getPool } from "@/lib/scheduler/db";
+import { applyReviewProposal } from "@/lib/self-improvement/apply";
 
-const available = Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
+const available =
+  Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
 const integration = available ? describe : describe.skip;
 
 integration("typed trace distillation (integration)", () => {
@@ -78,7 +76,9 @@ integration("typed trace distillation (integration)", () => {
     }
     await db.delete(agentMemoryCandidates).where(eq(agentMemoryCandidates.agentId, agentId));
     await db.delete(agentTraceEvents).where(eq(agentTraceEvents.agentId, agentId));
-    await db.delete(agentConsolidationSettings).where(eq(agentConsolidationSettings.agentId, agentId));
+    await db
+      .delete(agentConsolidationSettings)
+      .where(eq(agentConsolidationSettings.agentId, agentId));
     await closePool();
   });
 
@@ -98,7 +98,10 @@ integration("typed trace distillation (integration)", () => {
     return { traceId, rows };
   }
 
-  function draft(evidenceTraceEventIds: string[], overrides: Partial<ExtractedMemoryCandidate> = {}): ExtractedMemoryCandidate {
+  function draft(
+    evidenceTraceEventIds: string[],
+    overrides: Partial<ExtractedMemoryCandidate> = {},
+  ): ExtractedMemoryCandidate {
     return {
       memoryType: "semantic",
       canonicalKey: "preference:status-style",
@@ -172,7 +175,12 @@ integration("typed trace distillation (integration)", () => {
       agentId,
       reviewKey: `review:${randomUUID()}`,
       traceId: completed.traceId,
-      candidates: [draft(completed.rows.map((row) => row.id), { content: secret })],
+      candidates: [
+        draft(
+          completed.rows.map((row) => row.id),
+          { content: secret },
+        ),
+      ],
       windowEvents: completed.rows,
       extractorId: "integration-extractor",
       modelId: "integration-model",

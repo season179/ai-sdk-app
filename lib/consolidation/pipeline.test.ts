@@ -13,9 +13,9 @@ import {
 } from "@/db/schema";
 import { claimHash } from "@/lib/consolidation/normalize";
 import { ingestUserTurn } from "@/lib/consolidation/observations";
+import { runConsolidation } from "@/lib/consolidation/run";
 import { buildTerminalEvent, buildUserMessageEvent } from "@/lib/memory/capture";
 import { appendTraceEvents } from "@/lib/memory/trace";
-import { runConsolidation } from "@/lib/consolidation/run";
 import { closePool, getPool } from "@/lib/scheduler/db";
 import { applyReviewProposal } from "@/lib/self-improvement/apply";
 import { listReviewProposals } from "@/lib/self-improvement/proposals";

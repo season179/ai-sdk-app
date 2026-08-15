@@ -26,10 +26,13 @@ export type SanitizedTracePayload = {
   injectionDetected: boolean;
 };
 
-const PRIVATE_KEY = /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/gi;
+const PRIVATE_KEY =
+  /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/gi;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
-const PROVIDER_TOKEN = /\b(?:sk-(?:proj-)?|sk-or-v1-|ghp_|github_pat_|xox[baprs]-|AIza)[A-Za-z0-9_\-.]{12,}/g;
-const CREDENTIAL_ASSIGNMENT = /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd)\s*[:=]\s*["']?[^\s,"'}]{6,}/gi;
+const PROVIDER_TOKEN =
+  /\b(?:sk-(?:proj-)?|sk-or-v1-|ghp_|github_pat_|xox[baprs]-|AIza)[A-Za-z0-9_\-.]{12,}/g;
+const CREDENTIAL_ASSIGNMENT =
+  /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd)\s*[:=]\s*["']?[^\s,"'}]{6,}/gi;
 const INJECTION_PATTERNS = [
   /ignore\s+(?:all\s+)?(?:previous|prior|system)\s+instructions/i,
   /reveal\s+(?:the\s+)?(?:system prompt|hidden instructions|secrets?)/i,
@@ -71,7 +74,9 @@ function sanitizeValue(value: unknown, state: { secretDetected: boolean }): unkn
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      if (/reasoning|reasoningText|requestBody|providerRequest|apiContent|injectedMessages/i.test(key)) {
+      if (
+        /reasoning|reasoningText|requestBody|providerRequest|apiContent|injectedMessages/i.test(key)
+      ) {
         continue;
       }
       out[key] = sanitizeValue((value as Record<string, unknown>)[key], state);
@@ -86,7 +91,9 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   return `{${Object.keys(value as Record<string, unknown>)
     .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+    .map(
+      (key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`,
+    )
     .join(",")}}`;
 }
 

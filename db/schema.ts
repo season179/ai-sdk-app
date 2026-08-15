@@ -27,13 +27,7 @@ export type ScheduledTaskStatus = "active" | "paused" | "completed" | "cancelled
 export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "skipped";
 export type SkillType = "skill" | "reference";
 export type ChatMessageRole = "user" | "assistant" | "system";
-export type MemoryKind =
-  | "preference"
-  | "fact"
-  | "correction"
-  | "persona"
-  | "episode"
-  | "procedure";
+export type MemoryKind = "preference" | "fact" | "correction" | "persona" | "episode" | "procedure";
 export type MemoryType = "semantic" | "episodic" | "procedural";
 export type MemoryConflictPolicy =
   | "replace_current"
@@ -389,10 +383,7 @@ export const agentTraceArtifacts = pgTable(
   (t) => [
     check("agent_trace_artifacts_hash_check", sql`${t.artifactHash} ~ '^[0-9a-f]{64}$'`),
     check("agent_trace_artifacts_byte_size_check", sql`${t.byteSize} >= 0`),
-    check(
-      "agent_trace_artifacts_excerpt_check",
-      sql`char_length(${t.redactedExcerpt}) <= 4000`,
-    ),
+    check("agent_trace_artifacts_excerpt_check", sql`char_length(${t.redactedExcerpt}) <= 4000`),
     check(
       "agent_trace_artifacts_content_check",
       sql`${t.content} is null or octet_length(${t.content}) <= 262144`,
@@ -483,9 +474,7 @@ export const agentTraceEvents = pgTable(
       .on(t.taskId, t.pgBossJobId, t.ingestedAt)
       .where(sql`${t.taskId} is not null`),
     index("agent_trace_events_type_occurred_idx").on(t.agentId, t.eventType, t.occurredAt),
-    index("agent_trace_events_expires_idx")
-      .on(t.expiresAt)
-      .where(sql`${t.expiresAt} is not null`),
+    index("agent_trace_events_expires_idx").on(t.expiresAt).where(sql`${t.expiresAt} is not null`),
   ],
 );
 
@@ -791,10 +780,7 @@ export const agentMemories = pgTable(
       sql`${t.conflictPolicy} in ('replace_current', 'append_temporal', 'add_only', 'version_evaluate')`,
     ),
     check("agent_memories_scope_type_check", sql`${t.scopeType} in ('agent', 'session', 'task')`),
-    check(
-      "agent_memories_status_check",
-      sql`${t.status} in ('creating', 'approved', 'archived')`,
-    ),
+    check("agent_memories_status_check", sql`${t.status} in ('creating', 'approved', 'archived')`),
     check(
       "agent_memories_current_version_shape_check",
       sql`(${t.status} = 'creating' and ${t.currentVersionId} is null) or (${t.status} <> 'creating' and ${t.currentVersionId} is not null)`,
@@ -876,10 +862,7 @@ export const agentMemoryVersions = pgTable(
   },
   (t) => [
     check("agent_memory_versions_version_check", sql`${t.versionNo} >= 1`),
-    check(
-      "agent_memory_versions_content_check",
-      sql`char_length(${t.content}) between 1 and 2000`,
-    ),
+    check("agent_memory_versions_content_check", sql`char_length(${t.content}) between 1 and 2000`),
     check(
       "agent_memory_versions_source_check",
       sql`${t.source} in ('user', 'review', 'curated', 'consolidated')`,

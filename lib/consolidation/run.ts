@@ -22,7 +22,6 @@ import {
 import { recordMemoryEvent } from "@/lib/consolidation/events";
 import { listGroundedObservations } from "@/lib/consolidation/observations";
 import { proposeCandidate, proposeTypedCandidate } from "@/lib/consolidation/propose";
-import type { PersistedCandidateVerdict } from "@/lib/memory/candidates";
 import { type ClaimSignal, scoreAndGate } from "@/lib/consolidation/scoring";
 import {
   groupByClaim,
@@ -31,6 +30,7 @@ import {
   recordScore,
   upsertRecallSignal,
 } from "@/lib/consolidation/signals";
+import type { PersistedCandidateVerdict } from "@/lib/memory/candidates";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
 /**
@@ -68,7 +68,9 @@ export async function admitTurnReviewCandidates(
         runId: run.id,
         agentId: input.agentId,
         claimKey: item.candidate.canonicalKey ?? `candidate:${item.candidate.id}`,
-        snippet: passed ? (item.candidate.content ?? "") : `[rejected:${item.candidate.gateReason}]`,
+        snippet: passed
+          ? (item.candidate.content ?? "")
+          : `[rejected:${item.candidate.gateReason}]`,
         candidateOrigin: "turn_review",
         sourceCandidateId: item.candidate.id,
         memoryType: item.candidate.memoryType,
@@ -158,7 +160,8 @@ export function parseTstzRange(value: string | null): [string | null, string | n
     if (!raw) return null;
     const unquoted = raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
     const timestamp = Date.parse(unquoted);
-    if (Number.isNaN(timestamp)) throw new Error("Invalid tstzrange bound returned for a memory candidate.");
+    if (Number.isNaN(timestamp))
+      throw new Error("Invalid tstzrange bound returned for a memory candidate.");
     return new Date(timestamp).toISOString();
   };
   return [parseBound(match[1]), parseBound(match[2])];

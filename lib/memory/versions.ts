@@ -2,14 +2,14 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
+  agentMemories,
+  agentMemoryVersions,
+  agentMemoryVersionTraceEvents,
+  agentTraceEvents,
   type MemoryConflictPolicy,
   type MemoryKind,
   type MemorySource,
   type MemoryType,
-  agentMemories,
-  agentMemoryVersionTraceEvents,
-  agentMemoryVersions,
-  agentTraceEvents,
 } from "@/db/schema";
 import { getMemoryPolicyVersion } from "@/lib/memory/config";
 
@@ -42,8 +42,10 @@ export type VersionedMemoryInput = {
 };
 
 function family(kind: MemoryKind, requested?: MemoryType): MemoryType {
-  const expected = kind === "episode" ? "episodic" : kind === "procedure" ? "procedural" : "semantic";
-  if (requested && requested !== expected) throw new Error(`Memory kind ${kind} requires type ${expected}.`);
+  const expected =
+    kind === "episode" ? "episodic" : kind === "procedure" ? "procedural" : "semantic";
+  if (requested && requested !== expected)
+    throw new Error(`Memory kind ${kind} requires type ${expected}.`);
   return expected;
 }
 
@@ -156,7 +158,9 @@ export async function appendMemoryVersion(
     const now = new Date();
     await db
       .update(agentMemoryVersions)
-      .set({ recordedDuring: sql`tstzrange(lower(${agentMemoryVersions.recordedDuring}), ${now}, '[)')` })
+      .set({
+        recordedDuring: sql`tstzrange(lower(${agentMemoryVersions.recordedDuring}), ${now}, '[)')`,
+      })
       .where(eq(agentMemoryVersions.id, current.id));
     const [version] = await db
       .insert(agentMemoryVersions)
@@ -233,7 +237,9 @@ export async function invalidateMemory(
     const now = new Date();
     await db
       .update(agentMemoryVersions)
-      .set({ recordedDuring: sql`tstzrange(lower(${agentMemoryVersions.recordedDuring}), ${now}, '[)')` })
+      .set({
+        recordedDuring: sql`tstzrange(lower(${agentMemoryVersions.recordedDuring}), ${now}, '[)')`,
+      })
       .where(eq(agentMemoryVersions.id, current.id));
     const [version] = await db
       .insert(agentMemoryVersions)

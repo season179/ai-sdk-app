@@ -10,12 +10,9 @@ import {
   buildTerminalEvent,
   type TraceContext,
 } from "@/lib/memory/capture";
-import { appendDecisionOutcome, recordScheduledDecision } from "@/lib/memory/decisions";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
-import {
-  appendTraceEventsFailOpen,
-  type TraceEventInput,
-} from "@/lib/memory/trace";
+import { appendDecisionOutcome, recordScheduledDecision } from "@/lib/memory/decisions";
+import { appendTraceEventsFailOpen, type TraceEventInput } from "@/lib/memory/trace";
 import { getBoss, stopBoss, TASK_QUEUE_NAME, taskSendOptions } from "@/lib/scheduler/boss";
 import { recoverMissedRuns } from "@/lib/scheduler/catchup";
 import { closePool } from "@/lib/scheduler/db";
@@ -94,7 +91,9 @@ async function processJob(job: TaskJob) {
 async function processToolCallJob(job: TaskJob, task: ScheduledTask, context: TraceContext) {
   await markRunStarted(task.id, job.id);
   try {
-    const output = await executeScheduledTaskPayload(task.payload as Extract<typeof task.payload, { kind: "tool_call" }>);
+    const output = await executeScheduledTaskPayload(
+      task.payload as Extract<typeof task.payload, { kind: "tool_call" }>,
+    );
     await getDb().transaction(async (tx) => {
       await markRunCompleted(job.id, output, tx);
       if (isMemoryWriteEnabled() && task.payload.kind === "tool_call") {
@@ -123,12 +122,9 @@ async function processToolCallJob(job: TaskJob, task: ScheduledTask, context: Tr
       if (isMemoryWriteEnabled() && task.payload.kind === "tool_call") {
         await appendTraceEventsFailOpen(
           [
-            ...buildScheduledToolEvents(
-              context,
-              task.payload.toolName,
-              task.payload.arguments,
-              { error: message },
-            ),
+            ...buildScheduledToolEvents(context, task.payload.toolName, task.payload.arguments, {
+              error: message,
+            }),
             buildTerminalEvent(context, "failed", { error: message }),
           ],
           tx,
@@ -168,10 +164,7 @@ async function processInstructionJob(
     await getDb().transaction(async (tx) => {
       await markRunCompleted(job.id, { round: payload.round, ...currentVerdict }, tx);
       if (isMemoryWriteEnabled()) {
-        const traceRows = await appendTraceEventsFailOpen(
-          [...round.traceEvents, terminal],
-          tx,
-        );
+        const traceRows = await appendTraceEventsFailOpen([...round.traceEvents, terminal], tx);
         if (traceRows.length > 0) {
           try {
             const decision = await tx.transaction((savepoint) =>

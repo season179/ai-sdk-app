@@ -149,14 +149,12 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
               reviewProposalId: proposal.id,
               claimHash,
               memoryType: payload.memoryType,
-              canonicalKey:
-                typeof payload.canonicalKey === "string" ? payload.canonicalKey : null,
+              canonicalKey: typeof payload.canonicalKey === "string" ? payload.canonicalKey : null,
               validFrom: payload.validFrom,
               validTo: payload.validTo,
               sourceEventIds,
               authority: memorySource === "consolidated" ? "consolidated" : "reviewed",
-              extractorId:
-                proposal.admissionMetadata?.version === 2 ? "turn-review-v1" : null,
+              extractorId: proposal.admissionMetadata?.version === 2 ? "turn-review-v1" : null,
               modelId: proposal.reviewerModel,
               promptHash: null,
             },

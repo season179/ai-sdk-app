@@ -18,8 +18,8 @@ import {
 } from "@/lib/memory/config";
 import { sha256 } from "@/lib/memory/redaction";
 import { assertCompletedTraceWindow, listCompletedTraceWindow } from "@/lib/memory/trace";
-import type { TurnReviewJobData } from "@/lib/self-improvement/enqueue";
 import { getReviewerModel } from "@/lib/self-improvement/config";
+import type { TurnReviewJobData } from "@/lib/self-improvement/enqueue";
 import { createReviewProposal } from "@/lib/self-improvement/proposals";
 import { getSkillCatalog } from "@/lib/skills/catalog";
 
@@ -101,8 +101,7 @@ export async function runTurnReview(job: TurnReviewJobData): Promise<RunTurnRevi
       ? { agentId: job.agentId, sessionId: job.sessionId, since }
       : { agentId: job.agentId, taskId: job.taskId },
   );
-  const expectedTraceId =
-    job.kind === "chat" ? job.latestTerminalTraceId : job.attemptTraceId;
+  const expectedTraceId = job.kind === "chat" ? job.latestTerminalTraceId : job.attemptTraceId;
   const selected =
     job.kind === "scheduled" ? window.filter((row) => row.traceId === expectedTraceId) : window;
   if (
@@ -155,10 +154,7 @@ export async function runTurnReview(job: TurnReviewJobData): Promise<RunTurnRevi
       },
       tx,
     );
-    const admission = await admitTurnReviewCandidates(
-      { agentId: job.agentId, candidates },
-      tx,
-    );
+    const admission = await admitTurnReviewCandidates({ agentId: job.agentId, candidates }, tx);
     let skillProposalCount = 0;
     for (const proposal of applicableSkills) {
       const triggerMessageId = job.kind === "chat" ? job.triggerMessageId : job.pgBossJobId;

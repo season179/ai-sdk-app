@@ -124,7 +124,11 @@ export async function listApprovedMemories(
 ): Promise<Memory[]> {
   const rows = await currentQuery(db)
     .where(and(eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()))
-    .orderBy(asc(agentMemories.kind), desc(agentMemoryVersions.confidence), asc(agentMemories.createdAt))
+    .orderBy(
+      asc(agentMemories.kind),
+      desc(agentMemoryVersions.confidence),
+      asc(agentMemories.createdAt),
+    )
     .limit(limit);
   return rows.map(mapMemoryRow);
 }
@@ -135,7 +139,14 @@ export async function getMemoryById(
   db: AppDbClient = getDb(),
 ): Promise<Memory | null> {
   const [row] = await currentQuery(db)
-    .where(and(eq(agentMemories.id, id), eq(agentMemories.agentId, agentId), activeRoot(), activeVersion()))
+    .where(
+      and(
+        eq(agentMemories.id, id),
+        eq(agentMemories.agentId, agentId),
+        activeRoot(),
+        activeVersion(),
+      ),
+    )
     .limit(1);
   return row ? mapMemoryRow(row) : null;
 }
@@ -157,10 +168,7 @@ export async function getMemoryByReviewProposalId(
   return row ? mapMemoryRow(row) : null;
 }
 
-export async function createMemory(
-  input: CreateMemoryInput,
-  db?: AppDbClient,
-): Promise<Memory> {
+export async function createMemory(input: CreateMemoryInput, db?: AppDbClient): Promise<Memory> {
   if (!db) return getDb().transaction((tx) => createMemory(input, tx));
   const agentId = input.agentId ?? DEFAULT_AGENT_ID;
   const kind = parseMemoryKind(input.kind);
@@ -169,10 +177,14 @@ export async function createMemory(
   const source = parseMemorySource(input.source);
   const confidence = parseMemoryConfidence(input.confidence);
   const bounds = parseValidityBounds(input.validFrom, input.validTo);
-  const evidence =
-    input.sourceEventIds?.length
-      ? input.sourceEventIds
-      : [await appendExplicitEvent(db, agentId, input.sessionId ?? null, "create", { kind, content })];
+  const evidence = input.sourceEventIds?.length
+    ? input.sourceEventIds
+    : [
+        await appendExplicitEvent(db, agentId, input.sessionId ?? null, "create", {
+          kind,
+          content,
+        }),
+      ];
   const result = await createVersionedMemory(
     {
       agentId,
@@ -230,7 +242,8 @@ export async function updateMemory(
   }
   const kind = input.kind === undefined ? existing.kind : parseMemoryKind(input.kind);
   const memoryType = parseMemoryType(input.memoryType, familyForKind(kind));
-  const content = input.content === undefined ? existing.content : parseMemoryContent(input.content);
+  const content =
+    input.content === undefined ? existing.content : parseMemoryContent(input.content);
   const source =
     input.source !== undefined
       ? parseMemorySource(input.source, existing.source)
@@ -242,10 +255,9 @@ export async function updateMemory(
       ? existing.confidence
       : parseMemoryConfidence(input.confidence, existing.confidence);
   const bounds = parseValidityBounds(input.validFrom, input.validTo);
-  const evidence =
-    input.sourceEventIds?.length
-      ? input.sourceEventIds
-      : [await appendExplicitEvent(db, agentId, existing.sessionId, "update", { id, kind, content })];
+  const evidence = input.sourceEventIds?.length
+    ? input.sourceEventIds
+    : [await appendExplicitEvent(db, agentId, existing.sessionId, "update", { id, kind, content })];
   const result = await appendMemoryVersion(
     id,
     {
@@ -307,14 +319,22 @@ export async function setMemoryProtection(
       updatedAt: sql`now()`,
     })
     .where(and(eq(agentMemories.id, id), eq(agentMemories.agentId, agentId)));
-  await recordMemoryEvent({
-    agentId,
-    eventType: isProtected ? "protected" : "unprotected",
-    origin: "user",
-    summary: isProtected ? "Protected memory." : "Unprotected memory.",
-    memoryId: id,
-  }, db);
-  return { ...existing, isProtected, protectedAt: isProtected ? new Date().toISOString() : null, protectedBy: isProtected ? protectedBy ?? null : null };
+  await recordMemoryEvent(
+    {
+      agentId,
+      eventType: isProtected ? "protected" : "unprotected",
+      origin: "user",
+      summary: isProtected ? "Protected memory." : "Unprotected memory.",
+      memoryId: id,
+    },
+    db,
+  );
+  return {
+    ...existing,
+    isProtected,
+    protectedAt: isProtected ? new Date().toISOString() : null,
+    protectedBy: isProtected ? (protectedBy ?? null) : null,
+  };
 }
 
 export async function archiveMemory(
@@ -326,7 +346,8 @@ export async function archiveMemory(
   if (!db) return getDb().transaction((tx) => archiveMemory(id, agentId, tx, sourceEventIds));
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
-  if (existing.isProtected) throw new SelfImprovementInputError("A protected memory cannot be edited or archived.");
+  if (existing.isProtected)
+    throw new SelfImprovementInputError("A protected memory cannot be edited or archived.");
   const evidence = sourceEventIds?.length
     ? sourceEventIds
     : [await appendExplicitEvent(db, agentId, existing.sessionId, "archive", { id })];
@@ -335,14 +356,17 @@ export async function archiveMemory(
     { agentId, sourceEventIds: evidence, source: existing.source, authority: "user" },
     db,
   );
-  await recordMemoryEvent({
-    agentId,
-    eventType: "archived",
-    origin: memoryEventOriginForSource(existing.source),
-    summary: `Archived ${existing.kind} memory.`,
-    memoryId: id,
-    memoryVersionId: result.version.id,
-  }, db);
+  await recordMemoryEvent(
+    {
+      agentId,
+      eventType: "archived",
+      origin: memoryEventOriginForSource(existing.source),
+      summary: `Archived ${existing.kind} memory.`,
+      memoryId: id,
+      memoryVersionId: result.version.id,
+    },
+    db,
+  );
   return mapMemoryRow({ root: result.root, version: result.version });
 }
 
@@ -415,23 +439,26 @@ async function appendExplicitEvent(
 ): Promise<string> {
   const traceId = `explicit-memory:${randomUUID()}`;
   const sanitized = sanitizeTracePayload({ operation, ...payload });
-  const [event] = await appendTraceEvents([
-    {
-      agentId,
-      traceId,
-      sequenceNo: 0,
-      sessionId,
-      eventType: "explicit_memory_write",
-      actor: "user",
-      trustClass: "user_assertion",
-      payload: sanitized.payload,
-      contentHash: sanitized.contentHash,
-      idempotencyKey: traceId,
-      retentionClass: "audit",
-      policyVersion: getMemoryPolicyVersion(),
-      occurredAt: new Date(),
-    },
-  ], db);
+  const [event] = await appendTraceEvents(
+    [
+      {
+        agentId,
+        traceId,
+        sequenceNo: 0,
+        sessionId,
+        eventType: "explicit_memory_write",
+        actor: "user",
+        trustClass: "user_assertion",
+        payload: sanitized.payload,
+        contentHash: sanitized.contentHash,
+        idempotencyKey: traceId,
+        retentionClass: "audit",
+        policyVersion: getMemoryPolicyVersion(),
+        occurredAt: new Date(),
+      },
+    ],
+    db,
+  );
   return event.id;
 }
 
@@ -441,6 +468,14 @@ function familyForKind(kind: MemoryKind): MemoryType {
 function authorityForSource(source: MemorySource): VersionAuthority {
   return source === "user" ? "user" : source === "consolidated" ? "consolidated" : "reviewed";
 }
-function memoryEventOriginForSource(source: MemorySource): "user" | "review" | "consolidation" | "curator" {
-  return source === "user" ? "user" : source === "review" ? "review" : source === "consolidated" ? "consolidation" : "curator";
+function memoryEventOriginForSource(
+  source: MemorySource,
+): "user" | "review" | "consolidation" | "curator" {
+  return source === "user"
+    ? "user"
+    : source === "review"
+      ? "review"
+      : source === "consolidated"
+        ? "consolidation"
+        : "curator";
 }

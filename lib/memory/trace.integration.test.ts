@@ -17,7 +17,8 @@ import { sanitizeTracePayload } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import { closePool, getPool } from "@/lib/scheduler/db";
 
-const available = Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
+const available =
+  Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
 const integration = available ? describe : describe.skip;
 
 integration("trace journal (integration)", () => {
@@ -26,7 +27,9 @@ integration("trace journal (integration)", () => {
   beforeAll(() => getPool());
   afterAll(async () => {
     const db = getDb();
-    await db.delete(agentGroundedObservations).where(eq(agentGroundedObservations.agentId, agentId));
+    await db
+      .delete(agentGroundedObservations)
+      .where(eq(agentGroundedObservations.agentId, agentId));
     await db.delete(agentTraceEvents).where(eq(agentTraceEvents.agentId, agentId));
     for (const sessionId of sessionIds) {
       await db.delete(agentChatMessages).where(eq(agentChatMessages.sessionId, sessionId));
@@ -76,7 +79,10 @@ integration("trace journal (integration)", () => {
       await appendSessionMessages(sessionId, [message], {
         agentId,
         createIfMissing: true,
-        traceCapture: { events: [buildUserMessageEvent(context, message)], groundedUserMessages: [message] },
+        traceCapture: {
+          events: [buildUserMessageEvent(context, message)],
+          groundedUserMessages: [message],
+        },
       });
     } finally {
       process.env.AGENT_MEMORY_WRITE_ENABLED = previous;

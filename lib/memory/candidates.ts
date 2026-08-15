@@ -1,5 +1,5 @@
-import { and, eq, inArray } from "drizzle-orm";
 import { jsonSchema } from "ai";
+import { and, eq, inArray } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
@@ -8,7 +8,7 @@ import {
   agentMemoryCandidates,
   agentMemoryCandidateTraceEvents,
 } from "@/db/schema";
-import { gateMemoryCandidate, type GateResult } from "@/lib/memory/gate";
+import { type GateResult, gateMemoryCandidate } from "@/lib/memory/gate";
 import { canonicalJson, sanitizeTracePayload, sha256 } from "@/lib/memory/redaction";
 
 export type ExtractedMemoryCandidate = {
@@ -220,7 +220,8 @@ export async function getCandidateEvidenceIds(
     .from(agentMemoryCandidateTraceEvents)
     .where(inArray(agentMemoryCandidateTraceEvents.candidateId, candidateIds));
   const out = new Map<string, string[]>();
-  for (const row of rows) out.set(row.candidateId, [...(out.get(row.candidateId) ?? []), row.eventId]);
+  for (const row of rows)
+    out.set(row.candidateId, [...(out.get(row.candidateId) ?? []), row.eventId]);
   return out;
 }
 

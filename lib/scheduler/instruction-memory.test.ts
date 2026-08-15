@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-
+import type { InstructionTaskPayload } from "@/lib/scheduler/execute";
 import {
   buildRoundMessages,
   classifyInstructionVerdictAction,
   type InstructionVerdict,
 } from "@/lib/scheduler/instruction";
-import type { InstructionTaskPayload } from "@/lib/scheduler/execute";
 import type { ScheduledTask } from "@/lib/scheduler/tasks";
 
 const verdict: InstructionVerdict = {
@@ -26,15 +25,13 @@ const payload: InstructionTaskPayload = {
 
 describe("scheduled instruction memory contract", () => {
   it("maps verdicts to deterministic worker actions", () => {
-    expect(classifyInstructionVerdictAction("once", payload, verdict)).toBe(
-      "next_round_scheduled",
+    expect(classifyInstructionVerdictAction("once", payload, verdict)).toBe("next_round_scheduled");
+    expect(classifyInstructionVerdictAction("once", { ...payload, round: 3 }, verdict)).toBe(
+      "task_completed",
     );
-    expect(
-      classifyInstructionVerdictAction("once", { ...payload, round: 3 }, verdict),
-    ).toBe("task_completed");
-    expect(
-      classifyInstructionVerdictAction("cron", payload, { ...verdict, continue: false }),
-    ).toBe("task_cancelled");
+    expect(classifyInstructionVerdictAction("cron", payload, { ...verdict, continue: false })).toBe(
+      "task_cancelled",
+    );
   });
 
   it("keeps declared rationale out of the user-facing transcript message", () => {

@@ -60,7 +60,13 @@ export async function appendTraceEvents(
   if (events.length === 0) return [];
   events.forEach(validateEvent);
 
-  const artifacts = [...new Map(events.flatMap((event) => (event.artifact ? [[event.artifact.artifactHash, event.artifact] as const] : []))).values()];
+  const artifacts = [
+    ...new Map(
+      events.flatMap((event) =>
+        event.artifact ? [[event.artifact.artifactHash, event.artifact] as const] : [],
+      ),
+    ).values(),
+  ];
   if (artifacts.length > 0) {
     await db
       .insert(agentTraceArtifacts)
@@ -221,14 +227,15 @@ export async function listCompletedTraceWindow(
 
   const completed = new Set(
     rows
-      .filter((row) => row.eventType === "task_terminal_state" && row.terminalStatus === "completed")
+      .filter(
+        (row) => row.eventType === "task_terminal_state" && row.terminalStatus === "completed",
+      )
       .map((row) => row.traceId),
   );
   const incomplete = new Set(
     rows
       .filter(
-        (row) =>
-          row.eventType === "task_terminal_state" && row.terminalStatus !== "completed",
+        (row) => row.eventType === "task_terminal_state" && row.terminalStatus !== "completed",
       )
       .map((row) => row.traceId),
   );

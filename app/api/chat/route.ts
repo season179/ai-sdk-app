@@ -21,6 +21,7 @@ import {
 import { generateSessionTitle } from "@/lib/chat/title-agent";
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
 import { ingestUserTurn } from "@/lib/consolidation/observations";
+import { materializeSnapshot } from "@/lib/consolidation/snapshots";
 import {
   buildAssistantMessageEvent,
   buildTerminalEvent,
@@ -30,7 +31,6 @@ import {
 } from "@/lib/memory/capture";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
-import { materializeSnapshot } from "@/lib/consolidation/snapshots";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";

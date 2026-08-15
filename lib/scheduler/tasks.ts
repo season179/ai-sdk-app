@@ -426,11 +426,7 @@ export async function markRunCompleted(
     .where(eq(agentScheduledTaskRuns.pgBossJobId, pgBossJobId));
 }
 
-export async function markRunFailed(
-  pgBossJobId: string,
-  error: string,
-  db: AppDbClient = getDb(),
-) {
+export async function markRunFailed(pgBossJobId: string, error: string, db: AppDbClient = getDb()) {
   await db
     .update(agentScheduledTaskRuns)
     .set({ status: "failed", error, completedAt: sql`now()` })

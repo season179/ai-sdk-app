@@ -14,7 +14,8 @@ import {
 import { appendDecisionOutcome, recordScheduledDecision } from "@/lib/memory/decisions";
 import { closePool, getPool } from "@/lib/scheduler/db";
 
-const available = Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
+const available =
+  Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
 const integration = available ? describe : describe.skip;
 
 integration("scheduled decisions ledger (integration)", () => {
@@ -33,10 +34,14 @@ integration("scheduled decisions ledger (integration)", () => {
         .from(agentOutcomes)
         .where(eq(agentOutcomes.decisionId, decision.id));
       for (const outcome of outcomes) {
-        await db.delete(agentOutcomeTraceEvents).where(eq(agentOutcomeTraceEvents.outcomeId, outcome.id));
+        await db
+          .delete(agentOutcomeTraceEvents)
+          .where(eq(agentOutcomeTraceEvents.outcomeId, outcome.id));
       }
       await db.delete(agentOutcomes).where(eq(agentOutcomes.decisionId, decision.id));
-      await db.delete(agentDecisionTraceEvents).where(eq(agentDecisionTraceEvents.decisionId, decision.id));
+      await db
+        .delete(agentDecisionTraceEvents)
+        .where(eq(agentDecisionTraceEvents.decisionId, decision.id));
     }
     await db.delete(agentDecisions).where(eq(agentDecisions.agentId, agentId));
     await db.delete(agentTraceEvents).where(eq(agentTraceEvents.agentId, agentId));
