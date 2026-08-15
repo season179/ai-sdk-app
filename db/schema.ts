@@ -4,6 +4,7 @@ import {
   type AnyPgColumn,
   boolean,
   check,
+  customType,
   index,
   integer,
   jsonb,
@@ -26,10 +27,51 @@ export type ScheduledTaskStatus = "active" | "paused" | "completed" | "cancelled
 export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "skipped";
 export type SkillType = "skill" | "reference";
 export type ChatMessageRole = "user" | "assistant" | "system";
-export type MemoryKind = "preference" | "fact" | "correction" | "persona";
+export type MemoryKind =
+  | "preference"
+  | "fact"
+  | "correction"
+  | "persona"
+  | "episode"
+  | "procedure";
+export type MemoryType = "semantic" | "episodic" | "procedural";
+export type MemoryConflictPolicy =
+  | "replace_current"
+  | "append_temporal"
+  | "add_only"
+  | "version_evaluate";
+export type MemoryScopeType = "agent" | "session" | "task";
 // `consolidated` is minted only by consolidation proposals (§1.1 source guard).
 export type MemorySource = "user" | "review" | "curated" | "consolidated";
-export type MemoryStatus = "approved" | "archived";
+export type MemoryStatus = "creating" | "approved" | "archived";
+export type TraceEventType =
+  | "user_message"
+  | "assistant_message"
+  | "model_generation"
+  | "tool_requested"
+  | "tool_result"
+  | "environment_observation"
+  | "guardrail_result"
+  | "feedback"
+  | "decision_declared"
+  | "outcome_observed"
+  | "task_terminal_state"
+  | "explicit_memory_write"
+  | "legacy_import";
+export type TraceActor = "user" | "assistant" | "tool" | "system" | "scheduler" | "worker";
+export type TraceTrustClass =
+  | "user_assertion"
+  | "tool_observation"
+  | "third_party_content"
+  | "model_inference"
+  | "evaluator_result"
+  | "system_record";
+export type SensitivityClass = "normal" | "sensitive" | "restricted";
+export type TraceTerminalStatus = "completed" | "failed" | "interrupted" | "skipped";
+export type TraceRetentionClass = "short" | "standard" | "audit";
+export type CandidateSourceStance = "observation" | "assertion" | "interpretation" | "evaluation";
+export type CandidateOperation = "ADD" | "UPDATE" | "INVALIDATE" | "NOOP" | "REVIEW";
+export type CandidateGateStatus = "accepted" | "rejected" | "quarantined";
 export type ReviewProposalKind =
   | "memory_create"
   | "memory_edit"
@@ -54,7 +96,7 @@ export type AdmissionPolicy = "human_review" | "auto_apply_low_risk" | "dry_run_
 // `chat_user` = a user chat turn; `memory_user` = a source='user' memory.
 export type GroundedObservationOrigin = "chat_user" | "memory_user";
 export type ConsolidationRunStatus = "running" | "completed" | "failed";
-export type ConsolidationTrigger = "scheduled" | "manual";
+export type ConsolidationTrigger = "scheduled" | "manual" | "turn_review";
 // Append-only, human-readable timeline of how a memory evolved. Never read
 // back into evidence.
 export type MemoryEventType =
@@ -71,7 +113,7 @@ export type MemoryEventOrigin = "user" | "review" | "consolidation" | "curator";
 
 // The score breakdown + gate results attached to a consolidation proposal so
 // the review UI can render "why this was/wasn't proposed".
-export type AdmissionMetadata = {
+export type AdmissionMetadataV1 = {
   version: 1;
   origin: ReviewProposalOrigin;
   candidateId?: string;
@@ -100,6 +142,36 @@ export type AdmissionMetadata = {
   dryRun?: boolean;
 };
 
+export type AdmissionMetadataV2 = {
+  version: 2;
+  origin: ReviewProposalOrigin;
+  sourceCandidateId: string;
+  evidenceTraceEventIds: string[];
+  memoryType: MemoryType;
+  memoryKind: MemoryKind;
+  proposedOperation: CandidateOperation;
+  sourceStance: CandidateSourceStance;
+  scoreBps: number;
+  gateStatus: CandidateGateStatus;
+  gateReason: string;
+  canonicalKey?: string | null;
+  validFrom?: string | null;
+  validTo?: string | null;
+  timePrecision?: "instant" | "day" | "month" | "year" | "unknown";
+  dryRun?: boolean;
+  // Optional explainability fields keep existing review surfaces compatible;
+  // sourceCandidateId + evidenceTraceEventIds remain the v2 authority.
+  candidateId?: string;
+  claimKey?: string;
+  claimHash?: string;
+  score?: AdmissionMetadataV1["score"];
+  gates?: AdmissionMetadataV1["gates"];
+  groundedObservationIds?: string[];
+  autoApply?: { eligible: boolean; reasons: string[] };
+};
+
+export type AdmissionMetadata = AdmissionMetadataV1 | AdmissionMetadataV2;
+
 // agent_memory_events.detail — human-readable before/after + reason (e.g.
 // "duplicate_claim_hash"). Never re-enters evidence.
 export type MemoryEventDetail = {
@@ -111,6 +183,16 @@ export type MemoryEventDetail = {
 };
 
 // Per-agent scoring weights (stored in agent_consolidation_settings.weights).
+const tstzrange = customType<{ data: string; driverData: string }>({
+  dataType: () => "tstzrange",
+});
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType: () => "tsvector",
+});
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => "bytea",
+});
+
 export type ConsolidationWeights = {
   relevance: number; // 0..1
   frequency: number;
@@ -300,12 +382,387 @@ export const agentChatMessages = pgTable(
   ],
 );
 
+export const agentTraceArtifacts = pgTable(
+  "agent_trace_artifacts",
+  {
+    artifactHash: text("artifact_hash").primaryKey(),
+    mediaType: text("media_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    encoding: text("encoding"),
+    redactedExcerpt: text("redacted_excerpt").notNull(),
+    content: bytea("content"),
+    sensitivityClass: text("sensitivity_class").$type<SensitivityClass>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("agent_trace_artifacts_hash_check", sql`${t.artifactHash} ~ '^[0-9a-f]{64}$'`),
+    check("agent_trace_artifacts_byte_size_check", sql`${t.byteSize} >= 0`),
+    check(
+      "agent_trace_artifacts_excerpt_check",
+      sql`char_length(${t.redactedExcerpt}) <= 4000`,
+    ),
+    check(
+      "agent_trace_artifacts_content_check",
+      sql`${t.content} is null or octet_length(${t.content}) <= 262144`,
+    ),
+    check(
+      "agent_trace_artifacts_sensitivity_check",
+      sql`${t.sensitivityClass} in ('normal', 'sensitive', 'restricted')`,
+    ),
+    index("agent_trace_artifacts_expires_idx")
+      .on(t.expiresAt)
+      .where(sql`${t.expiresAt} is not null`),
+  ],
+);
+
+export const agentTraceEvents = pgTable(
+  "agent_trace_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    traceId: text("trace_id").notNull(),
+    sequenceNo: integer("sequence_no").notNull(),
+    spanId: text("span_id"),
+    parentEventId: uuid("parent_event_id").references((): AnyPgColumn => agentTraceEvents.id),
+    sessionId: uuid("session_id"),
+    taskId: uuid("task_id"),
+    pgBossJobId: uuid("pg_boss_job_id"),
+    sourceMessageId: text("source_message_id"),
+    toolCallId: text("tool_call_id"),
+    eventType: text("event_type").$type<TraceEventType>().notNull(),
+    actor: text("actor").$type<TraceActor>().notNull(),
+    trustClass: text("trust_class").$type<TraceTrustClass>().notNull(),
+    sensitivityClass: text("sensitivity_class")
+      .$type<SensitivityClass>()
+      .notNull()
+      .default("normal"),
+    terminalStatus: text("terminal_status").$type<TraceTerminalStatus>(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    artifactHash: text("artifact_hash").references(() => agentTraceArtifacts.artifactHash),
+    contentHash: text("content_hash").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    retentionClass: text("retention_class").$type<TraceRetentionClass>().notNull(),
+    policyVersion: text("policy_version").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("agent_trace_events_sequence_check", sql`${t.sequenceNo} >= 0`),
+    check(
+      "agent_trace_events_event_type_check",
+      sql`${t.eventType} in ('user_message', 'assistant_message', 'model_generation', 'tool_requested', 'tool_result', 'environment_observation', 'guardrail_result', 'feedback', 'decision_declared', 'outcome_observed', 'task_terminal_state', 'explicit_memory_write', 'legacy_import')`,
+    ),
+    check(
+      "agent_trace_events_actor_check",
+      sql`${t.actor} in ('user', 'assistant', 'tool', 'system', 'scheduler', 'worker')`,
+    ),
+    check(
+      "agent_trace_events_trust_check",
+      sql`${t.trustClass} in ('user_assertion', 'tool_observation', 'third_party_content', 'model_inference', 'evaluator_result', 'system_record')`,
+    ),
+    check(
+      "agent_trace_events_sensitivity_check",
+      sql`${t.sensitivityClass} in ('normal', 'sensitive', 'restricted')`,
+    ),
+    check(
+      "agent_trace_events_terminal_status_check",
+      sql`${t.terminalStatus} is null or ${t.terminalStatus} in ('completed', 'failed', 'interrupted', 'skipped')`,
+    ),
+    check(
+      "agent_trace_events_terminal_shape_check",
+      sql`(${t.eventType} = 'task_terminal_state' and ${t.terminalStatus} is not null) or (${t.eventType} <> 'task_terminal_state' and ${t.terminalStatus} is null)`,
+    ),
+    check("agent_trace_events_payload_check", sql`octet_length(${t.payload}::text) <= 65536`),
+    check(
+      "agent_trace_events_idempotency_key_check",
+      sql`char_length(${t.idempotencyKey}) between 1 and 256`,
+    ),
+    check(
+      "agent_trace_events_retention_check",
+      sql`${t.retentionClass} in ('short', 'standard', 'audit')`,
+    ),
+    unique("agent_trace_events_agent_idempotency_key").on(t.agentId, t.idempotencyKey),
+    index("agent_trace_events_trace_sequence_idx").on(t.agentId, t.traceId, t.sequenceNo),
+    index("agent_trace_events_session_ingested_idx")
+      .on(t.sessionId, t.ingestedAt)
+      .where(sql`${t.sessionId} is not null`),
+    index("agent_trace_events_task_job_ingested_idx")
+      .on(t.taskId, t.pgBossJobId, t.ingestedAt)
+      .where(sql`${t.taskId} is not null`),
+    index("agent_trace_events_type_occurred_idx").on(t.agentId, t.eventType, t.occurredAt),
+    index("agent_trace_events_expires_idx")
+      .on(t.expiresAt)
+      .where(sql`${t.expiresAt} is not null`),
+  ],
+);
+
+export const agentMemoryCandidates = pgTable(
+  "agent_memory_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    reviewKey: text("review_key").notNull(),
+    traceId: text("trace_id").notNull(),
+    memoryType: text("memory_type").$type<MemoryType>().notNull(),
+    canonicalKey: text("canonical_key"),
+    content: text("content"),
+    structured: jsonb("structured").$type<Record<string, unknown>>().notNull().default({}),
+    sourceStance: text("source_stance").$type<CandidateSourceStance>().notNull(),
+    validDuring: tstzrange("valid_during"),
+    sourceReferenceTime: timestamp("source_reference_time", { withTimezone: true }),
+    timePrecision: text("time_precision")
+      .$type<"instant" | "day" | "month" | "year" | "unknown">()
+      .notNull()
+      .default("unknown"),
+    confidence: integer("confidence").notNull(),
+    proposedOperation: text("proposed_operation").$type<CandidateOperation>().notNull(),
+    gateStatus: text("gate_status").$type<CandidateGateStatus>().notNull(),
+    gateReason: text("gate_reason").notNull(),
+    scoreBps: integer("score_bps").notNull(),
+    contentHash: text("content_hash").notNull(),
+    extractorId: text("extractor_id").notNull(),
+    modelId: text("model_id").notNull(),
+    promptHash: text("prompt_hash").notNull(),
+    schemaVersion: integer("schema_version").notNull(),
+    policyVersion: text("policy_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_memory_candidates_memory_type_check",
+      sql`${t.memoryType} in ('semantic', 'episodic', 'procedural')`,
+    ),
+    check(
+      "agent_memory_candidates_source_stance_check",
+      sql`${t.sourceStance} in ('observation', 'assertion', 'interpretation', 'evaluation')`,
+    ),
+    check(
+      "agent_memory_candidates_time_precision_check",
+      sql`${t.timePrecision} in ('instant', 'day', 'month', 'year', 'unknown')`,
+    ),
+    check("agent_memory_candidates_confidence_check", sql`${t.confidence} between 0 and 100`),
+    check(
+      "agent_memory_candidates_operation_check",
+      sql`${t.proposedOperation} in ('ADD', 'UPDATE', 'INVALIDATE', 'NOOP', 'REVIEW')`,
+    ),
+    check(
+      "agent_memory_candidates_gate_status_check",
+      sql`${t.gateStatus} in ('accepted', 'rejected', 'quarantined')`,
+    ),
+    check("agent_memory_candidates_score_check", sql`${t.scoreBps} between 0 and 10000`),
+    check(
+      "agent_memory_candidates_content_shape_check",
+      sql`(${t.gateStatus} = 'accepted' and char_length(${t.content}) between 1 and 2000) or (${t.gateStatus} in ('rejected', 'quarantined') and ${t.content} is null)`,
+    ),
+    unique("agent_memory_candidates_extract_uniq").on(
+      t.agentId,
+      t.reviewKey,
+      t.extractorId,
+      t.contentHash,
+    ),
+    index("agent_memory_candidates_gate_created_idx").on(t.agentId, t.gateStatus, t.createdAt),
+    index("agent_memory_candidates_canonical_key_idx")
+      .on(t.agentId, t.canonicalKey)
+      .where(sql`${t.canonicalKey} is not null`),
+  ],
+);
+
+export const agentMemoryCandidateTraceEvents = pgTable(
+  "agent_memory_candidate_trace_events",
+  {
+    candidateId: uuid("candidate_id")
+      .notNull()
+      .references(() => agentMemoryCandidates.id, { onDelete: "cascade" }),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => agentTraceEvents.id),
+    sourceRole: text("source_role").$type<"primary" | "corroborating" | "context">().notNull(),
+    sourceSpan: jsonb("source_span").$type<Record<string, unknown>>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.candidateId, t.eventId] }),
+    check(
+      "agent_memory_candidate_trace_events_role_check",
+      sql`${t.sourceRole} in ('primary', 'corroborating', 'context')`,
+    ),
+    index("agent_memory_candidate_trace_events_event_idx").on(t.eventId),
+  ],
+);
+
+export const agentDecisions = pgTable(
+  "agent_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    sessionId: uuid("session_id"),
+    taskId: uuid("task_id"),
+    traceId: text("trace_id").notNull(),
+    scopeType: text("scope_type").$type<MemoryScopeType>().notNull(),
+    scopeId: text("scope_id").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    selectedOption: text("selected_option").notNull(),
+    declaredOptions: jsonb("declared_options").$type<string[]>().notNull().default([]),
+    declaredRationale: text("declared_rationale").notNull(),
+    assumptions: jsonb("assumptions").$type<string[]>().notNull().default([]),
+    expectedOutcome: text("expected_outcome"),
+    successCriteria: jsonb("success_criteria").$type<string[]>().notNull().default([]),
+    constraints: jsonb("constraints").$type<string[]>().notNull().default([]),
+    confidence: integer("confidence").notNull(),
+    status: text("status")
+      .$type<"open" | "succeeded" | "failed" | "mixed" | "superseded" | "unknown">()
+      .notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+    validDuring: tstzrange("valid_during"),
+    recordedDuring: tstzrange("recorded_during").notNull(),
+    decider: text("decider").notNull(),
+    modelId: text("model_id"),
+    promptHash: text("prompt_hash"),
+    policyVersion: text("policy_version").notNull(),
+    authority: text("authority")
+      .$type<"user" | "worker" | "model_verdict" | "reviewed" | "legacy_import">()
+      .notNull(),
+    sensitivityClass: text("sensitivity_class")
+      .$type<SensitivityClass>()
+      .notNull()
+      .default("normal"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    tombstoned: boolean("tombstoned").notNull().default(false),
+    injectionBlocked: boolean("injection_blocked").notNull().default(false),
+    supersedesDecisionId: uuid("supersedes_decision_id").references(
+      (): AnyPgColumn => agentDecisions.id,
+    ),
+  },
+  (t) => [
+    check("agent_decisions_scope_check", sql`${t.scopeType} in ('agent', 'session', 'task')`),
+    check(
+      "agent_decisions_rationale_check",
+      sql`char_length(${t.declaredRationale}) between 1 and 2000`,
+    ),
+    check("agent_decisions_confidence_check", sql`${t.confidence} between 0 and 100`),
+    check(
+      "agent_decisions_status_check",
+      sql`${t.status} in ('open', 'succeeded', 'failed', 'mixed', 'superseded', 'unknown')`,
+    ),
+    check(
+      "agent_decisions_authority_check",
+      sql`${t.authority} in ('user', 'worker', 'model_verdict', 'reviewed', 'legacy_import')`,
+    ),
+    check(
+      "agent_decisions_sensitivity_check",
+      sql`${t.sensitivityClass} in ('normal', 'sensitive', 'restricted')`,
+    ),
+    uniqueIndex("agent_decisions_supersedes_uniq")
+      .on(t.supersedesDecisionId)
+      .where(sql`${t.supersedesDecisionId} is not null`),
+    index("agent_decisions_active_subject_idx")
+      .on(t.agentId, t.scopeType, t.scopeId, t.subjectKey, t.status, t.decidedAt.desc())
+      .where(
+        sql`${t.status} <> 'superseded' and ${t.revokedAt} is null and ${t.tombstoned} = false and ${t.injectionBlocked} = false`,
+      ),
+    index("agent_decisions_task_status_idx")
+      .on(t.taskId, t.status, t.decidedAt.desc())
+      .where(sql`${t.taskId} is not null`),
+    index("agent_decisions_valid_during_idx").using("gist", t.validDuring),
+    index("agent_decisions_recorded_during_idx").using("gist", t.recordedDuring),
+  ],
+);
+
+export const agentDecisionTraceEvents = pgTable(
+  "agent_decision_trace_events",
+  {
+    decisionId: uuid("decision_id")
+      .notNull()
+      .references(() => agentDecisions.id),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => agentTraceEvents.id),
+    sourceRole: text("source_role").$type<"context" | "declaration" | "criterion">().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.decisionId, t.eventId] }),
+    check(
+      "agent_decision_trace_events_role_check",
+      sql`${t.sourceRole} in ('context', 'declaration', 'criterion')`,
+    ),
+    index("agent_decision_trace_events_event_idx").on(t.eventId),
+  ],
+);
+
+export const agentOutcomes = pgTable(
+  "agent_outcomes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    decisionId: uuid("decision_id")
+      .notNull()
+      .references(() => agentDecisions.id),
+    traceId: text("trace_id").notNull(),
+    observedState: text("observed_state").notNull(),
+    metrics: jsonb("metrics").$type<Record<string, unknown>>().notNull().default({}),
+    assessment: text("assessment").$type<"supports" | "contradicts" | "inconclusive">().notNull(),
+    confidence: integer("confidence").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+    evaluator: text("evaluator").notNull(),
+    evaluatorVersion: text("evaluator_version"),
+    policyVersion: text("policy_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_outcomes_observed_state_check",
+      sql`char_length(${t.observedState}) between 1 and 4000`,
+    ),
+    check(
+      "agent_outcomes_assessment_check",
+      sql`${t.assessment} in ('supports', 'contradicts', 'inconclusive')`,
+    ),
+    check("agent_outcomes_confidence_check", sql`${t.confidence} between 0 and 100`),
+    index("agent_outcomes_decision_occurred_idx").on(t.decisionId, t.occurredAt.desc()),
+    index("agent_outcomes_trace_occurred_idx").on(t.traceId, t.occurredAt),
+  ],
+);
+
+export const agentOutcomeTraceEvents = pgTable(
+  "agent_outcome_trace_events",
+  {
+    outcomeId: uuid("outcome_id")
+      .notNull()
+      .references(() => agentOutcomes.id),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => agentTraceEvents.id),
+    sourceRole: text("source_role").$type<"observation" | "metric" | "terminal_state">().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.outcomeId, t.eventId] }),
+    check(
+      "agent_outcome_trace_events_role_check",
+      sql`${t.sourceRole} in ('observation', 'metric', 'terminal_state')`,
+    ),
+    index("agent_outcome_trace_events_event_idx").on(t.eventId),
+  ],
+);
+
 export const agentMemories = pgTable(
   "agent_memories",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
     kind: text("kind").$type<MemoryKind>().notNull(),
+    memoryType: text("memory_type").$type<MemoryType>().notNull().default("semantic"),
+    canonicalKey: text("canonical_key"),
+    conflictPolicy: text("conflict_policy")
+      .$type<MemoryConflictPolicy>()
+      .notNull()
+      .default("append_temporal"),
+    scopeType: text("scope_type").$type<MemoryScopeType>().notNull().default("agent"),
+    scopeId: text("scope_id").notNull().default("00000000-0000-0000-0000-000000000001"),
+    currentVersionId: uuid("current_version_id").references(
+      (): AnyPgColumn => agentMemoryVersions.id,
+    ),
     content: text("content").notNull(),
     source: text("source").$type<MemorySource>().notNull(),
     // 0..100 keeps confidence sortable and avoids provider-specific float quirks.
@@ -329,19 +786,39 @@ export const agentMemories = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    tombstoned: boolean("tombstoned").notNull().default(false),
+    tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+    injectionBlocked: boolean("injection_blocked").notNull().default(false),
   },
   (t) => [
     check(
       "agent_memories_kind_check",
-      sql`${t.kind} in ('preference', 'fact', 'correction', 'persona')`,
+      sql`${t.kind} in ('preference', 'fact', 'correction', 'persona', 'episode', 'procedure')`,
     ),
+    check(
+      "agent_memories_memory_type_check",
+      sql`${t.memoryType} in ('semantic', 'episodic', 'procedural')`,
+    ),
+    check(
+      "agent_memories_conflict_policy_check",
+      sql`${t.conflictPolicy} in ('replace_current', 'append_temporal', 'add_only', 'version_evaluate')`,
+    ),
+    check("agent_memories_scope_type_check", sql`${t.scopeType} in ('agent', 'session', 'task')`),
     check(
       "agent_memories_source_check",
       sql`${t.source} in ('user', 'review', 'curated', 'consolidated')`,
     ),
-    check("agent_memories_status_check", sql`${t.status} in ('approved', 'archived')`),
+    check(
+      "agent_memories_status_check",
+      sql`${t.status} in ('creating', 'approved', 'archived')`,
+    ),
     check("agent_memories_content_check", sql`char_length(${t.content}) between 1 and 2000`),
     check("agent_memories_confidence_check", sql`${t.confidence} between 0 and 100`),
+    check(
+      "agent_memories_tombstone_shape_check",
+      sql`(${t.tombstoned} = true and ${t.tombstonedAt} is not null) or (${t.tombstoned} = false and ${t.tombstonedAt} is null)`,
+    ),
     index("agent_memories_prompt_idx")
       .on(t.agentId, t.kind, t.createdAt)
       .where(sql`${t.status} = 'approved' and ${t.deletedAt} is null`),
@@ -350,6 +827,131 @@ export const agentMemories = pgTable(
     uniqueIndex("agent_memories_claim_hash_uniq")
       .on(t.agentId, t.kind, t.claimHash)
       .where(sql`${t.deletedAt} is null and ${t.claimHash} is not null`),
+    index("agent_memories_active_current_idx")
+      .on(t.agentId, t.scopeType, t.scopeId, t.memoryType, t.kind, t.status)
+      .where(
+        sql`${t.status} not in ('creating', 'archived') and ${t.revokedAt} is null and ${t.tombstoned} = false and ${t.injectionBlocked} = false`,
+      ),
+    uniqueIndex("agent_memories_canonical_key_uniq")
+      .on(t.agentId, t.scopeType, t.scopeId, t.memoryType, t.canonicalKey)
+      .where(
+        sql`${t.canonicalKey} is not null and ${t.status} not in ('creating', 'archived') and ${t.revokedAt} is null and ${t.tombstoned} = false`,
+      ),
+  ],
+);
+
+export const agentMemoryVersions = pgTable(
+  "agent_memory_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    memoryId: uuid("memory_id")
+      .notNull()
+      .references(() => agentMemories.id),
+    versionNo: integer("version_no").notNull(),
+    content: text("content").notNull(),
+    structured: jsonb("structured").$type<Record<string, unknown>>().notNull().default({}),
+    source: text("source").$type<MemorySource>().notNull(),
+    validDuring: tstzrange("valid_during"),
+    recordedDuring: tstzrange("recorded_during").notNull(),
+    sourceReferenceTime: timestamp("source_reference_time", { withTimezone: true }),
+    timePrecision: text("time_precision")
+      .$type<"instant" | "day" | "month" | "year" | "unknown">()
+      .notNull()
+      .default("unknown"),
+    timeSource: text("time_source"),
+    observedAt: timestamp("observed_at", { withTimezone: true }),
+    lastConfirmedAt: timestamp("last_confirmed_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    confidence: integer("confidence").notNull(),
+    importance: integer("importance").notNull().default(50),
+    utilityScoreBps: integer("utility_score_bps").notNull().default(0),
+    operation: text("operation").$type<"ADD" | "UPDATE" | "INVALIDATE">().notNull(),
+    supersedesMemoryVersionId: uuid("supersedes_memory_version_id").references(
+      (): AnyPgColumn => agentMemoryVersions.id,
+    ),
+    extractorId: text("extractor_id"),
+    modelId: text("model_id"),
+    promptHash: text("prompt_hash"),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    policyVersion: text("policy_version").notNull(),
+    authority: text("authority")
+      .$type<"user" | "tool" | "reviewed" | "consolidated" | "legacy_import">()
+      .notNull(),
+    sensitivityClass: text("sensitivity_class")
+      .$type<SensitivityClass>()
+      .notNull()
+      .default("normal"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    searchTsv: tsvector("search_tsv").generatedAlwaysAs(
+      sql`to_tsvector('english', coalesce("content", ''))`,
+    ),
+  },
+  (t) => [
+    check("agent_memory_versions_version_check", sql`${t.versionNo} >= 1`),
+    check(
+      "agent_memory_versions_content_check",
+      sql`char_length(${t.content}) between 1 and 2000`,
+    ),
+    check(
+      "agent_memory_versions_source_check",
+      sql`${t.source} in ('user', 'review', 'curated', 'consolidated')`,
+    ),
+    check(
+      "agent_memory_versions_time_precision_check",
+      sql`${t.timePrecision} in ('instant', 'day', 'month', 'year', 'unknown')`,
+    ),
+    check("agent_memory_versions_confidence_check", sql`${t.confidence} between 0 and 100`),
+    check("agent_memory_versions_importance_check", sql`${t.importance} between 0 and 100`),
+    check(
+      "agent_memory_versions_utility_score_check",
+      sql`${t.utilityScoreBps} between 0 and 10000`,
+    ),
+    check(
+      "agent_memory_versions_operation_check",
+      sql`${t.operation} in ('ADD', 'UPDATE', 'INVALIDATE')`,
+    ),
+    check(
+      "agent_memory_versions_authority_check",
+      sql`${t.authority} in ('user', 'tool', 'reviewed', 'consolidated', 'legacy_import')`,
+    ),
+    check(
+      "agent_memory_versions_sensitivity_check",
+      sql`${t.sensitivityClass} in ('normal', 'sensitive', 'restricted')`,
+    ),
+    unique("agent_memory_versions_memory_version_uniq").on(t.memoryId, t.versionNo),
+    uniqueIndex("agent_memory_versions_supersedes_uniq")
+      .on(t.supersedesMemoryVersionId)
+      .where(sql`${t.supersedesMemoryVersionId} is not null`),
+    index("agent_memory_versions_search_tsv_idx").using("gin", t.searchTsv),
+    index("agent_memory_versions_content_trgm_idx").using("gin", sql`${t.content} gin_trgm_ops`),
+    index("agent_memory_versions_valid_during_idx").using("gist", t.validDuring),
+    index("agent_memory_versions_recorded_during_idx").using("gist", t.recordedDuring),
+    index("agent_memory_versions_memory_version_idx").on(t.memoryId, t.versionNo.desc()),
+    index("agent_memory_versions_expires_idx")
+      .on(t.expiresAt)
+      .where(sql`${t.expiresAt} is not null`),
+  ],
+);
+
+export const agentMemoryVersionTraceEvents = pgTable(
+  "agent_memory_version_trace_events",
+  {
+    memoryVersionId: uuid("memory_version_id")
+      .notNull()
+      .references(() => agentMemoryVersions.id),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => agentTraceEvents.id),
+    sourceRole: text("source_role").$type<"primary" | "corroborating" | "context">().notNull(),
+    sourceSpan: jsonb("source_span").$type<Record<string, unknown>>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.memoryVersionId, t.eventId] }),
+    check(
+      "agent_memory_version_trace_events_role_check",
+      sql`${t.sourceRole} in ('primary', 'corroborating', 'context')`,
+    ),
+    index("agent_memory_version_trace_events_event_idx").on(t.eventId),
   ],
 );
 
@@ -365,6 +967,7 @@ export const agentReviewProposals = pgTable(
     rationale: text("rationale").notNull(),
     status: text("status").$type<ReviewProposalStatus>().notNull().default("pending"),
     reviewerModel: text("reviewer_model"),
+    sourceCandidateId: uuid("source_candidate_id").references(() => agentMemoryCandidates.id),
     // Who/what minted this proposal. Defaults to 'turn_review' so existing
     // per-turn reviewers keep their current behavior on backfill (§1.1).
     proposerOrigin: text("proposer_origin")
@@ -410,6 +1013,9 @@ export const agentReviewProposals = pgTable(
       .on(t.agentId, t.createdAt)
       .where(sql`${t.status} = 'pending'`),
     index("agent_review_proposals_session_idx").on(t.sessionId, t.createdAt),
+    uniqueIndex("agent_review_proposals_source_candidate_uniq")
+      .on(t.sourceCandidateId)
+      .where(sql`${t.sourceCandidateId} is not null`),
   ],
 );
 
@@ -460,6 +1066,7 @@ export const agentGroundedObservations = pgTable(
     originKind: text("origin_kind").$type<GroundedObservationOrigin>().notNull(),
     sourceMessageId: text("source_message_id"),
     sourceMemoryId: uuid("source_memory_id").references(() => agentMemories.id),
+    traceEventId: uuid("trace_event_id").references(() => agentTraceEvents.id),
     content: text("content").notNull(),
     contentHash: text("content_hash").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -491,6 +1098,7 @@ export const agentGroundedObservations = pgTable(
     index("agent_grounded_observations_agent_created_idx")
       .on(t.agentId, t.createdAt)
       .where(sql`${t.deletedAt} is null`),
+    index("agent_grounded_observations_trace_event_idx").on(t.traceEventId),
   ],
 );
 
@@ -651,7 +1259,10 @@ export const agentConsolidationRuns = pgTable(
       "agent_consolidation_runs_status_check",
       sql`${t.status} in ('running', 'completed', 'failed')`,
     ),
-    check("agent_consolidation_runs_trigger_check", sql`${t.trigger} in ('scheduled', 'manual')`),
+    check(
+      "agent_consolidation_runs_trigger_check",
+      sql`${t.trigger} in ('scheduled', 'manual', 'turn_review')`,
+    ),
     index("agent_consolidation_runs_agent_idx").on(t.agentId, t.startedAt),
   ],
 );
@@ -671,6 +1282,12 @@ export const agentConsolidationCandidates = pgTable(
     agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
     claimKey: text("claim_key").notNull(),
     snippet: text("snippet").notNull(),
+    candidateOrigin: text("candidate_origin")
+      .$type<"signal" | "turn_review">()
+      .notNull()
+      .default("signal"),
+    sourceCandidateId: uuid("source_candidate_id").references(() => agentMemoryCandidates.id),
+    memoryType: text("memory_type").$type<MemoryType>(),
     scoreBps: integer("score_bps").notNull(),
     gateResults: jsonb("gate_results").$type<AdmissionMetadata["gates"]>(),
     passed: boolean("passed").notNull(),
@@ -679,7 +1296,18 @@ export const agentConsolidationCandidates = pgTable(
   },
   (t) => [
     check("agent_consolidation_candidates_score_check", sql`${t.scoreBps} between 0 and 10000`),
+    check(
+      "agent_consolidation_candidates_origin_check",
+      sql`${t.candidateOrigin} in ('signal', 'turn_review')`,
+    ),
+    check(
+      "agent_consolidation_candidates_memory_type_check",
+      sql`${t.memoryType} is null or ${t.memoryType} in ('semantic', 'episodic', 'procedural')`,
+    ),
     index("agent_consolidation_candidates_run_idx").on(t.runId),
+    uniqueIndex("agent_consolidation_candidates_source_candidate_uniq")
+      .on(t.sourceCandidateId)
+      .where(sql`${t.sourceCandidateId} is not null`),
   ],
 );
 
@@ -695,6 +1323,7 @@ export const agentMemoryEvents = pgTable(
     agentId: uuid("agent_id").notNull().default("00000000-0000-0000-0000-000000000001"),
     eventType: text("event_type").$type<MemoryEventType>().notNull(),
     memoryId: uuid("memory_id"),
+    memoryVersionId: uuid("memory_version_id").references(() => agentMemoryVersions.id),
     proposalId: uuid("proposal_id"),
     runId: uuid("run_id"),
     origin: text("origin").$type<MemoryEventOrigin>().notNull(),
@@ -726,8 +1355,20 @@ export type AgentChatSession = typeof agentChatSessions.$inferSelect;
 export type NewAgentChatSession = typeof agentChatSessions.$inferInsert;
 export type AgentChatMessage = typeof agentChatMessages.$inferSelect;
 export type NewAgentChatMessage = typeof agentChatMessages.$inferInsert;
+export type AgentTraceArtifact = typeof agentTraceArtifacts.$inferSelect;
+export type NewAgentTraceArtifact = typeof agentTraceArtifacts.$inferInsert;
+export type AgentTraceEvent = typeof agentTraceEvents.$inferSelect;
+export type NewAgentTraceEvent = typeof agentTraceEvents.$inferInsert;
+export type AgentMemoryCandidate = typeof agentMemoryCandidates.$inferSelect;
+export type NewAgentMemoryCandidate = typeof agentMemoryCandidates.$inferInsert;
+export type AgentDecision = typeof agentDecisions.$inferSelect;
+export type NewAgentDecision = typeof agentDecisions.$inferInsert;
+export type AgentOutcome = typeof agentOutcomes.$inferSelect;
+export type NewAgentOutcome = typeof agentOutcomes.$inferInsert;
 export type AgentMemory = typeof agentMemories.$inferSelect;
 export type NewAgentMemory = typeof agentMemories.$inferInsert;
+export type AgentMemoryVersion = typeof agentMemoryVersions.$inferSelect;
+export type NewAgentMemoryVersion = typeof agentMemoryVersions.$inferInsert;
 export type AgentReviewProposal = typeof agentReviewProposals.$inferSelect;
 export type NewAgentReviewProposal = typeof agentReviewProposals.$inferInsert;
 export type AgentReviewState = typeof agentReviewStates.$inferSelect;

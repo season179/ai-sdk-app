@@ -36,6 +36,13 @@
       "when": 1782120859968,
       "tag": "0004_chief_ender_wiggin",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786761934202,
+      "tag": "0005_agent_memory_write_foundation",
+      "breakpoints": true
     }
   ]
 }

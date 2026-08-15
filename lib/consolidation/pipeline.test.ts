@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { and, desc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getDb, schema } from "@/db";
@@ -44,10 +46,11 @@ describeIntegration("consolidation pipeline (integration)", () => {
   it("ingests a user turn and produces a grounded observation", async () => {
     const db = getDb();
     void schema;
-    const sessionId = "00000000-0000-4000-8000-0000000000a1";
+    const sessionId = randomUUID();
+    const messageId = `msg-int-user-${randomUUID()}`;
     const count = await ingestUserTurn(sessionId, [
       {
-        id: "msg-int-user-1",
+        id: messageId,
         role: "user",
         parts: [{ type: "text", text: "Integration test: I prefer dark mode always." }],
       },
@@ -57,7 +60,7 @@ describeIntegration("consolidation pipeline (integration)", () => {
     const rows = await db
       .select()
       .from(agentGroundedObservations)
-      .where(eq(agentGroundedObservations.sourceMessageId, "msg-int-user-1"));
+      .where(eq(agentGroundedObservations.sourceMessageId, messageId));
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0].originKind).toBe("chat_user");
   });

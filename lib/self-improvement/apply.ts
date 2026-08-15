@@ -122,18 +122,23 @@ async function applyPendingProposal(proposal: ReviewProposal, db: AppDbClient): 
       const claimHash = proposal.admissionMetadata?.claimHash ?? null;
 
       try {
-        await createMemory(
-          {
-            agentId: proposal.agentId,
-            kind: parseMemoryKind(payload.memoryKind ?? payload.kind),
-            content: parseMemoryContent(payload.content),
-            confidence: parseMemoryConfidence(payload.confidence),
-            source: memorySource,
-            sessionId: proposal.sessionId,
-            reviewProposalId: proposal.id,
-            claimHash,
-          },
-          db,
+        // Isolate a uniqueness race in a savepoint. PostgreSQL marks the
+        // current transaction failed after a constraint violation; without the
+        // nested transaction the no-op path could not mark the proposal applied.
+        await db.transaction(async (savepoint) =>
+          createMemory(
+            {
+              agentId: proposal.agentId,
+              kind: parseMemoryKind(payload.memoryKind ?? payload.kind),
+              content: parseMemoryContent(payload.content),
+              confidence: parseMemoryConfidence(payload.confidence),
+              source: memorySource,
+              sessionId: proposal.sessionId,
+              reviewProposalId: proposal.id,
+              claimHash,
+            },
+            savepoint,
+          ),
         );
       } catch (error) {
         // §4.4 race safety: a duplicate-key on agent_memories_claim_hash_uniq
@@ -269,11 +274,22 @@ function readRequiredBoolean(payload: Record<string, unknown>, key: string): boo
  * treat a duplicate as already-applied / no-op.
  */
 export function isDuplicateClaimHashError(error: unknown): boolean {
-  if (error == null || typeof error !== "object") return false;
-  const e = error as { code?: string; constraint?: string };
-  if (e.code === "23505" && typeof e.constraint === "string") {
-    return e.constraint.includes("claim_hash");
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const e = current as {
+      code?: string;
+      constraint?: string;
+      message?: string;
+      cause?: unknown;
+    };
+    if (
+      (e.code === "23505" && e.constraint?.includes("claim_hash")) ||
+      e.message?.includes("agent_memories_claim_hash_uniq") ||
+      e.message?.includes("claim_hash_uniq")
+    ) {
+      return true;
+    }
+    current = e.cause;
   }
-  const msg = (error as { message?: string }).message ?? "";
-  return msg.includes("agent_memories_claim_hash_uniq") || msg.includes("claim_hash_uniq");
+  return false;
 }
