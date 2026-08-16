@@ -40,7 +40,10 @@ import { resolveChatModel } from "@/lib/models/openrouter";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { isSelfImprovementEnabled } from "@/lib/self-improvement/config";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
-import { createMemoryTools } from "@/lib/self-improvement/memory-tools";
+import {
+  createConversationSearchTools,
+  createMemoryTools,
+} from "@/lib/self-improvement/memory-tools";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -472,7 +475,9 @@ export async function POST(req: Request) {
         ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
         : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
-      ...(memorySearchEnabled ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId }) : {}),
+      ...(memorySearchEnabled
+        ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId })
+        : createConversationSearchTools({ agentId: DEFAULT_AGENT_ID, sessionId })),
     };
     // Byte-stable across every turn: all dynamic data lives in api_parts.
     const instructions = [SYSTEM_PROMPT, SKILLS_PROMPT, MEMORY_REFERENCE_POLICY].join("\n\n");
