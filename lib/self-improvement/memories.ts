@@ -4,6 +4,7 @@ import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
+  agentGroundedObservations,
   agentMemories,
   agentMemoryVersions,
   type MemoryKind,
@@ -22,6 +23,7 @@ import {
   invalidateMemory,
   type VersionAuthority,
 } from "@/lib/memory/versions";
+import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
 import { MemoryNotFoundError, SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   parseMemoryConfidence,
@@ -176,7 +178,11 @@ export async function getMemoryByReviewProposalId(
 }
 
 export async function createMemory(input: CreateMemoryInput, db?: AppDbClient): Promise<Memory> {
-  if (!db) return getDb().transaction((tx) => createMemory(input, tx));
+  if (!db) {
+    const result = await getDb().transaction((tx) => createMemory(input, tx));
+    await dirtyProfileBestEffort(input.agentId ?? DEFAULT_AGENT_ID);
+    return result;
+  }
   const agentId = input.agentId ?? DEFAULT_AGENT_ID;
   const kind = parseMemoryKind(input.kind);
   const memoryType = parseMemoryType(input.memoryType, familyForKind(kind));
@@ -242,7 +248,11 @@ export async function updateMemory(
   agentId = DEFAULT_AGENT_ID,
   db?: AppDbClient,
 ): Promise<Memory> {
-  if (!db) return getDb().transaction((tx) => updateMemory(id, input, agentId, tx));
+  if (!db) {
+    const result = await getDb().transaction((tx) => updateMemory(id, input, agentId, tx));
+    await dirtyProfileBestEffort(agentId);
+    return result;
+  }
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
   if (input.status === "archived") return archiveMemory(id, agentId, db, input.sourceEventIds);
@@ -293,6 +303,19 @@ export async function updateMemory(
     },
     db,
   );
+  await db
+    .update(agentGroundedObservations)
+    .set({ deletedAt: sql`now()` })
+    .where(
+      and(
+        eq(agentGroundedObservations.agentId, agentId),
+        eq(agentGroundedObservations.sourceMemoryId, id),
+        isNull(agentGroundedObservations.deletedAt),
+      ),
+    );
+  if (source === "user") {
+    await ingestUserMemory(id, content, { agentId, db, traceEventId: evidence[0] });
+  }
   await recordMemoryEvent(
     {
       agentId,
@@ -320,9 +343,11 @@ export async function setMemoryProtection(
   db?: AppDbClient,
 ): Promise<Memory> {
   if (!db) {
-    return getDb().transaction((tx) =>
+    const result = await getDb().transaction((tx) =>
       setMemoryProtection(id, isProtected, agentId, protectedBy, tx),
     );
+    await dirtyProfileBestEffort(agentId);
+    return result;
   }
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
@@ -360,7 +385,13 @@ export async function archiveMemory(
   db?: AppDbClient,
   sourceEventIds?: string[],
 ): Promise<Memory> {
-  if (!db) return getDb().transaction((tx) => archiveMemory(id, agentId, tx, sourceEventIds));
+  if (!db) {
+    const result = await getDb().transaction((tx) =>
+      archiveMemory(id, agentId, tx, sourceEventIds),
+    );
+    await dirtyProfileBestEffort(agentId);
+    return result;
+  }
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
   if (existing.isProtected)
@@ -373,6 +404,16 @@ export async function archiveMemory(
     { agentId, sourceEventIds: evidence, source: existing.source, authority: "user" },
     db,
   );
+  await db
+    .update(agentGroundedObservations)
+    .set({ deletedAt: sql`now()` })
+    .where(
+      and(
+        eq(agentGroundedObservations.agentId, agentId),
+        eq(agentGroundedObservations.sourceMemoryId, id),
+        isNull(agentGroundedObservations.deletedAt),
+      ),
+    );
   await recordMemoryEvent(
     {
       agentId,
@@ -446,6 +487,12 @@ async function appendExplicitEvent(
     db,
   );
   return event.id;
+}
+
+async function dirtyProfileBestEffort(agentId: string): Promise<void> {
+  await markProfileDirtyAndEnqueue(agentId, { trigger: "manual_ui" }).catch((error) => {
+    console.error("Marking profile dirty after memory mutation failed", error);
+  });
 }
 
 function familyForKind(kind: MemoryKind): MemoryType {

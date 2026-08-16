@@ -4,11 +4,12 @@ import { safeValidateUIMessages, type UIMessage } from "ai";
 import { and, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
-import { agentChatMessages, agentChatSessions } from "@/db/schema";
+import { agentChatMessages, agentChatSessions, agentGroundedObservations } from "@/db/schema";
 import { ingestUserTurn } from "@/lib/consolidation/observations";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
 import { canonicalJson } from "@/lib/memory/redaction";
 import { appendTraceEvents, type TraceEventInput } from "@/lib/memory/trace";
+import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
 
@@ -736,21 +737,37 @@ export async function deleteChatSession(
   id: string,
   agentId: string = DEFAULT_AGENT_ID,
 ): Promise<void> {
-  const rows = await getDb()
-    .update(agentChatSessions)
-    .set({ deletedAt: sql`now()`, updatedAt: sql`now()` })
-    .where(
-      and(
-        eq(agentChatSessions.id, id),
-        eq(agentChatSessions.agentId, agentId),
-        isNull(agentChatSessions.deletedAt),
-      ),
-    )
-    .returning({ id: agentChatSessions.id });
+  await getDb().transaction(async (tx) => {
+    const rows = await tx
+      .update(agentChatSessions)
+      .set({ deletedAt: sql`now()`, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(agentChatSessions.id, id),
+          eq(agentChatSessions.agentId, agentId),
+          isNull(agentChatSessions.deletedAt),
+        ),
+      )
+      .returning({ id: agentChatSessions.id });
 
-  if (rows.length === 0) {
-    throw new ChatSessionNotFoundError(id);
-  }
+    if (rows.length === 0) {
+      throw new ChatSessionNotFoundError(id);
+    }
+    await tx
+      .update(agentGroundedObservations)
+      .set({ deletedAt: sql`now()` })
+      .where(
+        and(
+          eq(agentGroundedObservations.agentId, agentId),
+          eq(agentGroundedObservations.sessionId, id),
+          isNull(agentGroundedObservations.deletedAt),
+        ),
+      );
+  });
+
+  await markProfileDirtyAndEnqueue(agentId, { trigger: "turn", automatic: true }).catch((error) => {
+    console.error("Marking profile dirty after session deletion failed", error);
+  });
 }
 
 function mapSession(session: typeof agentChatSessions.$inferSelect): ChatSession {
