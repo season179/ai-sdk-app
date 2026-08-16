@@ -901,8 +901,6 @@ function assertAuthorizedTarget(
 function intentStrings(intent: ExplicitProfileIntent): string[] {
   return [
     "content" in intent ? intent.content : undefined,
-    "targetMemoryId" in intent ? intent.targetMemoryId : undefined,
-    "targetFactKey" in intent ? intent.targetFactKey : undefined,
     "targetText" in intent ? intent.targetText : undefined,
   ].filter((value): value is string => value !== undefined);
 }
