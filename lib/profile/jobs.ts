@@ -8,6 +8,7 @@ import {
   isAutomaticProfileSynthesisEnabled,
   isProfileSynthesisEnabled,
 } from "@/lib/profile/config";
+import { reconcileLegacyTombstoneClaimHashes } from "@/lib/profile/hash-reconciliation";
 import type { ProfileVersionTrigger } from "@/lib/profile/types";
 import {
   getBoss,
@@ -83,6 +84,7 @@ export async function syncProfileSynthesisSchedule(): Promise<void> {
 
 export async function enqueueProfileSweepAgents(): Promise<number> {
   if (!isAutomaticProfileSynthesisEnabled()) return 0;
+  await reconcileLegacyTombstoneClaimHashes();
   const db = getDb();
   const [profileRows, sessionRows, memoryRows] = await Promise.all([
     db.selectDistinct({ agentId: agentProfiles.agentId }).from(agentProfiles),

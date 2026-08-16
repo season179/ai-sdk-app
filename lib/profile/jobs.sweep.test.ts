@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     { agentId: "00000000-0000-0000-0000-000000000043" },
   ],
   memories: [{ agentId: "00000000-0000-0000-0000-000000000044" }],
+  reconcileHashes: vi.fn(),
 }));
 
 vi.mock("drizzle-orm", () => ({ isNull: () => ({}) }));
@@ -41,6 +42,9 @@ vi.mock("@/lib/profile/config", () => ({
   isAutomaticProfileSynthesisEnabled: () => true,
   isProfileSynthesisEnabled: () => true,
 }));
+vi.mock("@/lib/profile/hash-reconciliation", () => ({
+  reconcileLegacyTombstoneClaimHashes: mocks.reconcileHashes,
+}));
 vi.mock("@/lib/scheduler/boss", () => ({
   PROFILE_SYNTHESIS_QUEUE_NAME: "agent-profile-synthesis",
   profileSynthesisSendOptions: (key: string) => ({ singletonKey: key }),
@@ -55,11 +59,15 @@ import { enqueueProfileSweepAgents } from "@/lib/profile/jobs";
 describe("profile synthesis daily sweep", () => {
   beforeEach(() => {
     mocks.sent.mockReset();
+    mocks.reconcileHashes
+      .mockReset()
+      .mockResolvedValue({ scanned: 0, legacyMatched: 0, updated: 0 });
     mocks.sent.mockImplementation(async (_queue, data) => `job:${data.agentId}`);
   });
 
   it("enqueues every distinct agent from profiles, live sessions, and memories", async () => {
     await expect(enqueueProfileSweepAgents()).resolves.toBe(4);
+    expect(mocks.reconcileHashes).toHaveBeenCalledTimes(1);
     expect(mocks.sent.mock.calls.map((call) => call[1].agentId).sort()).toEqual([
       "00000000-0000-0000-0000-000000000041",
       "00000000-0000-0000-0000-000000000042",
