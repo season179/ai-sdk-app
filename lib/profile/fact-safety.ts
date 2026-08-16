@@ -18,6 +18,9 @@ const MANIPULATION_VERB =
 const INSTRUCTION_TARGET =
   /\b(?:instructions?|directions?|directives?|prompts?|system[\s_-]*messages?|rules?|settings?|limits?|guidelines?|guardrails?|safety|polic(?:y|ies)|permissions?|authorization|access)\b/iu;
 const SECOND_PERSON_REFERENCE = /\b(?:you|your|yours|yourself|yourselves)\b/iu;
+const SECOND_PERSON_SHORTHAND = /\b(?:u|ur)\b/iu;
+const SECOND_PERSON_BEHAVIOR_CONTEXT =
+  /\b(?:prefer(?:s|red|ring)?|want(?:s|ed|ing)?|need(?:s|ed|ing)?|expect(?:s|ed|ing)?|ask(?:s|ed|ing)?|tell(?:s|ing)?|told|remind(?:s|ed|ing)?|should|must|please)\b/iu;
 const HISTORICAL_REPORT_PREFIX = /^i told you about\b/iu;
 const UNIVERSAL_DIRECTIVE =
   /\b(?:everything|anything)\s+(?:that\s+)?you\s+(?:(?:were|are|have\s+been)\s+)?(?:told|said|instructed)|\ball\s+(?:(?:my|the|your|our|their)\s+)?(?:rules?|settings?|limits?|guidelines?|guardrails?|safety)\b/iu;
@@ -33,7 +36,8 @@ const ZERO_WIDTH =
   /(?:\u00ad|\u034f|[\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff])/gu;
 const COMBINING_MARK = /\p{M}+/gu;
 const IN_WORD_SEPARATOR_CLASS = "[-._··•․‧∙⋅・]";
-const IN_WORD_SEPARATOR = new RegExp(IN_WORD_SEPARATOR_CLASS, "u");
+const OBFUSCATED_PREFIX_SEPARATOR_PATTERN = `(?:${IN_WORD_SEPARATOR_CLASS}|\\s)`;
+const OBFUSCATED_PREFIX_SEPARATOR = new RegExp(OBFUSCATED_PREFIX_SEPARATOR_PATTERN, "u");
 const OBFUSCATED_SINGLE_CHARACTER_WORD = new RegExp(
   `(?<![\\p{L}\\p{N}])(?:[\\p{L}\\p{N}]${IN_WORD_SEPARATOR_CLASS}){2,}[\\p{L}\\p{N}](?![\\p{L}\\p{N}])`,
   "gu",
@@ -45,8 +49,27 @@ const ALL_IN_WORD_SEPARATORS = new RegExp(
 
 const KEY_SHAPED_TOKEN =
   /(?:\bsk-(?:or-)?[a-z0-9][a-z0-9._-]{5,}|\b(?:pk_|ghp_|github_pat_)[a-z0-9][a-z0-9._-]{5,}|\bxox[a-z]-[a-z0-9][a-z0-9._-]{5,}|\bAKIA[0-9A-Z]{16}\b)/giu;
+type ObfuscatedKeyPrefixFamily = {
+  atoms: readonly string[];
+  tailLength: number;
+  exactTailLength?: boolean;
+};
+
+// One inventory drives separator-obfuscation coverage for every supported key family.
+const OBFUSCATED_KEY_PREFIX_FAMILIES: readonly ObfuscatedKeyPrefixFamily[] = [
+  { atoms: ["s", "k"], tailLength: 4 }, // sk-
+  { atoms: ["s", "k", "o", "r"], tailLength: 4 }, // sk-or-
+  { atoms: ["p", "k"], tailLength: 4 }, // pk_
+  { atoms: ["g", "h", "p"], tailLength: 4 }, // ghp_
+  { atoms: ["g", "i", "t", "h", "u", "b", "p", "a", "t"], tailLength: 4 }, // github_pat_
+  { atoms: ["x", "o", "x", "[a-z]"], tailLength: 4 }, // xox[a-z]-
+  { atoms: ["a", "k", "i", "a"], tailLength: 16, exactTailLength: true }, // AKIA
+] as const;
 const OBFUSCATED_KEY_SHAPED_TOKEN = new RegExp(
-  `(?:\\bs${IN_WORD_SEPARATOR_CLASS}*k${IN_WORD_SEPARATOR_CLASS}*(?:o${IN_WORD_SEPARATOR_CLASS}*r${IN_WORD_SEPARATOR_CLASS}*)?|\\bp${IN_WORD_SEPARATOR_CLASS}*k${IN_WORD_SEPARATOR_CLASS}*|\\bg${IN_WORD_SEPARATOR_CLASS}*h${IN_WORD_SEPARATOR_CLASS}*p${IN_WORD_SEPARATOR_CLASS}*|\\bx${IN_WORD_SEPARATOR_CLASS}*o${IN_WORD_SEPARATOR_CLASS}*x[a-z]${IN_WORD_SEPARATOR_CLASS}*)[a-z0-9](?:${IN_WORD_SEPARATOR_CLASS}*[a-z0-9]){5,}(?![a-z0-9])|\\ba${IN_WORD_SEPARATOR_CLASS}*k${IN_WORD_SEPARATOR_CLASS}*i${IN_WORD_SEPARATOR_CLASS}*a${IN_WORD_SEPARATOR_CLASS}*[a-z0-9](?:${IN_WORD_SEPARATOR_CLASS}*[a-z0-9]){15}(?![a-z0-9])`,
+  OBFUSCATED_KEY_PREFIX_FAMILIES.map(({ atoms, tailLength, exactTailLength }) => {
+    const tailRemainder = exactTailLength ? `{${tailLength - 1}}` : `{${tailLength - 1},}`;
+    return `\\b${atoms.join(`${OBFUSCATED_PREFIX_SEPARATOR_PATTERN}*`)}${OBFUSCATED_PREFIX_SEPARATOR_PATTERN}*[a-z0-9](?:${IN_WORD_SEPARATOR_CLASS}*[a-z0-9])${tailRemainder}(?![a-z0-9])`;
+  }).join("|"),
   "giu",
 );
 const JWT_SHAPED_TOKEN = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/gu;
@@ -164,7 +187,7 @@ function containsValueShapedSecret(value: string): boolean {
   if (KEY_SHAPED_TOKEN.test(value)) return true;
   OBFUSCATED_KEY_SHAPED_TOKEN.lastIndex = 0;
   for (const match of value.matchAll(OBFUSCATED_KEY_SHAPED_TOKEN)) {
-    if (/\d/u.test(match[0]) || IN_WORD_SEPARATOR.test(match[0])) return true;
+    if (/\d/u.test(match[0]) || OBFUSCATED_PREFIX_SEPARATOR.test(match[0])) return true;
   }
   JWT_SHAPED_TOKEN.lastIndex = 0;
   if (JWT_SHAPED_TOKEN.test(value)) return true;
@@ -220,9 +243,21 @@ function containsGovernanceLanguage(value: string): boolean {
 }
 
 function containsDisallowedSecondPerson(value: string): boolean {
-  if (!SECOND_PERSON_REFERENCE.test(value)) return false;
-  if (!HISTORICAL_REPORT_PREFIX.test(value)) return true;
-  return SECOND_PERSON_REFERENCE.test(value.replace(HISTORICAL_REPORT_PREFIX, "i reported about"));
+  if (SECOND_PERSON_REFERENCE.test(value)) {
+    if (!HISTORICAL_REPORT_PREFIX.test(value)) return true;
+    if (SECOND_PERSON_REFERENCE.test(value.replace(HISTORICAL_REPORT_PREFIX, "i reported about"))) {
+      return true;
+    }
+  }
+
+  // Treat texting u/ur as second-person only in the same preference/address clause. This keeps
+  // ordinary standalone uses ("the letter u", "U of M", "Uber") outside the governance gate.
+  return value
+    .split(/[.;!?。！？\n\r]/u)
+    .some(
+      (clause) =>
+        SECOND_PERSON_SHORTHAND.test(clause) && SECOND_PERSON_BEHAVIOR_CONTEXT.test(clause),
+    );
 }
 
 function containsInstructionManipulation(value: string): boolean {
