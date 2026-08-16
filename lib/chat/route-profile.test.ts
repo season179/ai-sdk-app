@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   materializeMessageRunProjection: vi.fn(),
   getCurrentProfileVersionForRun: vi.fn(),
   getProfileVersionForRun: vi.fn(),
+  parseExplicitProfileIntent: vi.fn(),
+  applyExplicitProfileIntent: vi.fn(),
   agentOptions: null as { instructions?: string } | null,
   responseOptions: null as { headers?: Record<string, string> } | null,
 }));
@@ -56,6 +58,10 @@ vi.mock("@/lib/chat/sessions", () => {
 vi.mock("@/lib/mock-tools", () => ({ mockToolCount: 0, mockTools: {} }));
 vi.mock("@/lib/models/openrouter", () => ({
   resolveChatModel: vi.fn().mockResolvedValue("test/model"),
+}));
+vi.mock("@/lib/profile/explicit", () => ({
+  parseExplicitProfileIntent: mocks.parseExplicitProfileIntent,
+  applyExplicitProfileIntent: mocks.applyExplicitProfileIntent,
 }));
 vi.mock("@/lib/profile/read", () => ({
   getCurrentProfileVersionForRun: mocks.getCurrentProfileVersionForRun,
@@ -121,6 +127,7 @@ beforeEach(() => {
   process.env.OPENROUTER_API_KEY = "test-key";
   process.env.OPENROUTER_DEFAULT_MODEL = "test/model";
   process.env.AGENT_PROFILE_ENABLED = "true";
+  process.env.AGENT_PROFILE_EXPLICIT_WRITE_ENABLED = "false";
   process.env.SELF_IMPROVEMENT_ENABLED = "false";
   process.env.MEMORY_SEARCH_ENABLED = "false";
   mocks.agentOptions = null;
@@ -153,6 +160,8 @@ beforeEach(() => {
         profileVersionId: candidateProfileVersionId,
       }),
     );
+  mocks.parseExplicitProfileIntent.mockReset().mockReturnValue(null);
+  mocks.applyExplicitProfileIntent.mockReset();
   mocks.getCurrentProfileVersionForRun.mockReset().mockResolvedValue(profile);
   mocks.getProfileVersionForRun.mockReset().mockResolvedValue(profile);
 });
@@ -210,6 +219,44 @@ describe("chat route profile projection", () => {
     expect(response.headers.get("x-profile-status")).toBe("hit");
     expect(instructions).toContain(winnerProfile.body);
     expect(instructions).not.toContain(profile.body);
+  });
+
+  it("fails before streaming when an explicit write fails after the clean message persists", async () => {
+    process.env.AGENT_PROFILE_EXPLICIT_WRITE_ENABLED = "true";
+    const intent = { action: "remember", content: "I prefer concise replies." } as const;
+    mocks.parseExplicitProfileIntent.mockReturnValue(intent);
+    mocks.applyExplicitProfileIntent.mockRejectedValue(new Error("write failed"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const failed = await POST(request());
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toMatchObject({
+      error: "Chat request failed before the stream could start.",
+    });
+    expect(mocks.appendSessionMessages).toHaveBeenCalledTimes(1);
+    expect(mocks.applyExplicitProfileIntent).toHaveBeenCalledWith(intent, {
+      agentId: profile.agentId,
+      sessionId,
+      messageId: message.id,
+      rawUserText: "Hi!",
+    });
+    expect(mocks.materializeMessageRunProjection).not.toHaveBeenCalled();
+    expect(mocks.agentOptions).toBeNull();
+
+    mocks.applyExplicitProfileIntent.mockResolvedValue({
+      durable: true,
+      action: "remember",
+      factKey: "explicit-fact",
+      memoryId: "00000000-0000-4000-8000-000000000444",
+      profileVersionId: profileId,
+      synthesis: "completed",
+    });
+    const retried = await POST(request());
+    expect(retried.status).toBe(200);
+    expect(mocks.appendSessionMessages).toHaveBeenCalledTimes(2);
+    expect(mocks.applyExplicitProfileIntent).toHaveBeenCalledTimes(2);
+    expect(mocks.agentOptions).not.toBeNull();
+    consoleError.mockRestore();
   });
 
   it("degrades after the shared two-second deadline without injecting a block", async () => {
