@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-
+import type { UIMessage } from "ai";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
       responseMessage: {
         id: string;
         role: "assistant";
-        parts: Array<{ type: "text"; text: string }>;
+        parts: UIMessage["parts"];
       };
       isAborted: boolean;
       finishReason: string;
@@ -83,6 +83,59 @@ const available =
   Boolean(process.env.DATABASE_URL) && process.env.CONSOLIDATION_INTEGRATION === "1";
 const integration = available ? describe : describe.skip;
 
+// Recorded from the live OpenRouter turns in /tmp/e2e-A-parts.log and
+// /tmp/e2e-C-assistant-parts.log. `preliminary: undefined` is present on the
+// in-memory SDK part but is removed by the jsonb serialization round-trip.
+const productionResponseParts = [
+  { type: "step-start" },
+  {
+    id: "15DRgGaiTVmgolyo",
+    text: "The user explicitly asked to remember that they prefer dark mode.",
+    type: "reasoning",
+    state: "done",
+    providerMetadata: {
+      openrouter: {
+        reasoning_details: [
+          {
+            text: "The user explicitly asked to remember that they prefer dark mode.",
+            type: "reasoning.text",
+            index: 0,
+            format: "unknown",
+          },
+        ],
+      },
+    },
+  },
+  {
+    type: "tool-memory_write",
+    input: { action: "remember", content: "I prefer dark mode" },
+    state: "output-available",
+    title: "Remember, forget, or correct memory",
+    output: { success: true, durable: true, synthesis: "queued" },
+    toolCallId: "call_00_lWMafudiImBxrcc1qghH8522",
+    preliminary: undefined,
+    callProviderMetadata: {
+      openrouter: {
+        reasoning_details: [
+          {
+            text: "The user explicitly asked to remember that they prefer dark mode.",
+            type: "reasoning.text",
+            index: 0,
+            format: "unknown",
+          },
+        ],
+      },
+    },
+  },
+  { type: "step-start" },
+  {
+    type: "text",
+    text: "Done! I've saved that you prefer dark mode.",
+    state: "done",
+    providerMetadata: undefined,
+  },
+] as unknown as UIMessage["parts"];
+
 integration("chat route terminal profile durability", () => {
   const previousEnv = {
     memoryWrite: process.env.AGENT_MEMORY_WRITE_ENABLED,
@@ -147,7 +200,7 @@ integration("chat route terminal profile durability", () => {
         responseMessage: {
           id: `assistant-${randomUUID()}`,
           role: "assistant",
-          parts: [{ type: "text", text: "Noted." }],
+          parts: productionResponseParts,
         },
         isAborted: false,
         finishReason: "stop",

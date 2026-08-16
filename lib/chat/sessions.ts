@@ -381,11 +381,19 @@ export async function appendSessionMessages(
     const captureIds = new Set(
       rows.flatMap((row) => {
         const requested = requestedById.get(row.id);
-        return requested && canonicalJson(row.parts) === canonicalJson(requested.parts)
+        const persistedJson = jsonbCanonical(row.parts);
+        const requestedJson = requested ? jsonbCanonical(requested.parts) : null;
+        return requested && persistedJson !== null && persistedJson === requestedJson
           ? [row.id]
           : [];
       }),
     );
+    if (opts.traceCapture && captureIds.size === 0) {
+      console.warn("Chat trace capture skipped because persisted message parts did not match", {
+        sessionId,
+        messageIds: messages.map((message) => message.id),
+      });
+    }
 
     // Same-body retries get an attempt-specific event and repoint grounded
     // evidence; a different-body loser can never journal request-local content.
@@ -807,6 +815,16 @@ function mapSession(session: typeof agentChatSessions.$inferSelect): ChatSession
     createdAt: session.createdAt.toISOString(),
     updatedAt: session.updatedAt.toISOString(),
   };
+}
+
+/** Compare the JSON value PostgreSQL stores, ignoring enumerable undefined fields. */
+function jsonbCanonical(value: unknown): string | null {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? null : canonicalJson(JSON.parse(serialized));
+  } catch {
+    return null;
+  }
 }
 
 function mapMessage(
