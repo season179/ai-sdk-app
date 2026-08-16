@@ -7,6 +7,11 @@ const PROJECTION_FENCES = [
     closing: "</current_turn_metadata>",
   },
   { name: "memory_context", opening: /<memory_context>/g, closing: "</memory_context>" },
+  {
+    name: "user_profile",
+    opening: /<user_profile(?:\s[^>]*)?>/g,
+    closing: "</user_profile>",
+  },
   { name: "available_skills", opening: /<available_skills>/g, closing: "</available_skills>" },
   { name: "skill_content", opening: /<skill_content(?:\s[^>]*)?>/g, closing: "</skill_content>" },
   {
