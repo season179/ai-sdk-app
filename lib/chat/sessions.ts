@@ -42,6 +42,7 @@ export type ChatSessionForRun = {
   cleanMessages: ChatUIMessage[];
   modelMessages: ChatUIMessage[];
   apiPartMessageIds: string[];
+  profileVersionIds: Record<string, string | null>;
   branchRevision: number;
 };
 
@@ -190,19 +191,21 @@ export async function getChatSessionForRun(
       cleanMessages,
       modelMessages: validation.success ? validation.data : modelMessages,
       apiPartMessageIds: rows.filter((row) => row.apiParts !== null).map((row) => row.id),
+      profileVersionIds: Object.fromEntries(rows.map((row) => [row.id, row.profileVersionId])),
       branchRevision: session.branchRevision,
     };
   });
 }
 
-/** First-writer-wins sidecar, bound to both the clean winner and branch generation. */
-export async function materializeMessageApiParts(
+/** First-writer-wins run projection, bound to the clean winner and branch generation. */
+export async function materializeMessageRunProjection(
   sessionId: string,
   messageId: string,
   expectedCleanParts: ChatUIMessage["parts"],
   projectedParts: ChatUIMessage["parts"],
+  candidateProfileVersionId: string | null,
   expectedBranchRevision?: number,
-): Promise<ChatUIMessage["parts"]> {
+): Promise<{ parts: ChatUIMessage["parts"]; profileVersionId: string | null }> {
   return getDb().transaction(async (tx) => {
     const [session] = await tx
       .select({ branchRevision: agentChatSessions.branchRevision })
@@ -215,7 +218,11 @@ export async function materializeMessageApiParts(
     }
 
     const [winner] = await tx
-      .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
+      .select({
+        apiParts: agentChatMessages.apiParts,
+        parts: agentChatMessages.parts,
+        profileVersionId: agentChatMessages.profileVersionId,
+      })
       .from(agentChatMessages)
       .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
     if (!winner) {
@@ -230,7 +237,7 @@ export async function materializeMessageApiParts(
     if (winner.apiParts === null) {
       await tx
         .update(agentChatMessages)
-        .set({ apiParts: projectedParts })
+        .set({ apiParts: projectedParts, profileVersionId: candidateProfileVersionId })
         .where(
           and(
             eq(agentChatMessages.sessionId, sessionId),
@@ -240,10 +247,17 @@ export async function materializeMessageApiParts(
         );
     }
     const [materialized] = await tx
-      .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
+      .select({
+        apiParts: agentChatMessages.apiParts,
+        parts: agentChatMessages.parts,
+        profileVersionId: agentChatMessages.profileVersionId,
+      })
       .from(agentChatMessages)
       .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
-    return materialized?.apiParts ?? materialized?.parts ?? winner.parts;
+    return {
+      parts: materialized?.apiParts ?? materialized?.parts ?? winner.parts,
+      profileVersionId: materialized?.profileVersionId ?? null,
+    };
   });
 }
 

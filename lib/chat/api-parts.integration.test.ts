@@ -1,17 +1,24 @@
 import { randomUUID } from "node:crypto";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getDb } from "@/db";
-import { agentChatSessions, agentGroundedObservations, agentTraceEvents } from "@/db/schema";
+import {
+  agentChatMessages,
+  agentChatSessions,
+  agentGroundedObservations,
+  agentProfileVersions,
+  agentTraceEvents,
+} from "@/db/schema";
 import {
   appendSessionMessages,
   ChatBranchConflictError,
+  ChatMessagePartsMismatchError,
   getChatSession,
   getChatSessionForRun,
   getSessionMessagesAfter,
-  materializeMessageApiParts,
+  materializeMessageRunProjection,
   truncateConversationAfterMessage,
 } from "@/lib/chat/sessions";
 import { buildUserMessageEvent } from "@/lib/memory/capture";
@@ -26,6 +33,8 @@ integration("chat api_parts replay boundary", () => {
   const sessionId = randomUUID();
   const messageId = `user-${randomUUID()}`;
   const traceId = randomUUID();
+  const profileAId = randomUUID();
+  const profileBId = randomUUID();
   const previousWriteEnabled = process.env.AGENT_MEMORY_WRITE_ENABLED;
   const cleanParts = [{ type: "text" as const, text: "raw user evidence only" }];
   const projectedA = [
@@ -44,6 +53,12 @@ integration("chat api_parts replay boundary", () => {
   beforeAll(async () => {
     process.env.AGENT_MEMORY_WRITE_ENABLED = "true";
     getPool();
+    await getDb()
+      .insert(agentProfileVersions)
+      .values([
+        profileVersion(profileAId, agentId, 1, "Profile A."),
+        profileVersion(profileBId, agentId, 2, "Profile B."),
+      ]);
     const message = { id: messageId, role: "user" as const, parts: cleanParts };
     await appendSessionMessages(sessionId, [message], {
       agentId,
@@ -62,6 +77,7 @@ integration("chat api_parts replay boundary", () => {
       .where(eq(agentGroundedObservations.agentId, agentId));
     await db.delete(agentTraceEvents).where(eq(agentTraceEvents.agentId, agentId));
     await db.delete(agentChatSessions).where(eq(agentChatSessions.id, sessionId));
+    await db.delete(agentProfileVersions).where(eq(agentProfileVersions.agentId, agentId));
     if (previousWriteEnabled === undefined) delete process.env.AGENT_MEMORY_WRITE_ENABLED;
     else process.env.AGENT_MEMORY_WRITE_ENABLED = previousWriteEnabled;
     await closePool();
@@ -69,11 +85,14 @@ integration("chat api_parts replay boundary", () => {
 
   it("materializes first-writer-wins under concurrency", async () => {
     const [first, second] = await Promise.all([
-      materializeMessageApiParts(sessionId, messageId, cleanParts, projectedA),
-      materializeMessageApiParts(sessionId, messageId, cleanParts, projectedB),
+      materializeMessageRunProjection(sessionId, messageId, cleanParts, projectedA, profileAId),
+      materializeMessageRunProjection(sessionId, messageId, cleanParts, projectedB, profileBId),
     ]);
     expect(first).toEqual(second);
-    expect([projectedA, projectedB]).toContainEqual(first);
+    expect([
+      { parts: projectedA, profileVersionId: profileAId },
+      { parts: projectedB, profileVersionId: profileBId },
+    ]).toContainEqual(first);
   });
 
   it("uses api_parts for model history but keeps UI and SSE reads clean", async () => {
@@ -86,16 +105,124 @@ integration("chat api_parts replay boundary", () => {
     expect(text(ui?.messages[0]?.parts)).not.toContain("<memory_context>");
     expect(text(tail[0]?.message.parts)).not.toContain("<memory_context>");
     expect(run?.apiPartMessageIds).toContain(messageId);
+    expect(run?.profileVersionIds[messageId]).toMatch(/^.{36}$/);
   });
 
   it("replays the exact winning sidecar on later materialization/regenerate", async () => {
     const before = await getChatSessionForRun(sessionId, agentId);
-    const replayed = await materializeMessageApiParts(sessionId, messageId, cleanParts, [
-      { type: "text", text: "different recomputation" },
-    ]);
+    const replayed = await materializeMessageRunProjection(
+      sessionId,
+      messageId,
+      cleanParts,
+      [{ type: "text", text: "different recomputation" }],
+      before?.profileVersionIds[messageId] === profileAId ? profileBId : profileAId,
+    );
     const after = await getChatSessionForRun(sessionId, agentId);
-    expect(replayed).toEqual(before?.modelMessages[0]?.parts);
+    expect(replayed.parts).toEqual(before?.modelMessages[0]?.parts);
+    expect(replayed.profileVersionId).toBe(before?.profileVersionIds[messageId]);
     expect(after?.modelMessages[0]?.parts).toEqual(before?.modelMessages[0]?.parts);
+    expect(after?.profileVersionIds[messageId]).toBe(before?.profileVersionIds[messageId]);
+  });
+
+  it("leaves a legacy materialized sidecar permanently unbound", async () => {
+    const legacySessionId = randomUUID();
+    const legacyMessageId = `user-${randomUUID()}`;
+    try {
+      await appendSessionMessages(
+        legacySessionId,
+        [{ id: legacyMessageId, role: "user", parts: cleanParts }],
+        { agentId, createIfMissing: true },
+      );
+      await getDb()
+        .update(agentChatMessages)
+        .set({ apiParts: projectedA })
+        .where(
+          and(
+            eq(agentChatMessages.sessionId, legacySessionId),
+            eq(agentChatMessages.id, legacyMessageId),
+          ),
+        );
+
+      const replayed = await materializeMessageRunProjection(
+        legacySessionId,
+        legacyMessageId,
+        cleanParts,
+        projectedB,
+        profileAId,
+      );
+      expect(replayed).toEqual({ parts: projectedA, profileVersionId: null });
+    } finally {
+      await getDb().delete(agentChatSessions).where(eq(agentChatSessions.id, legacySessionId));
+    }
+  });
+
+  it("retries a clean-winner mismatch without binding the losing pair", async () => {
+    const mismatchSessionId = randomUUID();
+    const mismatchMessageId = `user-${randomUUID()}`;
+    try {
+      await appendSessionMessages(
+        mismatchSessionId,
+        [{ id: mismatchMessageId, role: "user", parts: cleanParts }],
+        { agentId, createIfMissing: true },
+      );
+      await expect(
+        materializeMessageRunProjection(
+          mismatchSessionId,
+          mismatchMessageId,
+          [{ type: "text", text: "request-local loser" }],
+          projectedA,
+          profileAId,
+        ),
+      ).rejects.toBeInstanceOf(ChatMessagePartsMismatchError);
+
+      const winner = await materializeMessageRunProjection(
+        mismatchSessionId,
+        mismatchMessageId,
+        cleanParts,
+        projectedB,
+        profileBId,
+      );
+      expect(winner).toEqual({ parts: projectedB, profileVersionId: profileBId });
+    } finally {
+      await getDb().delete(agentChatSessions).where(eq(agentChatSessions.id, mismatchSessionId));
+    }
+  });
+
+  it("preserves the target binding across regenerate and never copies profile blocks into history", async () => {
+    const regenerateSessionId = randomUUID();
+    const regenerateMessageId = `user-${randomUUID()}`;
+    const assistantId = `assistant-${randomUUID()}`;
+    try {
+      const appended = await appendSessionMessages(
+        regenerateSessionId,
+        [{ id: regenerateMessageId, role: "user", parts: cleanParts }],
+        { agentId, createIfMissing: true },
+      );
+      await materializeMessageRunProjection(
+        regenerateSessionId,
+        regenerateMessageId,
+        cleanParts,
+        projectedA,
+        profileAId,
+        appended.branchRevision,
+      );
+      await appendSessionMessages(
+        regenerateSessionId,
+        [{ id: assistantId, role: "assistant", parts: [{ type: "text", text: "answer" }] }],
+        { expectedBranchRevision: appended.branchRevision },
+      );
+
+      const revised = await truncateConversationAfterMessage(
+        regenerateSessionId,
+        regenerateMessageId,
+      );
+      const run = await getChatSessionForRun(regenerateSessionId, agentId, revised);
+      expect(run?.profileVersionIds[regenerateMessageId]).toBe(profileAId);
+      expect(run?.modelMessages).toHaveLength(1);
+      expect(JSON.stringify(run?.modelMessages)).not.toContain("<user_profile");
+    } finally {
+      await getDb().delete(agentChatSessions).where(eq(agentChatSessions.id, regenerateSessionId));
+    }
   });
 
   it("journals a same-body retry and repoints grounded evidence to its new attempt", async () => {
@@ -181,18 +308,20 @@ integration("chat api_parts replay boundary", () => {
         },
       ];
       await Promise.all([
-        materializeMessageApiParts(
+        materializeMessageRunProjection(
           duplicateSessionId,
           duplicateMessageId,
           persistedA ?? [],
           projected,
+          null,
           appendA.branchRevision,
         ),
-        materializeMessageApiParts(
+        materializeMessageRunProjection(
           duplicateSessionId,
           duplicateMessageId,
           persistedB ?? [],
           projected,
+          null,
           appendB.branchRevision,
         ),
       ]);
@@ -231,11 +360,12 @@ integration("chat api_parts replay boundary", () => {
         ),
       ).rejects.toBeInstanceOf(ChatBranchConflictError);
       await expect(
-        materializeMessageApiParts(
+        materializeMessageRunProjection(
           branchSessionId,
           staleId,
           [{ type: "text", text: "stale branch" }],
           [{ type: "text", text: "stale projected" }],
+          null,
           stale.branchRevision,
         ),
       ).rejects.toBeInstanceOf(ChatBranchConflictError);
@@ -268,4 +398,20 @@ integration("chat api_parts replay boundary", () => {
 
 function text(parts: Array<{ type: string; text?: string }> | undefined) {
   return parts?.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n") ?? "";
+}
+
+function profileVersion(id: string, agentId: string, versionNo: number, body: string) {
+  return {
+    id,
+    agentId,
+    versionNo,
+    body,
+    facts: [],
+    trigger: "scheduled" as const,
+    authority: "synthesized" as const,
+    tokenCount: 3,
+    recordedDuring: sql`tstzrange(now(), null, '[)')`,
+    promptHash: `test-${id}`,
+    policyVersion: "profile-v1",
+  };
 }

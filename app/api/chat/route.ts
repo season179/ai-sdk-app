@@ -15,7 +15,7 @@ import {
   ChatBranchConflictError,
   ChatMessagePartsMismatchError,
   getChatSessionForRun,
-  materializeMessageApiParts,
+  materializeMessageRunProjection,
   sessionNeedsTitle,
   setSessionTitleIfUnset,
   truncateConversationAfterMessage,
@@ -37,7 +37,14 @@ import { classifyChatStreamEnd } from "@/lib/memory/stream-status";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
+import { isProfileEnabled } from "@/lib/profile/config";
+import { PROFILE_REFERENCE_POLICY, renderUserProfileBlock } from "@/lib/profile/context";
 import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
+import {
+  getCurrentProfileVersionForRun,
+  getProfileVersionForRun,
+  type ProfileVersionForRun,
+} from "@/lib/profile/read";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { isSelfImprovementEnabled } from "@/lib/self-improvement/config";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
@@ -64,6 +71,10 @@ import { isUuid } from "@/lib/utils";
 export const maxDuration = 30;
 
 type ChatUIMessage = UIMessage<ChatMessageMetadata>;
+type ProfileProjectionResult = {
+  version: ProfileVersionForRun | null;
+  failed: boolean;
+};
 
 /** The submit/regenerate triggers useChat sends in ai@6 (verify per SDK version). */
 type ChatTrigger = "submit-message" | "regenerate-message";
@@ -168,6 +179,7 @@ async function buildRunMessages({
   cleanMessages: ChatUIMessage[];
   modelMessages: ChatUIMessage[];
   apiPartMessageIds: string[];
+  profileVersionIds: Record<string, string | null>;
   targetMessageId: string | null;
   userCaptured: boolean;
   branchRevision: number | null;
@@ -178,6 +190,7 @@ async function buildRunMessages({
       cleanMessages: messages,
       modelMessages: messages,
       apiPartMessageIds: [],
+      profileVersionIds: {},
       targetMessageId: incomingMessage?.id ?? null,
       userCaptured: false,
       branchRevision: null,
@@ -199,6 +212,7 @@ async function buildRunMessages({
       cleanMessages: history.cleanMessages,
       modelMessages: history.modelMessages,
       apiPartMessageIds: history.apiPartMessageIds,
+      profileVersionIds: history.profileVersionIds,
       targetMessageId: incomingMessage.id,
       userCaptured: false,
       branchRevision,
@@ -228,6 +242,7 @@ async function buildRunMessages({
       cleanMessages: history.cleanMessages,
       modelMessages: history.modelMessages,
       apiPartMessageIds: history.apiPartMessageIds,
+      profileVersionIds: history.profileVersionIds,
       targetMessageId: incomingMessage.id,
       userCaptured: append.traceCaptured,
       branchRevision: append.branchRevision,
@@ -239,6 +254,7 @@ async function buildRunMessages({
     cleanMessages: history?.cleanMessages ?? [],
     modelMessages: history?.modelMessages ?? [],
     apiPartMessageIds: history?.apiPartMessageIds ?? [],
+    profileVersionIds: history?.profileVersionIds ?? {},
     targetMessageId: null,
     userCaptured: false,
     branchRevision: history?.branchRevision ?? null,
@@ -354,6 +370,10 @@ export async function POST(req: Request) {
     const hasSidecar = Boolean(
       run.targetMessageId && run.apiPartMessageIds.includes(run.targetMessageId),
     );
+    const boundProfileVersionId = run.targetMessageId
+      ? (run.profileVersionIds[run.targetMessageId] ?? null)
+      : null;
+    const profileEligible = Boolean(sessionId && run.targetMessageId && isProfileEnabled());
     const asOf = new Date();
     const projectionDeadlineAt = Date.now() + 2_000;
 
@@ -366,6 +386,7 @@ export async function POST(req: Request) {
         skillCatalogBlock: string;
         activatedTarget: ChatUIMessage | undefined;
         recall: Awaited<ReturnType<typeof recallForTurn>> | null;
+        profile: ProfileProjectionResult | undefined;
       }>(
         {
           skillCatalogBlock: () => loadSkillCatalogBlock(),
@@ -385,15 +406,35 @@ export async function POST(req: Request) {
                   { signal, deadlineAt },
                 )
               : Promise.resolve(null),
+          profile: async ({ signal, deadlineAt }) => {
+            if (!profileEligible || (hasSidecar && !boundProfileVersionId)) {
+              return { version: null, failed: false };
+            }
+            let failed = false;
+            const options = {
+              signal,
+              deadlineAt,
+              onFailure: () => {
+                failed = true;
+              },
+            };
+            const version =
+              hasSidecar && boundProfileVersionId
+                ? await getProfileVersionForRun(boundProfileVersionId, DEFAULT_AGENT_ID, options)
+                : await getCurrentProfileVersionForRun(DEFAULT_AGENT_ID, options);
+            return { version, failed };
+          },
         },
-        { skillCatalogBlock: "", activatedTarget: cleanTarget, recall: null },
+        { skillCatalogBlock: "", activatedTarget: cleanTarget, recall: null, profile: undefined },
         { deadlineAt: projectionDeadlineAt, signal: req.signal },
       );
     };
 
     let cleanTarget = target;
     let projectionReads = await readProjection(cleanTarget);
-    const skillCatalogBlock = projectionReads.skillCatalogBlock;
+    let skillCatalogBlock = projectionReads.skillCatalogBlock;
+    let winningProfileVersionId = hasSidecar ? boundProfileVersionId : null;
+    let materializationFailed = false;
     const project = () => {
       const recalled = projectionReads.recall;
       if (recalled) {
@@ -424,42 +465,97 @@ export async function POST(req: Request) {
 
       if (sessionId) {
         try {
-          let winningParts: ChatUIMessage["parts"];
+          let winner: Awaited<ReturnType<typeof materializeMessageRunProjection>>;
           try {
-            winningParts = await materializeMessageApiParts(
+            winner = await materializeMessageRunProjection(
               sessionId,
               run.targetMessageId,
               cleanTarget.parts,
               projectedTarget.parts,
+              projectionReads.profile?.version?.id ?? null,
               run.branchRevision ?? undefined,
             );
           } catch (error) {
             if (!(error instanceof ChatMessagePartsMismatchError)) throw error;
             cleanTarget = { ...cleanTarget, parts: error.winningParts };
             projectionReads = await readProjection(cleanTarget);
+            skillCatalogBlock = projectionReads.skillCatalogBlock;
             projectedTarget = project() ?? cleanTarget;
-            winningParts = await materializeMessageApiParts(
+            winner = await materializeMessageRunProjection(
               sessionId,
               run.targetMessageId,
               cleanTarget.parts,
               projectedTarget.parts,
+              projectionReads.profile?.version?.id ?? null,
               run.branchRevision ?? undefined,
             );
           }
-          uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, winningParts);
+          winningProfileVersionId = winner.profileVersionId;
+          uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, winner.parts);
         } catch (error) {
           // A branch miss is a conflict, never permission to stream from stale
           // request-local parts. Other DB failures retain the clean fail-open path.
           if (error instanceof ChatBranchConflictError) throw error;
-          console.error("Materializing model-facing message parts failed", error);
+          console.error("Materializing model-facing run projection failed", error);
           recallStatus = "degraded";
           recallCount = 0;
+          materializationFailed = true;
           uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, cleanTarget.parts);
         }
       } else {
         uiMessages = replaceMessageParts(uiMessages, run.targetMessageId, projectedTarget.parts);
       }
     }
+
+    // Run-level profile rendering is independent of sidecar materialization so
+    // exact replay/regenerate paths also load their immutable bound version.
+    let profileVersion: ProfileVersionForRun | null = null;
+    let profileStatus: "hit" | "empty" | "disabled" | "degraded" = profileEligible
+      ? "empty"
+      : "disabled";
+    if (profileEligible) {
+      if (materializationFailed) {
+        profileStatus = "degraded";
+      } else if (winningProfileVersionId === null) {
+        profileStatus =
+          projectionReads.profile === undefined || projectionReads.profile.failed
+            ? "degraded"
+            : "empty";
+      } else if (
+        projectionReads.profile?.failed === false &&
+        projectionReads.profile.version?.id === winningProfileVersionId
+      ) {
+        profileVersion = projectionReads.profile.version;
+      } else {
+        const finalRead = await runProjectionReads<{
+          profile: ProfileProjectionResult | undefined;
+        }>(
+          {
+            profile: async ({ signal, deadlineAt }) => {
+              let failed = false;
+              const version = await getProfileVersionForRun(
+                winningProfileVersionId,
+                DEFAULT_AGENT_ID,
+                {
+                  signal,
+                  deadlineAt,
+                  onFailure: () => {
+                    failed = true;
+                  },
+                },
+              );
+              return { version, failed };
+            },
+          },
+          { profile: undefined },
+          { deadlineAt: projectionDeadlineAt, signal: req.signal },
+        );
+        profileVersion = finalRead.profile?.version ?? null;
+        if (!profileVersion || finalRead.profile?.failed) profileStatus = "degraded";
+      }
+    }
+    const profileBlock = renderUserProfileBlock(profileVersion);
+    if (profileBlock && profileStatus !== "degraded") profileStatus = "hit";
 
     // Bind the originating chat into scheduler tools so a task created here
     // appends its rounds back into this session (Phase 2.3). Carried through
@@ -475,8 +571,17 @@ export async function POST(req: Request) {
       ...(skillCatalogBlock ? skillTools : {}),
       ...(memorySearchEnabled ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId }) : {}),
     };
-    // Byte-stable across every turn: all dynamic data lives in api_parts.
-    const instructions = [SYSTEM_PROMPT, SKILLS_PROMPT, MEMORY_REFERENCE_POLICY].join("\n\n");
+    // Dynamic run state is either materialized in api_parts or referenced by
+    // the target's immutable first-writer-wins profile version id.
+    const instructions = [
+      SYSTEM_PROMPT,
+      SKILLS_PROMPT,
+      MEMORY_REFERENCE_POLICY,
+      PROFILE_REFERENCE_POLICY,
+      profileBlock,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     const agent = new ToolLoopAgent({
       instructions,
@@ -518,6 +623,12 @@ export async function POST(req: Request) {
         "x-tool-exposure-mode": toolExposureMode,
         "x-memory-recall-status": recallStatus,
         "x-memory-recall-count": String(recallCount),
+        "x-profile-status": profileStatus,
+        "x-profile-chars": String(profileVersion?.body.length ?? 0),
+        "x-profile-tokens": String(profileVersion?.tokenCount ?? 0),
+        ...(process.env.NODE_ENV !== "production" && profileVersion
+          ? { "x-profile-version": profileVersion.id }
+          : {}),
       },
       messageMetadata({ part }) {
         if (part.type !== "finish") {
