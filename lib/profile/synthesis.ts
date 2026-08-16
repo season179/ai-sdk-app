@@ -5,6 +5,7 @@ import {
   getProfileSynthesisModel,
   getProfileTokenBudget,
 } from "@/lib/profile/config";
+import { renderCategorizedProfileText } from "@/lib/profile/context";
 import {
   extractProfileOperations,
   PROFILE_EXTRACTION_PROMPT_HASH,
@@ -123,13 +124,11 @@ async function synthesizeSnapshot(
   const sources = reconciled.sources.filter((source) => keptKeys.has(source.factKey));
   if (sameProjection(snapshot, facts, sources)) return commitNoop(snapshot, options.synthesisKey);
 
-  let body = await synthesisModel.render({
-    facts,
-    previousBody: snapshot.currentVersion?.body ?? "",
-    maxChars,
-    tokenBudget,
-  });
-  let validation = validateProfileCandidate({
+  // Rendering is deterministic because the reconciled fact manifest is already
+  // the validated model output. This normalizes provider markdown, heading, and
+  // truncation variance before the strict safety/provenance validator.
+  const body = renderCategorizedProfileText(facts);
+  const validation = validateProfileCandidate({
     body,
     facts,
     sources,
@@ -138,24 +137,7 @@ async function synthesizeSnapshot(
     maxChars,
   });
   if (!validation.valid) {
-    body = await synthesisModel.repair({
-      body,
-      facts,
-      issues: validation.issues,
-      maxChars,
-      tokenBudget,
-    });
-    validation = validateProfileCandidate({
-      body,
-      facts,
-      sources,
-      previousFacts: preservableCurrentFacts(snapshot),
-      tombstones: snapshot.tombstones,
-      maxChars,
-    });
-  }
-  if (!validation.valid) {
-    throw new Error(`Profile validation failed after repair: ${validation.issues.join(", ")}`);
+    throw new Error(`Deterministic profile validation failed: ${validation.issues.join(", ")}`);
   }
 
   return commitProfileVersion({

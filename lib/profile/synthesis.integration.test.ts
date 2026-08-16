@@ -551,6 +551,13 @@ describeIntegration("profile synthesis repository and fake model (integration)",
     try {
       process.env.AGENT_MEMORY_WRITE_ENABLED = "true";
       process.env.AGENT_PROFILE_SYNTHESIS_ENABLED = "false";
+      const darkMemory = await createMemory({
+        agentId,
+        kind: "preference",
+        content: "The user prefers weekly summaries.",
+        source: "curated",
+        confidence: 100,
+      });
       for (const [sessionId, traceId, message] of [
         [liveSessionId, liveTraceId, liveMessage],
         [deletedSessionId, deletedTraceId, deletedMessage],
@@ -597,15 +604,38 @@ describeIntegration("profile synthesis repository and fake model (integration)",
       );
       expect(darkRows.rows).toHaveLength(3);
       expect(darkRows.rows.every((row) => row.profile_generation === null)).toBe(true);
+      const darkMemoryVersion = await getPool().query<{ profile_generation: number | null }>(
+        "select profile_generation from agent_memory_versions where id=$1",
+        [darkMemory.currentVersionId],
+      );
+      expect(darkMemoryVersion.rows).toEqual([{ profile_generation: null }]);
 
       process.env.AGENT_PROFILE_SYNTHESIS_ENABLED = "true";
+      const model = fakeModel();
+      model.extract.mockImplementation(async (snapshot: ProfileSynthesisSnapshot) => {
+        const memory = snapshot.activeMemories.find(
+          (row) => row.memoryVersionId === darkMemory.currentVersionId,
+        );
+        if (!memory) return { operations: [] };
+        return {
+          operations: [
+            {
+              operation: "add" as const,
+              sentence: "The user prefers weekly summaries.",
+              category: "preferences_constraints" as const,
+              observationIds: [],
+              memoryVersionIds: [memory.memoryVersionId],
+            },
+          ],
+        };
+      });
       const result = await synthesizeProfile(agentId, {
         trigger: "scheduled",
         synthesisKey: `dark-enable-sweep:${agentId}`,
-        model: fakeModel(),
+        model,
       });
       expect(result.result).toBe("created");
-      expect((await getCurrentProfile(agentId))?.body).toContain("concise replies");
+      expect((await getCurrentProfile(agentId))?.body).toContain("weekly summaries");
       const after = await getPool().query<{ content: string; profile_generation: number | null }>(
         "select content, profile_generation from agent_grounded_observations where agent_id=$1 order by content",
         [agentId],
@@ -618,6 +648,17 @@ describeIntegration("profile synthesis repository and fake model (integration)",
           .filter((row) => row.content !== "I prefer concise replies.")
           .every((row) => row.profile_generation === null),
       ).toBe(true);
+      const caughtUpMemoryVersion = await getPool().query<{
+        profile_generation: number | null;
+      }>("select profile_generation from agent_memory_versions where id=$1", [
+        darkMemory.currentVersionId,
+      ]);
+      expect(caughtUpMemoryVersion.rows[0].profile_generation).toBeTypeOf("number");
+      const committedVersion = await getPool().query<{ count: string }>(
+        "select count(*) from agent_profile_versions where agent_id=$1",
+        [agentId],
+      );
+      expect(Number(committedVersion.rows[0].count)).toBeGreaterThan(0);
     } finally {
       if (previousMemoryWrite === undefined) delete process.env.AGENT_MEMORY_WRITE_ENABLED;
       else process.env.AGENT_MEMORY_WRITE_ENABLED = previousMemoryWrite;
@@ -780,27 +821,38 @@ describeIntegration("profile synthesis repository and fake model (integration)",
     expect(result.rows[0].last_synthesis_error).toBeNull();
   });
 
-  it("runs one repair then rejects without moving the old head", async () => {
+  it("normalizes failing model-render shapes through deterministic strict rendering", async () => {
     const fixture = await createFixture("I use a screen reader.");
     const model = fakeModel();
-    model.render.mockResolvedValue("fragment");
-    model.repair.mockResolvedValue("still invalid");
-    await expect(
-      synthesizeProfile(fixture.agentId, {
-        trigger: "scheduled",
-        synthesisKey: `invalid:${fixture.agentId}`,
-        model,
-      }),
-    ).rejects.toThrow("validation failed after repair");
-    expect(model.repair).toHaveBeenCalledTimes(1);
-    const current = await getCurrentProfile(fixture.agentId);
-    expect(current).toBeNull();
-    const root = await getPool().query<{
-      dirty_generation: number;
-      synthesized_generation: number;
-    }>(`select dirty_generation, synthesized_generation from agent_profiles where agent_id=$1`, [
-      fixture.agentId,
-    ]);
-    expect(root.rows[0].dirty_generation).toBeGreaterThan(root.rows[0].synthesized_generation);
+    // These reproduce the live failure class: missing sentence punctuation,
+    // markdown fences, mismatched headings, and decorative unmanifested text.
+    model.extract.mockImplementation(async (snapshot: ProfileSynthesisSnapshot) => ({
+      operations: [
+        {
+          operation: "add" as const,
+          sentence: "The user uses a screen reader.",
+          category: "preferences_constraints" as const,
+          observationIds: [snapshot.observationDeltas[0].id],
+          memoryVersionIds: [],
+        },
+      ],
+    }));
+    model.render.mockResolvedValue(
+      "```markdown\n## User preferences\n- The user uses a screen reader\nHelpful context\n```",
+    );
+    model.repair.mockResolvedValue("Preferences\nThe user uses a screen reader");
+
+    const result = await synthesizeProfile(fixture.agentId, {
+      trigger: "scheduled",
+      synthesisKey: `normalized-render:${fixture.agentId}`,
+      model,
+    });
+
+    expect(result.result).toBe("created");
+    expect(model.render).not.toHaveBeenCalled();
+    expect(model.repair).not.toHaveBeenCalled();
+    expect((await getCurrentProfile(fixture.agentId))?.body).toBe(
+      "Preferences and constraints\nThe user uses a screen reader.",
+    );
   });
 });

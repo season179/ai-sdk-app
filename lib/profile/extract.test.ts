@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildExtractionPrompt,
   constrainExtractionOutput,
+  normalizeExtractedSentence,
   operationSchemaDefinition,
   PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS,
   PROFILE_EXTRACTION_PROMPT_HASH,
@@ -51,20 +52,42 @@ function snapshot(): ProfileSynthesisSnapshot {
 
 describe("profile extraction boundary", () => {
   it("bounds provider output and every model-controlled string", () => {
-    expect(PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS).toBeLessThanOrEqual(600);
+    expect(PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS).toBe(2_000);
     const item = operationSchemaDefinition.properties.operations.items;
     expect(item.properties.targetFactKey.maxLength).toBe(200);
     expect(item.properties.sentence.maxLength).toBe(2000);
     expect(item.properties.observationIds.items.maxLength).toBe(64);
     expect(item.properties.memoryVersionIds.items.maxLength).toBe(64);
   });
+  it("normalizes ordinary sentence formatting before strict validation", () => {
+    expect(normalizeExtractedSentence("The user likes pizza")).toBe("The user likes pizza.");
+    expect(normalizeExtractedSentence("The user likes pizza。 ")).toBe("The user likes pizza。");
+  });
+
+  it("retains high-precision direct preferences when a provider returns no operations", () => {
+    const input = snapshot();
+    input.observationDeltas = [
+      { ...input.observationDeltas[0], content: "I like pizza." },
+      { ...input.observationDeltas[1], content: "This happened today." },
+    ];
+    expect(constrainExtractionOutput({ operations: [] }, input).operations).toEqual([
+      {
+        operation: "add",
+        sentence: "The user likes pizza.",
+        category: "preferences_constraints",
+        observationIds: ["00000000-0000-0000-0000-000000000021"],
+        memoryVersionIds: [],
+      },
+    ]);
+  });
+
   it("removes invented source IDs and unsafe sentences", () => {
     const result = constrainExtractionOutput(
       {
         operations: [
           {
             operation: "add",
-            sentence: "The user prefers concise replies.",
+            sentence: "The user prefers concise replies",
             category: "preferences_constraints",
             observationIds: [
               "00000000-0000-0000-0000-000000000021",
@@ -92,7 +115,10 @@ describe("profile extraction boundary", () => {
       snapshot(),
     );
     expect(result.operations).toHaveLength(1);
-    expect(result.operations[0].observationIds).toEqual(["00000000-0000-0000-0000-000000000021"]);
+    expect(result.operations[0]).toMatchObject({
+      sentence: "The user prefers concise replies.",
+      observationIds: ["00000000-0000-0000-0000-000000000021"],
+    });
   });
 
   it("builds a bounded prompt containing only structured direct evidence and active memories", () => {
@@ -132,7 +158,13 @@ describe("profile extraction boundary", () => {
       },
       input,
     );
-    expect(constrained.operations).toEqual([]);
+    expect(constrained.operations).toEqual([
+      expect.objectContaining({
+        sentence: "The user prefers concise replies.",
+        observationIds: ["00000000-0000-0000-0000-000000000021"],
+        memoryVersionIds: [],
+      }),
+    ]);
   });
 
   it("has a deterministic prompt/schema hash", () => {

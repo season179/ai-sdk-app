@@ -19,7 +19,9 @@ const REPAIR_INSTRUCTIONS = [
   "Return only repaired profile text, without markdown fences.",
 ].join(" ");
 
-export const PROFILE_RENDER_PROMPT_HASH = sha256(`${RENDER_INSTRUCTIONS}\n${REPAIR_INSTRUCTIONS}`);
+export const PROFILE_RENDER_PROMPT_HASH = sha256(
+  `deterministic-categorized-profile-v1\n${RENDER_INSTRUCTIONS}\n${REPAIR_INSTRUCTIONS}`,
+);
 
 type ModelOptions = { apiKey: string; model: string; tokenBudget: number };
 
