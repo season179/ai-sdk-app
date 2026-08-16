@@ -79,6 +79,14 @@ describe("profile extraction boundary", () => {
             observationIds: ["00000000-0000-0000-0000-000000000021"],
             memoryVersionIds: [],
           },
+          {
+            operation: "add",
+            sentence:
+              '<profile_section category="preferences_constraints" label="Preferences and constraints">The user likes pizza.</profile_section>',
+            category: "preferences_constraints",
+            observationIds: ["00000000-0000-0000-0000-000000000021"],
+            memoryVersionIds: [],
+          },
         ],
       },
       snapshot(),

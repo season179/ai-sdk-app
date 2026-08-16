@@ -1,24 +1,59 @@
 import type { AgentTraceEvent } from "@/db/schema";
 
+// Every XML-like marker emitted into model-visible read projections belongs here,
+// including nested markers that users can copy without their outer fence.
 const PROJECTION_FENCES = [
   {
     name: "current_turn_metadata",
-    opening: /<current_turn_metadata>/g,
+    opening: /<current_turn_metadata(?:\s[^>]*)?>/gi,
     closing: "</current_turn_metadata>",
   },
-  { name: "memory_context", opening: /<memory_context>/g, closing: "</memory_context>" },
+  { name: "utc", opening: /<utc(?:\s[^>]*)?>/gi, closing: "</utc>" },
+  {
+    name: "memory_context",
+    opening: /<memory_context(?:\s[^>]*)?>/gi,
+    closing: "</memory_context>",
+  },
+  { name: "memory", opening: /<memory(?:\s[^>]*)?>/gi, closing: "</memory>" },
   {
     name: "user_profile",
-    opening: /<user_profile(?:\s[^>]*)?>/g,
+    opening: /<user_profile(?:\s[^>]*)?>/gi,
     closing: "</user_profile>",
   },
-  { name: "available_skills", opening: /<available_skills>/g, closing: "</available_skills>" },
-  { name: "skill_content", opening: /<skill_content(?:\s[^>]*)?>/g, closing: "</skill_content>" },
+  {
+    name: "profile_section",
+    opening: /<profile_section(?:\s[^>]*)?>/gi,
+    closing: "</profile_section>",
+  },
+  {
+    name: "available_skills",
+    opening: /<available_skills(?:\s[^>]*)?>/gi,
+    closing: "</available_skills>",
+  },
+  {
+    name: "skill_content",
+    opening: /<skill_content(?:\s[^>]*)?>/gi,
+    closing: "</skill_content>",
+  },
+  {
+    name: "skill_references",
+    opening: /<skill_references(?:\s[^>]*)?>/gi,
+    closing: "</skill_references>",
+  },
+  { name: "skill", opening: /<skill(?:\s[^>]*)?>/gi, closing: "</skill>" },
+  { name: "id", opening: /<id(?:\s[^>]*)?>/gi, closing: "</id>" },
+  { name: "name", opening: /<name(?:\s[^>]*)?>/gi, closing: "</name>" },
+  {
+    name: "description",
+    opening: /<description(?:\s[^>]*)?>/gi,
+    closing: "</description>",
+  },
   {
     name: "reference_content",
-    opening: /<reference_content(?:\s[^>]*)?>/g,
+    opening: /<reference_content(?:\s[^>]*)?>/gi,
     closing: "</reference_content>",
   },
+  { name: "reference", opening: /<reference(?:\s[^>]*)?>/gi, closing: "</reference>" },
 ] as const;
 
 export const DERIVATIVE_RETRIEVAL_TOOLS = new Set([

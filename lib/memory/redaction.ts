@@ -5,6 +5,7 @@ import {
   TRACE_ARTIFACT_MAX_BYTES,
   TRACE_PAYLOAD_MAX_BYTES,
 } from "@/lib/memory/config";
+import { redactReadProjection } from "@/lib/memory/projection-safety";
 
 export type TraceArtifactInput = {
   artifactHash: string;
@@ -36,7 +37,11 @@ const CREDENTIAL_ASSIGNMENT =
 const NATURAL_LANGUAGE_CREDENTIAL =
   /\b(?:my\s+)?(?:password|passcode|pin|otp|one[-\s]?time\s+(?:password|code)|verification\s+code|recovery\s+(?:code|key)|backup\s+code|private\s+key|secret\s+key|api\s+key|access\s+token)\s+(?:is|was|equals?|reads?)\s+["']?[^\s,"'}]{3,}/gi;
 const HIGH_RISK_IDENTIFIER =
-  /\b(?:social\s+security\s+number|ssn|credit\s+card(?:\s+number)?|seed\s+phrase)\s*(?:is|:|=)\s*["']?[A-Za-z0-9][A-Za-z0-9\s-]{5,}/gi;
+  /\b(?:social\s+security\s+number|ssn|seed\s+phrase)\s*(?:is|:|=)\s*["']?[A-Za-z0-9][A-Za-z0-9\s-]{5,}/gi;
+const CARD_CANDIDATE =
+  /\b(?:my\s+)?(?:(?:credit|debit)\s+)?card(?:\s+number)?\s+(?:is|was|equals?|reads?)\s+["']?([0-9][0-9 -]{11,22}[0-9])/gi;
+const CARD_SECURITY_CODE =
+  /\b(?:my\s+)?(?:cvv|cvc|card\s+security\s+code)\s+(?:is|was|equals?|reads?)\s+["']?\d{3,4}\b/gi;
 const INJECTION_PATTERNS = [
   /(?:ignore|disregard|forget|bypass|do\s+not\s+follow)\s+(?:all\s+)?(?:previous|prior|earlier|system|developer|safety)?\s*(?:instructions|directions|rules|policy|prompt)/i,
   /reveal\s+(?:the\s+)?(?:system prompt|developer message|hidden instructions|secrets?)/i,
@@ -47,7 +52,7 @@ const INJECTION_PATTERNS = [
   /(?:you\s+are\s+now|act\s+as|treat\s+(?:this|me)\s+as)\s+(?:a\s+)?(?:system|developer|administrator|root)/i,
   /(?:system|developer|assistant)\s*(?:message|instructions?)\s*:/i,
   /(?:^|\n)\s*```(?:system|developer|assistant|tool|prompt)?/i,
-  /<\/?(?:system|developer|assistant|tool|user_profile|memory_context|profile_text|available_skills)\b/i,
+  /<\/?(?:system|developer|assistant|tool|profile_text)\b/i,
   /(?:begin|end)\s+(?:system|developer|hidden)\s+(?:prompt|instructions|message)/i,
 ];
 
@@ -61,13 +66,21 @@ const SECRET_PATTERNS = [
 ];
 
 export function detectSecret(value: string): boolean {
-  return SECRET_PATTERNS.some((pattern) => {
-    pattern.lastIndex = 0;
-    return pattern.test(value);
-  });
+  if (
+    SECRET_PATTERNS.some((pattern) => {
+      pattern.lastIndex = 0;
+      return pattern.test(value);
+    })
+  ) {
+    return true;
+  }
+  CARD_SECURITY_CODE.lastIndex = 0;
+  if (CARD_SECURITY_CODE.test(value)) return true;
+  return cardCandidates(value).some((candidate) => passesLuhn(candidate));
 }
 
 export function detectPromptInjection(value: string): boolean {
+  if (redactReadProjection(value).contaminated) return true;
   return INJECTION_PATTERNS.some((pattern) => pattern.test(value));
 }
 
@@ -81,7 +94,40 @@ export function redactText(value: string): { text: string; secretDetected: boole
       return "[REDACTED_SECRET]";
     });
   }
+  CARD_SECURITY_CODE.lastIndex = 0;
+  text = text.replace(CARD_SECURITY_CODE, () => {
+    secretDetected = true;
+    return "[REDACTED_SECRET]";
+  });
+  CARD_CANDIDATE.lastIndex = 0;
+  text = text.replace(CARD_CANDIDATE, (match, candidate: string) => {
+    if (!passesLuhn(candidate)) return match;
+    secretDetected = true;
+    return "[REDACTED_SECRET]";
+  });
   return { text, secretDetected };
+}
+
+function cardCandidates(value: string): string[] {
+  CARD_CANDIDATE.lastIndex = 0;
+  return [...value.matchAll(CARD_CANDIDATE)].map((match) => match[1]);
+}
+
+function passesLuhn(value: string): boolean {
+  const digits = value.replace(/[^0-9]/g, "");
+  if (digits.length < 13 || digits.length > 19 || /^(\d)\1+$/u.test(digits)) return false;
+  let sum = 0;
+  let double = false;
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let digit = Number(digits[index]);
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
 }
 
 function sanitizeValue(value: unknown, state: { secretDetected: boolean }): unknown {

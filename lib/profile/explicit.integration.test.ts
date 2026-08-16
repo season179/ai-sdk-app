@@ -3,11 +3,13 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { getDb } from "@/db";
 import {
+  agentGroundedObservations,
   agentMemories,
   agentMemoryVersions,
   agentMemoryVersionTraceEvents,
   agentProfileFactTombstones,
   agentProfiles,
+  agentProfileVersions,
   agentTraceEvents,
 } from "@/db/schema";
 import { appendSessionMessages, materializeMessageRunProjection } from "@/lib/chat/sessions";
@@ -162,6 +164,58 @@ describeIntegration("explicit profile state edits (integration)", () => {
         ),
       );
     expect(events).toHaveLength(1);
+  });
+
+  it("rejects a natural-language password before anything durable is written", async () => {
+    const scope = await fixture();
+    await expect(
+      applyExplicitProfileIntent(
+        { action: "remember", content: "my password is hunter2" },
+        applyOptions(scope, "msg-natural-secret", "remember that my password is hunter2"),
+      ),
+    ).rejects.toMatchObject({ code: "unsafe" });
+
+    const db = getDb();
+    const [traces, observations, memories, versions, roots, profileVersions, tombstones] =
+      await Promise.all([
+        db.select().from(agentTraceEvents).where(eq(agentTraceEvents.agentId, scope.agentId)),
+        db
+          .select()
+          .from(agentGroundedObservations)
+          .where(eq(agentGroundedObservations.agentId, scope.agentId)),
+        db.select().from(agentMemories).where(eq(agentMemories.agentId, scope.agentId)),
+        db
+          .select({ id: agentMemoryVersions.id })
+          .from(agentMemoryVersions)
+          .innerJoin(agentMemories, eq(agentMemories.id, agentMemoryVersions.memoryId))
+          .where(eq(agentMemories.agentId, scope.agentId)),
+        db.select().from(agentProfiles).where(eq(agentProfiles.agentId, scope.agentId)),
+        db
+          .select()
+          .from(agentProfileVersions)
+          .where(eq(agentProfileVersions.agentId, scope.agentId)),
+        db
+          .select()
+          .from(agentProfileFactTombstones)
+          .where(eq(agentProfileFactTombstones.agentId, scope.agentId)),
+      ]);
+    expect({
+      traces,
+      observations,
+      memories,
+      versions,
+      roots,
+      profileVersions,
+      tombstones,
+    }).toEqual({
+      traces: [],
+      observations: [],
+      memories: [],
+      versions: [],
+      roots: [],
+      profileVersions: [],
+      tombstones: [],
+    });
   });
 
   it("rejects normalized exact-text ambiguity without storing an audit write", async () => {
