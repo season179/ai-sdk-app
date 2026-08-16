@@ -4,6 +4,12 @@ import { sql } from "drizzle-orm";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
 import { getDb } from "@/db";
+import { appendSessionMessages } from "@/lib/chat/sessions";
+import {
+  buildAssistantMessageEvent,
+  buildTerminalEvent,
+  buildUserMessageEvent,
+} from "@/lib/memory/capture";
 import { renderCategorizedProfileText } from "@/lib/profile/context";
 import {
   applyDirectiveOverlay,
@@ -515,6 +521,109 @@ describeIntegration("profile synthesis repository and fake model (integration)",
       expect.objectContaining({ sessionId: null, content: "The user prefers concise replies." }),
     ]);
     expect(snapshot.upperBounds.observation.id).toBe(snapshot.observationDeltas[0].id);
+  });
+
+  it("catches up eligible dark-write evidence on the first enabled sweep without resurrecting ineligible rows", async () => {
+    const previousMemoryWrite = process.env.AGENT_MEMORY_WRITE_ENABLED;
+    const previousSynthesis = process.env.AGENT_PROFILE_SYNTHESIS_ENABLED;
+    const agentId = randomUUID();
+    const liveSessionId = randomUUID();
+    const liveTraceId = randomUUID();
+    const liveMessage = {
+      id: `user-${randomUUID()}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "I prefer concise replies." }],
+    };
+    const deletedSessionId = randomUUID();
+    const deletedTraceId = randomUUID();
+    const deletedMessage = {
+      id: `user-${randomUUID()}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "Deleted evidence must stay ineligible." }],
+    };
+    const incompleteSessionId = randomUUID();
+    const incompleteTraceId = randomUUID();
+    const incompleteMessage = {
+      id: `user-${randomUUID()}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "Incomplete evidence must stay ineligible." }],
+    };
+    try {
+      process.env.AGENT_MEMORY_WRITE_ENABLED = "true";
+      process.env.AGENT_PROFILE_SYNTHESIS_ENABLED = "false";
+      for (const [sessionId, traceId, message] of [
+        [liveSessionId, liveTraceId, liveMessage],
+        [deletedSessionId, deletedTraceId, deletedMessage],
+        [incompleteSessionId, incompleteTraceId, incompleteMessage],
+      ] as const) {
+        await appendSessionMessages(sessionId, [message], {
+          agentId,
+          createIfMissing: true,
+          traceCapture: {
+            events: [buildUserMessageEvent({ agentId, sessionId, traceId }, message)],
+            groundedUserMessages: [message],
+          },
+        });
+      }
+      for (const [sessionId, traceId] of [
+        [liveSessionId, liveTraceId],
+        [deletedSessionId, deletedTraceId],
+      ] as const) {
+        const assistant = {
+          id: `assistant-${randomUUID()}`,
+          role: "assistant" as const,
+          parts: [{ type: "text" as const, text: "Acknowledged." }],
+        };
+        const context = { agentId, sessionId, traceId };
+        await appendSessionMessages(sessionId, [assistant], {
+          agentId,
+          traceCapture: {
+            events: [
+              buildAssistantMessageEvent(context, assistant),
+              buildTerminalEvent(context, "completed"),
+            ],
+          },
+        });
+      }
+      await getPool().query("update agent_chat_sessions set deleted_at=now() where id=$1", [
+        deletedSessionId,
+      ]);
+      const darkRows = await getPool().query<{
+        content: string;
+        profile_generation: number | null;
+      }>(
+        "select content, profile_generation from agent_grounded_observations where agent_id=$1 order by content",
+        [agentId],
+      );
+      expect(darkRows.rows).toHaveLength(3);
+      expect(darkRows.rows.every((row) => row.profile_generation === null)).toBe(true);
+
+      process.env.AGENT_PROFILE_SYNTHESIS_ENABLED = "true";
+      const result = await synthesizeProfile(agentId, {
+        trigger: "scheduled",
+        synthesisKey: `dark-enable-sweep:${agentId}`,
+        model: fakeModel(),
+      });
+      expect(result.result).toBe("created");
+      expect((await getCurrentProfile(agentId))?.body).toContain("concise replies");
+      const after = await getPool().query<{ content: string; profile_generation: number | null }>(
+        "select content, profile_generation from agent_grounded_observations where agent_id=$1 order by content",
+        [agentId],
+      );
+      expect(
+        after.rows.find((row) => row.content === "I prefer concise replies.")?.profile_generation,
+      ).toBeTypeOf("number");
+      expect(
+        after.rows
+          .filter((row) => row.content !== "I prefer concise replies.")
+          .every((row) => row.profile_generation === null),
+      ).toBe(true);
+    } finally {
+      if (previousMemoryWrite === undefined) delete process.env.AGENT_MEMORY_WRITE_ENABLED;
+      else process.env.AGENT_MEMORY_WRITE_ENABLED = previousMemoryWrite;
+      if (previousSynthesis === undefined) delete process.env.AGENT_PROFILE_SYNTHESIS_ENABLED;
+      else process.env.AGENT_PROFILE_SYNTHESIS_ENABLED = previousSynthesis;
+    }
   });
 
   it("does not skip an older observation that commits after a newer synthesized watermark", async () => {
