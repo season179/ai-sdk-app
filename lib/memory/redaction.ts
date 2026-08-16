@@ -36,6 +36,10 @@ const CREDENTIAL_ASSIGNMENT =
   /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd)\s*[:=]\s*["']?[^\s,"'}]{4,}/gi;
 const NATURAL_LANGUAGE_CREDENTIAL =
   /\b(?:my\s+)?(?:password|passcode|pin|otp|one[-\s]?time\s+(?:password|code)|verification\s+code|recovery\s+(?:code|key)|backup\s+code|private\s+key|secret\s+key|api\s+key|access\s+token)\s+(?:is|was|equals?|reads?)\s+["']?[^\s,"'}]{3,}/gi;
+// Connector-free credentials need a value-like token so ordinary phrases such
+// as "password manager" and "api key rotation" remain safe.
+const APPOSITIONAL_CREDENTIAL =
+  /\b(?:(?:my|the|your|our|their)\s+)?(?:password|passcode|pin|otp|one[-\s]?time\s+(?:password|code)|verification\s+code|recovery\s+(?:code|key)|backup\s+code|private\s+key|secret\s+key|api\s+key|access\s+token)\s+["']?(?=[^\s,"'}]{3,}(?:[\s,"'}]|$))(?=[^\s,"'}]*(?:\d|[-_=+/~]))[^\s,"'}]+["']?/gi;
 const HIGH_RISK_IDENTIFIER =
   /\b(?:social\s+security\s+number|ssn|seed\s+phrase)\s*(?:is|:|=)\s*["']?[A-Za-z0-9][A-Za-z0-9\s-]{5,}/gi;
 const CARD_CANDIDATE =
@@ -43,10 +47,10 @@ const CARD_CANDIDATE =
 const CARD_SECURITY_CODE =
   /\b(?:my\s+)?(?:cvv|cvc|card\s+security\s+code)\s+(?:is|was|equals?|reads?)\s+["']?\d{3,4}\b/gi;
 const INJECTION_PATTERNS = [
-  /(?:ignore|disregard|forget|bypass|do\s+not\s+follow)\s+(?:all\s+)?(?:previous|prior|earlier|system|developer|safety)?\s*(?:instructions|directions|rules|policy|prompt)/i,
+  /(?:ignor(?:e|es|ed|ing)|disregard(?:s|ed|ing)?|overrid(?:e|es|den|ing)|overrode|forget(?:s|ting)?|forgot(?:ten)?|bypass(?:es|ed|ing)?|do\s+not\s+follow)\s+(?:the\s+)?(?:all\s+)?(?:previous|prior|earlier|system|developer|safety)?\s*(?:instructions|directions|rules|policy|prompt)/i,
   /reveal\s+(?:the\s+)?(?:system prompt|developer message|hidden instructions|secrets?)/i,
   /(?:send|exfiltrate|upload|leak)\s+.{0,60}(?:credentials?|tokens?|secrets?|private data)/i,
-  /(?:override|disable|change|grant|elevate)\s+.{0,30}(?:safety|permissions?|policy|authorization|access)/i,
+  /(?:overrid(?:e|es|den|ing)|overrode|disabl(?:e|es|ed|ing)|chang(?:e|es|ed|ing)|grant(?:s|ed|ing)?|elevat(?:e|es|ed|ing))\s+.{0,30}(?:safety|permissions?|policy|authorization|access)/i,
   /(?:always|must|immediately)\s+(?:call|invoke|execute|run|use)\s+[a-z][a-z0-9_.-]{2,}/i,
   /(?:call|invoke|execute|run|use)\s+(?:the\s+)?(?:tool|function)\s+[a-z][a-z0-9_.-]{2,}/i,
   /(?:you\s+are\s+now|act\s+as|treat\s+(?:this|me)\s+as)\s+(?:a\s+)?(?:system|developer|administrator|root)/i,
@@ -62,6 +66,7 @@ const SECRET_PATTERNS = [
   PROVIDER_TOKEN,
   CREDENTIAL_ASSIGNMENT,
   NATURAL_LANGUAGE_CREDENTIAL,
+  APPOSITIONAL_CREDENTIAL,
   HIGH_RISK_IDENTIFIER,
 ];
 

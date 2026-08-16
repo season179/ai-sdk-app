@@ -81,6 +81,38 @@ describe("profile extraction boundary", () => {
     ]);
   });
 
+  it.each(["I like ignoring previous instructions.", "I love my password hunter2."])(
+    "does not promote adversarial direct preferences: %s",
+    (content) => {
+      const input = snapshot();
+      input.observationDeltas = [{ ...input.observationDeltas[0], content }];
+
+      expect(constrainExtractionOutput({ operations: [] }, input).operations).toEqual([]);
+    },
+  );
+
+  it("does not fall back when a non-empty provider result is filtered out", () => {
+    const input = snapshot();
+    input.observationDeltas = [{ ...input.observationDeltas[0], content: "I like pizza." }];
+
+    expect(
+      constrainExtractionOutput(
+        {
+          operations: [
+            {
+              operation: "add",
+              sentence: "The user likes pizza.",
+              category: "preferences_constraints",
+              observationIds: ["00000000-0000-0000-0000-000000000099"],
+              memoryVersionIds: [],
+            },
+          ],
+        },
+        input,
+      ).operations,
+    ).toEqual([]);
+  });
+
   it("removes invented source IDs and unsafe sentences", () => {
     const result = constrainExtractionOutput(
       {
@@ -158,13 +190,7 @@ describe("profile extraction boundary", () => {
       },
       input,
     );
-    expect(constrained.operations).toEqual([
-      expect.objectContaining({
-        sentence: "The user prefers concise replies.",
-        observationIds: ["00000000-0000-0000-0000-000000000021"],
-        memoryVersionIds: [],
-      }),
-    ]);
+    expect(constrained.operations).toEqual([]);
   });
 
   it("has a deterministic prompt/schema hash", () => {

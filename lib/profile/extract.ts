@@ -65,6 +65,8 @@ export const operationSchemaDefinition = {
 } as const;
 
 const extractionSchema = jsonSchema<ProfileExtractionOutput>(operationSchemaDefinition);
+const DIRECT_PREFERENCE_FORBIDDEN_TOKEN =
+  /\b(?:passwords?|passphrases?|pins?|otps?|tokens?|api[\s_-]*keys?|secrets?|credentials?|private[\s_-]*keys?|instructions?|prompts?|system[\s_-]*messages?|rules?|polic(?:y|ies)|jailbreaks?)\b/iu;
 export const PROFILE_EXTRACTION_PROMPT_HASH = sha256(
   `${EXTRACT_INSTRUCTIONS}\n${JSON.stringify(operationSchemaDefinition)}`,
 );
@@ -111,6 +113,7 @@ export function constrainExtractionOutput(
   output: ProfileExtractionOutput,
   snapshot: ProfileSynthesisSnapshot,
 ): ProfileExtractionOutput {
+  const providerReturnedNoOperations = output.operations.length === 0;
   const observationIds = new Set(snapshot.observationDeltas.map((row) => row.id));
   const deltaIds = new Set(snapshot.memoryVersionDeltas.map((row) => row.memoryVersionId));
   const memoryIds = new Set(
@@ -162,9 +165,10 @@ export function constrainExtractionOutput(
       memoryVersionIds: citedMemories,
     });
   }
-  // Recover only when the provider produced no usable judgment. A valid
-  // non-empty model result remains authoritative for extraction precision.
-  if (operations.length === 0) {
+  // Recover only from a literally empty provider result (or the synthetic
+  // empty result used after retry exhaustion). Safety-filtered judgments are
+  // suspect and intentionally advance as a no-op instead of activating facts.
+  if (providerReturnedNoOperations) {
     for (const observation of snapshot.observationDeltas) {
       if (operations.length >= 40) break;
       const fallback = directPreferenceOperation(observation.content, observation.id);
@@ -235,7 +239,7 @@ function directPreferenceOperation(
   observationId: string,
 ): ProfileExtractionOperation | null {
   const safe = boundedSafeEvidence(content);
-  if (!safe) return null;
+  if (!safe || DIRECT_PREFERENCE_FORBIDDEN_TOKEN.test(safe)) return null;
   const match = /^I\s+(like|love|prefer|dislike|hate)\s+(.+?)[.!?。！？]*$/iu.exec(safe);
   if (!match) return null;
   const object = match[2].trim();

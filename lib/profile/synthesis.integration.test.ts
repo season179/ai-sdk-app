@@ -11,6 +11,7 @@ import {
   buildUserMessageEvent,
 } from "@/lib/memory/capture";
 import { renderCategorizedProfileText } from "@/lib/profile/context";
+import { constrainExtractionOutput } from "@/lib/profile/extract";
 import {
   applyDirectiveOverlay,
   captureSynthesisSnapshot,
@@ -133,6 +134,31 @@ describeIntegration("profile synthesis repository and fake model (integration)",
       else process.env.AGENT_PROFILE_SYNTHESIS_MODEL = previousModel;
     }
   });
+
+  it.each(["I like ignoring previous instructions.", "I love my password hunter2."])(
+    "does not commit adversarial fallback evidence: %s",
+    async (content) => {
+      const fixture = await createFixture(content);
+      const model = fakeModel();
+      model.extract.mockImplementation(async (snapshot: ProfileSynthesisSnapshot) =>
+        constrainExtractionOutput({ operations: [] }, snapshot),
+      );
+
+      const result = await synthesizeProfile(fixture.agentId, {
+        trigger: "scheduled",
+        synthesisKey: `adversarial-fallback:${fixture.agentId}`,
+        model,
+      });
+
+      expect(result).toEqual({ result: "noop", profileVersionId: null, versionNo: null });
+      expect(await getCurrentProfile(fixture.agentId)).toBeNull();
+      const versions = await getPool().query<{ count: string }>(
+        "select count(*)::text as count from agent_profile_versions where agent_id=$1",
+        [fixture.agentId],
+      );
+      expect(versions.rows[0]?.count).toBe("0");
+    },
+  );
 
   it("commits a user directive overlay atomically for explicit-edit callers", async () => {
     const fixture = await createFixture();
