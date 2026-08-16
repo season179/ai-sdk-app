@@ -65,7 +65,10 @@ vi.mock("@/lib/scheduler/tool-specs", () => ({ createSchedulerTools: () => ({}) 
 vi.mock("@/lib/self-improvement/enqueue", () => ({
   recordCompletedTurnAndMaybeEnqueueReview: vi.fn(),
 }));
-vi.mock("@/lib/self-improvement/memory-tools", () => ({ createMemoryTools: () => ({}) }));
+vi.mock("@/lib/self-improvement/memory-tools", () => ({
+  createConversationSearchTools: () => ({}),
+  createMemoryTools: () => ({}),
+}));
 vi.mock("@/lib/skills/catalog", () => ({
   formatSkillCatalog: () => "",
   getSkillCatalog: vi.fn().mockResolvedValue([]),
