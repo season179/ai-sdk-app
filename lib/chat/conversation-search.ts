@@ -3,6 +3,7 @@ import { and, asc, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
 import { type AppDbClient, getDb } from "@/db";
 import { agentChatMessages, agentChatSessions, type ChatMessageRole } from "@/db/schema";
 import { redactReadProjection } from "@/lib/memory/projection-safety";
+import { redactText } from "@/lib/memory/redaction";
 
 export const CONVERSATION_SEARCH_DEFAULT_LIMIT = 5;
 export const CONVERSATION_SEARCH_MAX_LIMIT = 20;
@@ -416,7 +417,7 @@ function visibleText(parts: unknown): string {
     )
     .join("\n")
     .trim();
-  return redactReadProjection(text).text;
+  return redactText(redactReadProjection(text).text).text;
 }
 
 function truncateCodePoints(value: string, max: number): string {

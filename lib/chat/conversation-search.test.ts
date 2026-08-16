@@ -184,4 +184,28 @@ describe("conversation temporal result bounds", () => {
     expect(response.results[0].excerpt).toBe("visible\n[read projection redacted]after");
     expect(response.results[0].excerpt).not.toContain("hidden");
   });
+
+  it("redacts secrets before returning model-visible excerpts", async () => {
+    const response = await searchConversationsByTime(
+      {
+        from: "2026-01-01T00:00:00Z",
+        to: "2026-01-02T00:00:00Z",
+      },
+      {
+        agentId: SESSION_A,
+        query: async () => [
+          {
+            sessionId: SESSION_A,
+            title: null,
+            messageId: "secret",
+            role: "user",
+            parts: [{ type: "text", text: "remember that my password is hunter2" }],
+            createdAt: "2026-01-01T00:00:00.000000Z",
+          },
+        ],
+      },
+    );
+    expect(response.results[0].excerpt).toBe("remember that [REDACTED_SECRET]");
+    expect(response.results[0].excerpt).not.toContain("hunter2");
+  });
 });

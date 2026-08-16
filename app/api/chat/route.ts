@@ -47,6 +47,7 @@ import {
   applyExplicitProfileIntent,
   type ExplicitProfileApplyResult,
   type ExplicitProfileIntent,
+  ExplicitProfileIntentError,
   parseExplicitProfileIntent,
 } from "@/lib/profile/explicit";
 import {
@@ -794,6 +795,12 @@ export async function POST(req: Request) {
     }
     if (error instanceof ChatBranchConflictError) {
       return Response.json({ error: error.message, code: "chat_branch_conflict" }, { status: 409 });
+    }
+    if (error instanceof ExplicitProfileIntentError) {
+      return Response.json(
+        { error: "That memory request was rejected by the safety policy.", code: error.code },
+        { status: error.code === "unsafe" ? 422 : 400 },
+      );
     }
     return Response.json(
       { error: "Chat request failed before the stream could start." },
