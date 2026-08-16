@@ -15,6 +15,7 @@ import {
   assertCompletedTraceWindow,
   assertPromotableTraceEvidence,
 } from "@/lib/memory/trace";
+import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
 import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   archiveMemory,
@@ -87,6 +88,15 @@ export async function applyReviewProposal(id: string): Promise<ReviewProposal> {
       admissionMetadata: proposal.admissionMetadata ?? undefined,
     },
   });
+
+  if (proposal.kind.startsWith("memory_")) {
+    await markProfileDirtyAndEnqueue(proposal.agentId, {
+      trigger: "turn",
+      automatic: true,
+    }).catch((error) => {
+      console.error("Marking profile dirty after proposal apply failed", error);
+    });
+  }
 
   return proposal;
 }

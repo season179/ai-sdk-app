@@ -16,7 +16,7 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "dev": "mkdir -p logs && concurrently --names app,worker,review,consolidation --prefix-colors blue,magenta,cyan,green \"portless\" \"pnpm run worker:scheduled-tasks\" \"pnpm run worker:turn-review\" \"pnpm run worker:consolidation\" 2>&1 | tee /dev/tty | /usr/sbin/rotatelogs -n 2 logs/dev.log 5M",
+    "dev": "mkdir -p logs && concurrently --names app,worker,review,consolidation,profile --prefix-colors blue,magenta,cyan,green,yellow \"portless\" \"pnpm run worker:scheduled-tasks\" \"pnpm run worker:turn-review\" \"pnpm run worker:consolidation\" \"pnpm run worker:profile-synthesis\" 2>&1 | tee /dev/tty | /usr/sbin/rotatelogs -n 2 logs/dev.log 5M",
     "dev:app": "next dev",
     "dev:tunnel": "portless",
     "build": "next build",
@@ -28,7 +28,8 @@
     "db:migrate": "tsx scripts/db-migrate.ts",
     "worker:scheduled-tasks": "tsx workers/scheduled-tasks.ts",
     "worker:turn-review": "tsx workers/turn-review.ts",
-    "worker:consolidation": "tsx workers/consolidation.ts"
+    "worker:consolidation": "tsx workers/consolidation.ts",
+    "worker:profile-synthesis": "tsx workers/profile-synthesis.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "4.0.68",

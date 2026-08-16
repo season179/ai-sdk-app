@@ -37,6 +37,7 @@ import { classifyChatStreamEnd } from "@/lib/memory/stream-status";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
+import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { isSelfImprovementEnabled } from "@/lib/self-improvement/config";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
@@ -586,6 +587,14 @@ export async function POST(req: Request) {
         }).catch((error) => {
           console.error("Enqueuing self-improvement review failed", error);
         });
+        if (run.userCaptured) {
+          void markProfileDirtyAndEnqueue(DEFAULT_AGENT_ID, {
+            trigger: "turn",
+            automatic: true,
+          }).catch((error) => {
+            console.error("Enqueuing profile synthesis failed", error);
+          });
+        }
 
         try {
           const assistantCount =
