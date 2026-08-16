@@ -12,16 +12,11 @@ import {
   type MemoryKind,
 } from "@/db/schema";
 import { getMemoryPolicyVersion } from "@/lib/memory/config";
-import {
-  detectPromptInjection,
-  detectSecret,
-  redactText,
-  sanitizeTracePayload,
-  sha256,
-} from "@/lib/memory/redaction";
+import { sanitizeTracePayload, sha256 } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import { getProfilePolicyVersion } from "@/lib/profile/config";
 import { renderCategorizedProfileText } from "@/lib/profile/context";
+import { isCandidateFactSafe } from "@/lib/profile/fact-safety";
 import { enqueueProfileSynthesis } from "@/lib/profile/jobs";
 import { profileClaimHash, stableFactKeyForClaim } from "@/lib/profile/reconcile";
 import {
@@ -860,13 +855,7 @@ function validateIntentShape(intent: ExplicitProfileIntent): void {
 
 function assertSafeStrings(values: string[]): void {
   for (const value of values) {
-    const redacted = redactText(value);
-    if (
-      detectSecret(value) ||
-      detectPromptInjection(value) ||
-      redacted.secretDetected ||
-      redacted.text !== value
-    ) {
+    if (!isCandidateFactSafe(value)) {
       throw new ExplicitProfileIntentError(
         "Unsafe explicit memory content was rejected.",
         "unsafe",

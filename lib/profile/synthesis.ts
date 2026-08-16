@@ -7,9 +7,10 @@ import {
 } from "@/lib/profile/config";
 import { renderCategorizedProfileText } from "@/lib/profile/context";
 import {
-  extractProfileOperations,
+  constrainExtractionOutput,
   PROFILE_EXTRACTION_PROMPT_HASH,
   PROFILE_SYNTHESIZER_ID,
+  requestProfileOperations,
 } from "@/lib/profile/extract";
 import { reconcileProfile } from "@/lib/profile/reconcile";
 import {
@@ -115,7 +116,20 @@ async function synthesizeSnapshot(
 
   const synthesisModel = model ?? createOpenRouterProfileModel();
   // captureSynthesisSnapshot has committed before every model call.
-  const extracted = await synthesisModel.extract(snapshot);
+  const rawExtracted = await synthesisModel.extract(snapshot);
+  let unsafeOperationCount = 0;
+  const extracted = constrainExtractionOutput(rawExtracted, snapshot, {
+    onUnsafeOperationDropped: () => {
+      unsafeOperationCount += 1;
+    },
+  });
+  if (unsafeOperationCount > 0) {
+    console.warn("Profile synthesis receipt note: unsafe candidate operations dropped", {
+      agentId: snapshot.agentId,
+      synthesisKey: options.synthesisKey,
+      unsafeOperationCount,
+    });
+  }
   const reconciled = reconcileProfile(snapshot, extracted);
   const maxChars = getProfileMaxChars();
   const tokenBudget = getProfileTokenBudget();
@@ -277,7 +291,7 @@ function createOpenRouterProfileModel(): ProfileSynthesisModel {
   if (!model) throw new MissingProfileSynthesisEnvError("AGENT_PROFILE_SYNTHESIS_MODEL");
   return {
     modelId: model,
-    extract: (snapshot) => extractProfileOperations(snapshot, { apiKey, model }),
+    extract: (snapshot) => requestProfileOperations(snapshot, { apiKey, model }),
     render: (input) => renderProfile(input, { apiKey, model, tokenBudget: input.tokenBudget }),
     repair: (input) => repairProfile(input, { apiKey, model, tokenBudget: input.tokenBudget }),
   };

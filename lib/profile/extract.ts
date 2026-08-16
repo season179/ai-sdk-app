@@ -1,7 +1,7 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText, jsonSchema, NoOutputGeneratedError, Output } from "ai";
-import { redactReadProjection } from "@/lib/memory/projection-safety";
-import { detectPromptInjection, detectSecret, redactText, sha256 } from "@/lib/memory/redaction";
+import { sha256 } from "@/lib/memory/redaction";
+import { isCandidateFactSafe } from "@/lib/profile/fact-safety";
 import type {
   ProfileExtractionOperation,
   ProfileExtractionOutput,
@@ -65,13 +65,19 @@ export const operationSchemaDefinition = {
 } as const;
 
 const extractionSchema = jsonSchema<ProfileExtractionOutput>(operationSchemaDefinition);
-const DIRECT_PREFERENCE_FORBIDDEN_TOKEN =
-  /\b(?:passwords?|passphrases?|pins?|otps?|tokens?|api[\s_-]*keys?|secrets?|credentials?|private[\s_-]*keys?|instructions?|prompts?|system[\s_-]*messages?|rules?|polic(?:y|ies)|jailbreaks?)\b/iu;
 export const PROFILE_EXTRACTION_PROMPT_HASH = sha256(
   `${EXTRACT_INSTRUCTIONS}\n${JSON.stringify(operationSchemaDefinition)}`,
 );
 
 export async function extractProfileOperations(
+  snapshot: ProfileSynthesisSnapshot,
+  options: { apiKey: string; model: string },
+): Promise<ProfileExtractionOutput> {
+  return constrainExtractionOutput(await requestProfileOperations(snapshot, options), snapshot);
+}
+
+/** Raw provider boundary. Callers must pass the result through constrainExtractionOutput. */
+export async function requestProfileOperations(
   snapshot: ProfileSynthesisSnapshot,
   options: { apiKey: string; model: string },
 ): Promise<ProfileExtractionOutput> {
@@ -92,12 +98,14 @@ export async function extractProfileOperations(
         prompt,
         maxOutputTokens,
       });
-      return constrainExtractionOutput(result.output, snapshot);
+      return result.output;
     } catch (error) {
       if (!NoOutputGeneratedError.isInstance(error)) throw error;
       if (maxOutputTokens === PROFILE_EXTRACTION_RETRY_OUTPUT_TOKENS) {
-        const deterministic = constrainExtractionOutput({ operations: [] }, snapshot);
-        if (deterministic.operations.length > 0) return deterministic;
+        // Let the shared constraint boundary apply the deterministic fallback.
+        if (constrainExtractionOutput({ operations: [] }, snapshot).operations.length > 0) {
+          return { operations: [] };
+        }
         throw error;
       }
       console.warn("Profile extraction produced no structured output; retrying with more tokens", {
@@ -112,6 +120,7 @@ export async function extractProfileOperations(
 export function constrainExtractionOutput(
   output: ProfileExtractionOutput,
   snapshot: ProfileSynthesisSnapshot,
+  options: { onUnsafeOperationDropped?: () => void } = {},
 ): ProfileExtractionOutput {
   const providerReturnedNoOperations = output.operations.length === 0;
   const observationIds = new Set(snapshot.observationDeltas.map((row) => row.id));
@@ -139,15 +148,11 @@ export function constrainExtractionOutput(
     }
     if (operation.operation !== "invalidate") {
       const sentence = normalizeExtractedSentence(operation.sentence);
-      if (
-        !sentence ||
-        !operation.category ||
-        detectSecret(sentence) ||
-        detectPromptInjection(sentence)
-      )
+      if (!sentence || !operation.category) continue;
+      if (!isCandidateFactSafe(sentence)) {
+        options.onUnsafeOperationDropped?.();
         continue;
-      const redacted = redactText(sentence);
-      if (redacted.secretDetected || redacted.text !== sentence) continue;
+      }
       operations.push({
         operation: operation.operation,
         ...(operation.targetFactKey ? { targetFactKey: operation.targetFactKey } : {}),
@@ -239,7 +244,7 @@ function directPreferenceOperation(
   observationId: string,
 ): ProfileExtractionOperation | null {
   const safe = boundedSafeEvidence(content);
-  if (!safe || DIRECT_PREFERENCE_FORBIDDEN_TOKEN.test(safe)) return null;
+  if (!safe) return null;
   const match = /^I\s+(like|love|prefer|dislike|hate)\s+(.+?)[.!?。！？]*$/iu.exec(safe);
   if (!match) return null;
   const object = match[2].trim();
@@ -252,9 +257,11 @@ function directPreferenceOperation(
     hate: "hates",
   }[match[1].toLocaleLowerCase("en-US")];
   if (!verb) return null;
+  const sentence = `The user ${verb} ${object}.`;
+  if (!isCandidateFactSafe(sentence)) return null;
   return {
     operation: "add",
-    sentence: `The user ${verb} ${object}.`,
+    sentence,
     category: "preferences_constraints",
     observationIds: [observationId],
     memoryVersionIds: [],
@@ -268,12 +275,7 @@ export function normalizeExtractedSentence(value: string | undefined): string {
 }
 
 function boundedSafeEvidence(value: string): string | null {
-  const projection = redactReadProjection(value);
-  if (projection.contaminated) return null;
-  const redacted = redactText(projection.text);
-  const text = redacted.text.trim().slice(0, 2_000);
-  if (!text || redacted.secretDetected || detectSecret(value) || detectPromptInjection(value)) {
-    return null;
-  }
-  return text;
+  if (!isCandidateFactSafe(value)) return null;
+  const text = value.trim().slice(0, 2_000);
+  return text && isCandidateFactSafe(text) ? text : null;
 }

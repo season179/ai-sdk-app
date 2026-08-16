@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { redactReadProjection } from "@/lib/memory/projection-safety";
-import { detectPromptInjection, detectSecret, redactText } from "@/lib/memory/redaction";
+import { isCandidateFactSafe } from "@/lib/profile/fact-safety";
 import type {
   ProfileFactCategory,
   ProfileFactV1,
@@ -138,11 +137,7 @@ function containsUnmanifestedText(body: string, facts: ProfileFactV1[]): boolean
 }
 
 function isUnsafeText(value: string): boolean {
-  if (detectSecret(value) || detectPromptInjection(value)) return true;
-  const projection = redactReadProjection(value);
-  if (projection.contaminated || projection.text !== value.trim()) return true;
-  const redacted = redactText(value);
-  return redacted.secretDetected || redacted.text !== value;
+  return !isCandidateFactSafe(value);
 }
 
 function sentenceIsInCategory(

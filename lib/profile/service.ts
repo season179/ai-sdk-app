@@ -13,13 +13,7 @@ import {
   agentTraceEvents,
 } from "@/db/schema";
 import { getMemoryPolicyVersion } from "@/lib/memory/config";
-import {
-  detectPromptInjection,
-  detectSecret,
-  redactText,
-  sanitizeTracePayload,
-  sha256,
-} from "@/lib/memory/redaction";
+import { redactText, sanitizeTracePayload, sha256 } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import {
   getProfileMaxChars,
@@ -28,6 +22,7 @@ import {
   isProfileExplicitWriteEnabled,
   isProfileSynthesisEnabled,
 } from "@/lib/profile/config";
+import { inspectCandidateFactSafety } from "@/lib/profile/fact-safety";
 import { enqueueProfileSynthesis } from "@/lib/profile/jobs";
 import { profileClaimHash, stableFactKeyForClaim } from "@/lib/profile/reconcile";
 import {
@@ -504,11 +499,13 @@ function publicSynthesisError(value: string | null): string | null {
 }
 
 function assertSafeManualBody(body: string): void {
-  const redacted = redactText(body);
-  if (detectSecret(body) || redacted.secretDetected || redacted.text !== body) {
-    throw new ProfileServiceInputError("Profile text cannot contain secrets.", ["secret_detected"]);
-  }
-  if (detectPromptInjection(body)) {
+  const safety = inspectCandidateFactSafety(body);
+  if (!safety.safe) {
+    if (safety.issues.some((issue) => issue === "secret" || issue === "secret_material")) {
+      throw new ProfileServiceInputError("Profile text cannot contain secrets.", [
+        "secret_detected",
+      ]);
+    }
     throw new ProfileServiceInputError(
       "Profile text cannot contain instruction or permission overrides.",
       ["prompt_injection_detected"],
