@@ -21,7 +21,6 @@ import {
   truncateConversationAfterMessage,
 } from "@/lib/chat/sessions";
 import { generateSessionTitle } from "@/lib/chat/title-agent";
-import { isMemorySearchEnabled } from "@/lib/consolidation/config";
 import {
   buildAssistantMessageEvent,
   buildTerminalEvent,
@@ -37,9 +36,14 @@ import { classifyChatStreamEnd } from "@/lib/memory/stream-status";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
-import { isProfileEnabled } from "@/lib/profile/config";
+import { isProfileEnabled, isProfileExplicitWriteEnabled } from "@/lib/profile/config";
 import { PROFILE_REFERENCE_POLICY, renderUserProfileBlock } from "@/lib/profile/context";
 import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
+import {
+  applyExplicitProfileIntent,
+  type ExplicitProfileApplyResult,
+  parseExplicitProfileIntent,
+} from "@/lib/profile/explicit";
 import {
   getCurrentProfileVersionForRun,
   getProfileVersionForRun,
@@ -48,10 +52,7 @@ import {
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { isSelfImprovementEnabled } from "@/lib/self-improvement/config";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
-import {
-  createConversationSearchTools,
-  createMemoryTools,
-} from "@/lib/self-improvement/memory-tools";
+import { createMemoryTools } from "@/lib/self-improvement/memory-tools";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -365,11 +366,33 @@ export async function POST(req: Request) {
     rawCaptureCompleted = run.userCaptured;
     const fullMessages = run.cleanMessages;
     let uiMessages = run.modelMessages;
-    let recallStatus: "hit" | "miss" | "skipped" | "degraded" = "skipped";
-    let recallCount = 0;
-    const target = run.targetMessageId
+    const persistedTarget = run.targetMessageId
       ? fullMessages.find((message) => message.id === run.targetMessageId)
       : undefined;
+    const rawUserText = messageText(persistedTarget);
+    let preAppliedExplicitResult: ExplicitProfileApplyResult | null = null;
+    if (
+      trigger === "submit-message" &&
+      sessionId &&
+      run.targetMessageId &&
+      isProfileExplicitWriteEnabled()
+    ) {
+      const explicitIntent = parseExplicitProfileIntent(rawUserText);
+      if (explicitIntent) {
+        // This authoritative write runs after the clean message commit and before
+        // profile projection, so this same request can bind the new overlay head.
+        // Failure is pre-stream and the clean message remains retryable/idempotent.
+        preAppliedExplicitResult = await applyExplicitProfileIntent(explicitIntent, {
+          agentId: DEFAULT_AGENT_ID,
+          sessionId,
+          messageId: run.targetMessageId,
+          rawUserText,
+        });
+      }
+    }
+    let recallStatus: "hit" | "miss" | "skipped" | "degraded" = "skipped";
+    let recallCount = 0;
+    const target = persistedTarget;
     const hasSidecar = Boolean(
       run.targetMessageId && run.apiPartMessageIds.includes(run.targetMessageId),
     );
@@ -565,16 +588,19 @@ export async function POST(req: Request) {
     // both exposure paths: the direct toolset (mode=all) and the deferred
     // tool_call path (default search mode).
     const schedulerContext = { originSessionId: sessionId };
-    // memory_search remains direct-only and independently gated.
-    const memorySearchEnabled = isMemorySearchEnabled();
+    // All memory tools remain direct-only and are independently gated in their factory.
     const tools = {
       ...(toolExposureMode === "all"
         ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
         : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
-      ...(memorySearchEnabled
-        ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId })
-        : createConversationSearchTools({ agentId: DEFAULT_AGENT_ID, sessionId })),
+      ...createMemoryTools({
+        agentId: DEFAULT_AGENT_ID,
+        sessionId,
+        messageId: run.targetMessageId,
+        rawUserText,
+        preAppliedExplicitResult,
+      }),
     };
     // Dynamic run state is either materialized in api_parts or referenced by
     // the target's immutable first-writer-wins profile version id.

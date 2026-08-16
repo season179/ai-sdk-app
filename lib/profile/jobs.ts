@@ -51,7 +51,10 @@ export async function enqueueProfileSynthesis(
   return boss.send(
     PROFILE_SYNTHESIS_QUEUE_NAME,
     { kind: "agent", agentId, trigger: options.trigger } satisfies ProfileAgentJobData,
-    profileSynthesisSendOptions(agentId),
+    {
+      ...profileSynthesisSendOptions(agentId),
+      ...(options.trigger === "explicit_fallback" ? { priority: 10 } : {}),
+    },
   );
 }
 

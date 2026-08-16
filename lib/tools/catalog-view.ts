@@ -2,7 +2,7 @@ import "server-only";
 
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
 import { mockToolSpecs, type RealisticToolSpec } from "@/lib/mock-tools";
-import { isConversationSearchEnabled } from "@/lib/profile/config";
+import { isConversationSearchEnabled, isProfileExplicitWriteEnabled } from "@/lib/profile/config";
 import { schedulerToolSpecs } from "@/lib/scheduler/tool-specs";
 import { memoryToolSpecs } from "@/lib/self-improvement/memory-tools";
 import { getSkillCatalog } from "@/lib/skills/catalog";
@@ -27,6 +27,7 @@ export type ToolCatalogSnapshot = {
   mode: ToolExposureMode;
   skillAvailability: SkillAvailability;
   memorySearchEnabled: boolean;
+  profileExplicitWriteEnabled: boolean;
   conversationSearchEnabled: boolean;
   warning: string | null;
   bridgeToolCount: number;
@@ -54,6 +55,7 @@ export type BuildToolCatalogSnapshotInput = {
   mode: ToolExposureMode;
   skillAvailability: SkillAvailability;
   memorySearchEnabled: boolean;
+  profileExplicitWriteEnabled?: boolean;
   conversationSearchEnabled: boolean;
   asOf: string;
 };
@@ -96,6 +98,7 @@ export function buildToolCatalogSnapshot({
   mode,
   skillAvailability,
   memorySearchEnabled,
+  profileExplicitWriteEnabled = false,
   conversationSearchEnabled,
   asOf,
 }: BuildToolCatalogSnapshotInput): ToolCatalogSnapshot {
@@ -116,7 +119,9 @@ export function buildToolCatalogSnapshot({
       direct: isMemory
         ? spec.name === "conversation_time_search"
           ? conversationSearchEnabled
-          : memorySearchEnabled
+          : spec.name === "memory_write"
+            ? profileExplicitWriteEnabled
+            : memorySearchEnabled
         : isSkill
           ? skillAvailability === "enabled"
           : mode === "all",
@@ -130,6 +135,7 @@ export function buildToolCatalogSnapshot({
     mode,
     skillAvailability,
     memorySearchEnabled,
+    profileExplicitWriteEnabled,
     conversationSearchEnabled,
     warning:
       skillAvailability === "unknown"
@@ -203,6 +209,7 @@ export async function loadToolCatalogSnapshot(): Promise<ToolCatalogSnapshot> {
     mode: resolveToolExposureMode(process.env.TOOL_EXPOSURE_MODE),
     skillAvailability,
     memorySearchEnabled: isMemorySearchEnabled(),
+    profileExplicitWriteEnabled: isProfileExplicitWriteEnabled(),
     conversationSearchEnabled: isConversationSearchEnabled(),
     asOf: new Date().toISOString(),
   });

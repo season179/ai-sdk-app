@@ -8,14 +8,32 @@ import {
 } from "@/lib/self-improvement/memory-tools";
 
 describe("memory tool specs", () => {
-  it("keeps lexical and temporal search as separate direct-only contracts", () => {
-    expect(memoryToolSpecs).toHaveLength(2);
+  it("keeps read and explicit-write tools as separate direct-only contracts", () => {
+    expect(memoryToolSpecs).toHaveLength(3);
     expect(memoryToolSpecs[0].name).toBe("memory_search");
     expect(memoryToolSpecs[0].required).toEqual(["query"]);
     expect(memoryToolSpecs[0].description).toContain("<memory_context>");
     expect(memoryToolSpecs[0].description).toContain("typo-aware");
 
-    const temporal = memoryToolSpecs[1];
+    const write = memoryToolSpecs[1];
+    expect(write.name).toBe("memory_write");
+    expect(write.required).toEqual(["action"]);
+    expect(write.properties).toEqual(
+      expect.objectContaining({
+        action: expect.objectContaining({ enum: ["remember", "forget", "correct"] }),
+        content: expect.objectContaining({ type: "string" }),
+        targetMemoryId: expect.objectContaining({ type: "string" }),
+        targetFactKey: expect.objectContaining({ type: "string" }),
+        targetText: expect.objectContaining({ type: "string" }),
+        kind: expect.objectContaining({ type: "string" }),
+      }),
+    );
+    expect(write.properties).not.toHaveProperty("agentId");
+    expect(write.properties).not.toHaveProperty("sessionId");
+    expect(write.properties).not.toHaveProperty("messageId");
+    expect(write.properties).not.toHaveProperty("rawUserText");
+
+    const temporal = memoryToolSpecs[2];
     expect(temporal.name).toBe("conversation_time_search");
     expect(temporal.required).toEqual(["from", "to"]);
     expect(temporal.properties).toEqual(
@@ -33,14 +51,28 @@ describe("memory tool specs", () => {
     expect(temporal.properties).not.toHaveProperty("query");
   });
 
-  it("gates temporal exposure independently", () => {
+  it("gates every spec independently", () => {
+    vi.stubEnv("MEMORY_SEARCH_ENABLED", "false");
+    vi.stubEnv("AGENT_PROFILE_EXPLICIT_WRITE_ENABLED", "false");
     vi.stubEnv("CONVERSATION_SEARCH_ENABLED", "false");
+    expect(createMemoryTools({})).toEqual({});
     expect(createConversationSearchTools({})).not.toHaveProperty("conversation_time_search");
+
+    vi.stubEnv("MEMORY_SEARCH_ENABLED", "true");
+    expect(createMemoryTools({})).toHaveProperty("memory_search");
+    expect(createMemoryTools({})).not.toHaveProperty("memory_write");
     expect(createMemoryTools({})).not.toHaveProperty("conversation_time_search");
 
+    vi.stubEnv("MEMORY_SEARCH_ENABLED", "false");
+    vi.stubEnv("AGENT_PROFILE_EXPLICIT_WRITE_ENABLED", "true");
+    expect(createMemoryTools({})).toHaveProperty("memory_write");
+    expect(createMemoryTools({})).not.toHaveProperty("memory_search");
+
+    vi.stubEnv("AGENT_PROFILE_EXPLICIT_WRITE_ENABLED", "false");
     vi.stubEnv("CONVERSATION_SEARCH_ENABLED", "true");
     expect(createConversationSearchTools({})).toHaveProperty("conversation_time_search");
     expect(createMemoryTools({})).toHaveProperty("conversation_time_search");
+    expect(createMemoryTools({})).not.toHaveProperty("memory_search");
     vi.unstubAllEnvs();
   });
 });
@@ -99,7 +131,9 @@ describe("memory_search tool mapping", () => {
       }),
     );
     expect(memoryToolSpecs[0].properties).not.toHaveProperty("sessionId");
+    vi.stubEnv("MEMORY_SEARCH_ENABLED", "true");
     expect(createMemoryTools({ sessionId: "hidden" })).toHaveProperty("memory_search");
+    vi.unstubAllEnvs();
   });
 
   it("forwards exact temporal parameters with agent scope closed over", async () => {
@@ -123,6 +157,63 @@ describe("memory_search tool mapping", () => {
     expect(conversationSearch).toHaveBeenCalledWith(input, {
       agentId: "00000000-0000-0000-0000-000000000009",
     });
+  });
+
+  it("returns a route-preapplied write result without applying it twice", async () => {
+    const applyExplicit = vi.fn();
+    const preAppliedExplicitResult = {
+      durable: true as const,
+      action: "remember" as const,
+      factKey: "explicit-fact-pizza",
+      memoryId: "00000000-0000-0000-0000-000000000010",
+      profileVersionId: "00000000-0000-0000-0000-000000000011",
+      synthesis: "completed" as const,
+    };
+    const result = await executeMemoryTool(
+      "memory_write",
+      { action: "remember", content: "I like pizza." },
+      { applyExplicit },
+      {
+        agentId: "00000000-0000-0000-0000-000000000001",
+        sessionId: "00000000-0000-0000-0000-000000000002",
+        messageId: "msg-1",
+        rawUserText: "remember that I like pizza.",
+        preAppliedExplicitResult,
+      },
+    );
+    expect(result).toEqual({ success: true, ...preAppliedExplicitResult });
+    expect(applyExplicit).not.toHaveBeenCalled();
+  });
+
+  it("passes only hidden current-user scope to an authorized memory write", async () => {
+    const applyExplicit = vi.fn(async () => ({
+      durable: true as const,
+      action: "remember" as const,
+      factKey: "key",
+      memoryId: "00000000-0000-0000-0000-000000000010",
+      profileVersionId: "00000000-0000-0000-0000-000000000011",
+      synthesis: "queued" as const,
+    }));
+    await executeMemoryTool(
+      "memory_write",
+      { action: "remember", content: "I like pizza.", kind: "preference" },
+      { applyExplicit },
+      {
+        agentId: "00000000-0000-0000-0000-000000000001",
+        sessionId: "00000000-0000-0000-0000-000000000002",
+        messageId: "msg-1",
+        rawUserText: "please remember that I like pizza.",
+      },
+    );
+    expect(applyExplicit).toHaveBeenCalledWith(
+      { action: "remember", content: "I like pizza.", kind: "preference" },
+      expect.objectContaining({
+        agentId: "00000000-0000-0000-0000-000000000001",
+        sessionId: "00000000-0000-0000-0000-000000000002",
+        messageId: "msg-1",
+        rawUserText: "please remember that I like pizza.",
+      }),
+    );
   });
 
   it("maps backend rejection to the fail-soft error", async () => {
