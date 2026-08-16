@@ -1,4 +1,6 @@
 import type { MemoryKind, MemorySource, MemoryType, ReviewProposalKind } from "@/db/schema";
+import { redactReadProjection } from "@/lib/memory/projection-safety";
+import { detectPromptInjection, detectSecret, redactText } from "@/lib/memory/redaction";
 import { SelfImprovementInputError } from "@/lib/self-improvement/errors";
 
 export const MEMORY_CONTENT_MAX = 2000;
@@ -83,6 +85,20 @@ export function parseMemoryContent(value: unknown): string {
   if (content.length > MEMORY_CONTENT_MAX) {
     throw new SelfImprovementInputError(
       `Memory content must be ${MEMORY_CONTENT_MAX.toLocaleString()} characters or fewer.`,
+    );
+  }
+
+  const projection = redactReadProjection(content);
+  const redacted = redactText(content);
+  if (
+    projection.contaminated ||
+    detectSecret(content) ||
+    detectPromptInjection(content) ||
+    redacted.secretDetected ||
+    redacted.text !== content
+  ) {
+    throw new SelfImprovementInputError(
+      "Memory content contains a secret, read projection, or unsafe instruction.",
     );
   }
 

@@ -9,6 +9,7 @@ import {
   agentTraceEvents,
 } from "@/db/schema";
 import { appendTraceEvents } from "@/lib/memory/trace";
+import { ProfileMandatoryFactsOverBudgetError } from "@/lib/profile/render";
 import { applyDirectiveOverlay } from "@/lib/profile/repository";
 import {
   deleteManualProfileFact,
@@ -75,6 +76,12 @@ describeIntegration("profile control-plane service", () => {
         ),
       );
     expect(tombstone).toMatchObject({ deletedBy: "manual_ui", reason: "manual_ui_omission" });
+    await expect(
+      saveManualProfile(
+        { body: removed.sentence, expectedVersionId: second.profile.version?.id },
+        agentId,
+      ),
+    ).rejects.toBeInstanceOf(ProfileServiceConflictError);
 
     const auditRowsBeforeConflict = await getDb()
       .select({ id: agentTraceEvents.id })
@@ -201,6 +208,65 @@ describeIntegration("profile control-plane service", () => {
     ).rejects.toBeInstanceOf(ProfileServiceConflictError);
   });
 
+  it("rejects authoritative mandatory facts that exceed the renderable budget", async () => {
+    const agentId = randomUUID();
+    const body = Array.from({ length: 4 }, (_, index) => `${index}${"界".repeat(899)}。`).join(
+      "\n",
+    );
+    await expect(
+      saveManualProfile({ body, expectedVersionId: null }, agentId),
+    ).rejects.toBeInstanceOf(ProfileMandatoryFactsOverBudgetError);
+    expect((await getProfileControlPlane(agentId)).version).toBeNull();
+  });
+
+  it("archives backing user memories when PUT omits their fact", async () => {
+    const agentId = randomUUID();
+    const sentence = "The user prefers reduced motion.";
+    const memory = await createMemory({
+      agentId,
+      kind: "preference",
+      content: sentence,
+      source: "user",
+      confidence: 100,
+    });
+    const factKey = `ui-omit-${randomUUID()}`;
+    await getDb().transaction((tx) =>
+      applyDirectiveOverlay(
+        {
+          agentId,
+          facts: [
+            {
+              factKey,
+              sentence,
+              category: "preferences_constraints",
+              authority: "user",
+              protected: false,
+              order: 0,
+            },
+          ],
+          sources: [
+            {
+              factKey,
+              sourceRole: "primary",
+              traceEventId: null,
+              memoryVersionId: memory.currentVersionId,
+            },
+          ],
+          body: `Preferences and constraints\n${sentence}`,
+          tokenCount: 8,
+          trigger: "manual_ui",
+          modelId: null,
+          promptHash: "test-manual-omission",
+          policyVersion: "test",
+        },
+        tx,
+      ),
+    );
+    const before = await getProfileControlPlane(agentId);
+    await saveManualProfile({ body: "", expectedVersionId: before.version?.id }, agentId);
+    expect(await getMemoryById(memory.id, agentId)).toMatchObject({ status: "archived" });
+  });
+
   it("returns source links only for live chats owned by the profile agent", async () => {
     const agentId = randomUUID();
     const otherAgentId = randomUUID();
@@ -260,7 +326,7 @@ describeIntegration("profile control-plane service", () => {
             traceEventId: event.id,
             memoryVersionId: null,
           })),
-          body: "The user validates source scoping.",
+          body: "Active projects and goals\nThe user validates source scoping.",
           tokenCount: 8,
           trigger: "manual_ui",
           modelId: null,

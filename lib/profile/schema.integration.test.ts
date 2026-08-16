@@ -341,8 +341,8 @@ describeIntegration("running profile foundation schema (integration)", () => {
       await expect(
         client.query(
           `insert into agent_profile_fact_tombstones (
-             agent_id, fact_key, deleted_by, explicit_trace_event_id, retired_at
-           ) values ($1, 'old-fact', 'user', $2, now())`,
+             agent_id, fact_key, claim_hash, deleted_by, explicit_trace_event_id, retired_at
+           ) values ($1, 'old-fact', repeat('a', 64), 'user', $2, now())`,
           [agentId, traceEventId],
         ),
       ).rejects.toMatchObject({ code: "23514" });

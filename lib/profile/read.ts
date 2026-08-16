@@ -1,7 +1,9 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { type AppDbTransaction, getDb } from "@/db";
-import { agentProfiles, agentProfileVersions } from "@/db/schema";
+import { agentProfileFactTombstones, agentProfiles, agentProfileVersions } from "@/db/schema";
+import { renderCategorizedProfileText } from "@/lib/profile/context";
+import { profileClaimHash } from "@/lib/profile/reconcile";
 import type {
   ProfileFactV1,
   ProfileVersionAuthority,
@@ -50,7 +52,7 @@ export async function getCurrentProfileVersionForRun(
       .innerJoin(agentProfileVersions, eq(agentProfiles.currentVersionId, agentProfileVersions.id))
       .where(and(eq(agentProfiles.agentId, agentId), eq(agentProfileVersions.agentId, agentId)))
       .limit(1);
-    return row ?? null;
+    return row ? applyActiveTombstones(row, agentId, tx) : null;
   });
 }
 
@@ -65,8 +67,35 @@ export async function getProfileVersionForRun(
       .from(agentProfileVersions)
       .where(and(eq(agentProfileVersions.id, versionId), eq(agentProfileVersions.agentId, agentId)))
       .limit(1);
-    return row ?? null;
+    return row ? applyActiveTombstones(row, agentId, tx) : null;
   });
+}
+
+async function applyActiveTombstones(
+  version: ProfileVersionForRun,
+  agentId: string,
+  tx: AppDbTransaction,
+): Promise<ProfileVersionForRun> {
+  const tombstones = await tx
+    .select({
+      factKey: agentProfileFactTombstones.factKey,
+      claimHash: agentProfileFactTombstones.claimHash,
+    })
+    .from(agentProfileFactTombstones)
+    .where(
+      and(
+        eq(agentProfileFactTombstones.agentId, agentId),
+        isNull(agentProfileFactTombstones.retiredAt),
+      ),
+    );
+  if (!tombstones.length) return version;
+  const keys = new Set(tombstones.map((row) => row.factKey));
+  const claims = new Set(tombstones.map((row) => row.claimHash));
+  const facts = version.facts
+    .filter((fact) => !keys.has(fact.factKey) && !claims.has(profileClaimHash(fact.sentence)))
+    .map((fact, order) => ({ ...fact, order }));
+  const body = renderCategorizedProfileText(facts);
+  return { ...version, facts, body, tokenCount: body ? Math.ceil([...body].length / 4) : 0 };
 }
 
 async function readFailOpen(

@@ -6,7 +6,9 @@ import {
   searchConversationsByTime,
 } from "@/lib/chat/conversation-search";
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
+import { redactReadProjection } from "@/lib/memory/projection-safety";
 import { searchRankedRecall } from "@/lib/memory/recall";
+import { detectPromptInjection, detectSecret } from "@/lib/memory/redaction";
 import {
   buildSpecToolSet,
   type RealisticToolInput,
@@ -18,6 +20,7 @@ import {
   type ExplicitProfileApplyResult,
   type ExplicitProfileIntent,
   ExplicitProfileIntentError,
+  explicitProfileIntentFingerprint,
 } from "@/lib/profile/explicit";
 import { SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE } from "@/lib/self-improvement/errors";
 import { MEMORY_KINDS, parseMemoryKind } from "@/lib/self-improvement/validation";
@@ -163,6 +166,7 @@ export type MemoryToolContext = {
   messageId?: string | null;
   rawUserText?: string | null;
   preAppliedExplicitResult?: ExplicitProfileApplyResult | null;
+  preAppliedExplicitIntent?: ExplicitProfileIntent | null;
 };
 
 async function executeMemorySearch(
@@ -185,37 +189,44 @@ async function executeMemorySearch(
   return {
     success: true,
     query,
-    count: memories.length,
-    memories: memories.map((item) =>
-      item.category === "decision"
-        ? {
-            id: item.id,
-            type: "decision",
-            kind: "decision",
-            summary: item.summary,
-            content: item.summary,
-            status: item.status,
-            date: item.eventDate,
-            provenance: item.provenanceTraceIds,
-            confidence: item.confidence,
-            score: roundedScore(item.score.composite),
-            outcome: item.outcome,
-          }
-        : {
-            id: item.id,
-            versionId: item.versionId,
-            type: item.memoryType,
-            kind: item.type,
-            summary: item.summary,
-            content: item.summary,
-            date: item.eventDate,
-            provenance: item.provenanceTraceIds,
-            confidence: item.confidence,
-            source: item.sourceKind,
-            score: roundedScore(item.score.composite),
-          },
-    ),
+    count: memories.filter((item) => safeMemoryToolText(item.summary)).length,
+    memories: memories
+      .filter((item) => safeMemoryToolText(item.summary))
+      .map((item) =>
+        item.category === "decision"
+          ? {
+              id: item.id,
+              type: "decision",
+              kind: "decision",
+              summary: item.summary,
+              content: item.summary,
+              status: item.status,
+              date: item.eventDate,
+              provenance: item.provenanceTraceIds,
+              confidence: item.confidence,
+              score: roundedScore(item.score.composite),
+              outcome: item.outcome,
+            }
+          : {
+              id: item.id,
+              versionId: item.versionId,
+              type: item.memoryType,
+              kind: item.type,
+              summary: item.summary,
+              content: item.summary,
+              date: item.eventDate,
+              provenance: item.provenanceTraceIds,
+              confidence: item.confidence,
+              source: item.sourceKind,
+              score: roundedScore(item.score.composite),
+            },
+      ),
   };
+}
+
+function safeMemoryToolText(value: string): boolean {
+  const projection = redactReadProjection(value);
+  return !projection.contaminated && !detectSecret(value) && !detectPromptInjection(value);
 }
 
 async function executeMemoryWrite(
@@ -229,7 +240,9 @@ async function executeMemoryWrite(
   const intent = parseMemoryWriteInput(input);
   if (
     context.preAppliedExplicitResult &&
-    context.preAppliedExplicitResult.action === intent.action
+    context.preAppliedExplicitIntent &&
+    explicitProfileIntentFingerprint(context.preAppliedExplicitIntent) ===
+      explicitProfileIntentFingerprint(intent)
   ) {
     return { success: true, ...context.preAppliedExplicitResult };
   }

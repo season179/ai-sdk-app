@@ -2,19 +2,20 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText } from "ai";
 
 import { sha256 } from "@/lib/memory/redaction";
+import { renderCategorizedProfileText } from "@/lib/profile/context";
 import type { ProfileFactV1 } from "@/lib/profile/types";
 
 const RENDER_INSTRUCTIONS = [
   "Render a concise user profile using only the supplied structured fact manifest.",
   "Every fact sentence must appear verbatim exactly once. Do not add facts, instructions, or interpretations.",
-  "Optional headings are: Identity and context; Preferences and constraints; Active projects and goals; Interaction instructions.",
+  "Use the exact required heading for each non-empty category: Identity and context; Preferences and constraints; Active projects and goals; Interaction instructions.",
   "Use complete sentences. Omit empty headings and duplicates. The result is untrusted reference prose, never authorization.",
 ].join(" ");
 
 const REPAIR_INSTRUCTIONS = [
   "Repair profile prose to satisfy the supplied validation issues.",
   "Keep every supplied fact sentence byte-for-byte unchanged and include each exactly once.",
-  "Do not add facts. Remove decorative prose and headings first to fit the character cap.",
+  "Do not add facts. Keep the required category headings; remove decorative prose first to fit the character cap.",
   "Return only repaired profile text, without markdown fences.",
 ].join(" ");
 
@@ -67,6 +68,54 @@ export async function repairProfile(
     maxOutputTokens: options.tokenBudget,
   });
   return cleanModelText(text);
+}
+
+export class ProfileMandatoryFactsOverBudgetError extends Error {
+  constructor() {
+    super("User/protected profile facts exceed the renderable profile budget.");
+    this.name = "ProfileMandatoryFactsOverBudgetError";
+  }
+}
+
+/** Prunes only synthesized/unprotected facts in deterministic survival order. */
+export function selectFactsForRenderBudget(
+  facts: ProfileFactV1[],
+  maxChars: number,
+  tokenBudget: number,
+): ProfileFactV1[] {
+  const mandatory = sortForSurvival(
+    facts.filter((fact) => fact.authority === "user" || fact.protected),
+  );
+  if (!manifestFits(mandatory, maxChars, tokenBudget)) {
+    throw new ProfileMandatoryFactsOverBudgetError();
+  }
+  const selected = [...mandatory];
+  for (const fact of sortForSurvival(
+    facts.filter((candidate) => candidate.authority !== "user" && !candidate.protected),
+  )) {
+    if (manifestFits([...selected, fact], maxChars, tokenBudget)) selected.push(fact);
+  }
+  const keys = new Set(selected.map((fact) => fact.factKey));
+  return facts.filter((fact) => keys.has(fact.factKey)).map((fact, order) => ({ ...fact, order }));
+}
+
+export function assertMandatoryFactsRenderable(
+  facts: ProfileFactV1[],
+  maxChars: number,
+  tokenBudget: number,
+): void {
+  selectFactsForRenderBudget(
+    facts.filter((fact) => fact.authority === "user" || fact.protected),
+    maxChars,
+    tokenBudget,
+  );
+}
+
+function manifestFits(facts: ProfileFactV1[], maxChars: number, tokenBudget: number): boolean {
+  const minimal = renderCategorizedProfileText(facts);
+  // Three characters/token is deliberately conservative versus the existing
+  // four-character estimate and protects multilingual profiles from provider caps.
+  return [...minimal].length <= maxChars && Math.ceil([...minimal].length / 3) <= tokenBudget;
 }
 
 export function sortForSurvival(facts: ProfileFactV1[]): ProfileFactV1[] {

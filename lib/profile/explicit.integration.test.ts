@@ -314,7 +314,23 @@ describeIntegration("explicit profile state edits (integration)", () => {
       .from(agentProfiles)
       .where(eq(agentProfiles.agentId, scope.agentId));
     expect(root.dirtyGeneration).toBeGreaterThan(root.synthesizedGeneration);
-    expect((await getCurrentProfile(scope.agentId))?.body).toBe("I need captions.");
+    expect((await getCurrentProfile(scope.agentId))?.body).toBe(
+      "Identity and context\nI need captions.",
+    );
+  });
+
+  it("reports pending rather than queued when no fallback job was created", async () => {
+    const scope = await fixture();
+    const result = await applyExplicitProfileIntent(
+      { action: "remember", content: "The user needs large text." },
+      applyOptions(scope, "msg-pending", "remember that The user needs large text.", {
+        synthesize: vi.fn(async () => {
+          throw new Error("model unavailable");
+        }) as Parameters<typeof applyExplicitProfileIntent>[1]["synthesize"],
+        enqueue: vi.fn(async () => null),
+      }),
+    );
+    expect(result).toMatchObject({ durable: true, synthesis: "pending" });
   });
 
   it("lets a brand-new session bind the already committed overlay version", async () => {

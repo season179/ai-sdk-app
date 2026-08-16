@@ -1,6 +1,6 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { jsonSchema, Output, ToolLoopAgent } from "ai";
-
+import { redactReadProjection } from "@/lib/memory/projection-safety";
 import { detectPromptInjection, detectSecret, redactText, sha256 } from "@/lib/memory/redaction";
 import type {
   ProfileExtractionOperation,
@@ -20,7 +20,8 @@ const EXTRACT_INSTRUCTIONS = [
   "Resolve relative dates using each evidence item's timestamp.",
 ].join(" ");
 
-const operationSchemaDefinition = {
+export const PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS = 600;
+export const operationSchemaDefinition = {
   type: "object",
   properties: {
     operations: {
@@ -30,8 +31,8 @@ const operationSchemaDefinition = {
         type: "object",
         properties: {
           operation: { type: "string", enum: ["add", "update", "invalidate"] },
-          targetFactKey: { type: "string" },
-          sentence: { type: "string" },
+          targetFactKey: { type: "string", maxLength: 200 },
+          sentence: { type: "string", maxLength: 2000 },
           category: {
             type: "string",
             enum: [
@@ -41,8 +42,16 @@ const operationSchemaDefinition = {
               "interaction_instructions",
             ],
           },
-          observationIds: { type: "array", maxItems: 12, items: { type: "string" } },
-          memoryVersionIds: { type: "array", maxItems: 12, items: { type: "string" } },
+          observationIds: {
+            type: "array",
+            maxItems: 12,
+            items: { type: "string", maxLength: 64 },
+          },
+          memoryVersionIds: {
+            type: "array",
+            maxItems: 12,
+            items: { type: "string", maxLength: 64 },
+          },
         },
         required: ["operation", "observationIds", "memoryVersionIds"],
         additionalProperties: false,
@@ -69,6 +78,7 @@ export async function extractProfileOperations(
       reasoning: { enabled: false, effort: "none", exclude: true },
     }),
     output: Output.object({ schema: extractionSchema }),
+    maxOutputTokens: PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS,
   });
   const result = await agent.generate({ prompt: buildExtractionPrompt(snapshot) });
   if (!result.output) throw new Error("Profile extraction ended without structured output.");
@@ -80,7 +90,12 @@ export function constrainExtractionOutput(
   snapshot: ProfileSynthesisSnapshot,
 ): ProfileExtractionOutput {
   const observationIds = new Set(snapshot.observationDeltas.map((row) => row.id));
-  const memoryIds = new Set(snapshot.activeMemories.map((row) => row.memoryVersionId));
+  const deltaIds = new Set(snapshot.memoryVersionDeltas.map((row) => row.memoryVersionId));
+  const memoryIds = new Set(
+    snapshot.activeMemories
+      .filter((row) => deltaIds.has(row.memoryVersionId))
+      .map((row) => row.memoryVersionId),
+  );
   const currentKeys = new Set(snapshot.currentVersion?.facts.map((fact) => fact.factKey) ?? []);
   const operations: ProfileExtractionOperation[] = [];
   for (const operation of output.operations.slice(0, 40)) {
@@ -132,17 +147,32 @@ export function buildExtractionPrompt(snapshot: ProfileSynthesisSnapshot): strin
   const safeObservations = snapshot.observationDeltas.flatMap((row) => {
     const text = boundedSafeEvidence(row.content);
     return text
-      ? [{ id: row.id, traceEventId: row.traceEventId, at: row.createdAt.toISOString(), text }]
+      ? [
+          {
+            id: row.id,
+            traceEventId: row.traceEventId,
+            at: row.createdAtText ?? row.createdAt.toISOString(),
+            text,
+          },
+        ]
       : [];
   });
-  const memoryById = new Map(snapshot.activeMemories.map((row) => [row.memoryVersionId, row]));
+  const activeMemoryById = new Map(
+    snapshot.activeMemories.map((row) => [row.memoryVersionId, row]),
+  );
+  const memoryById = new Map(
+    snapshot.memoryVersionDeltas.flatMap((row) => {
+      const active = activeMemoryById.get(row.memoryVersionId);
+      return active ? [[row.memoryVersionId, active] as const] : [];
+    }),
+  );
   const safeMemories = [...memoryById.values()].flatMap((row) => {
     const text = boundedSafeEvidence(row.content);
     return text
       ? [
           {
             memoryVersionId: row.memoryVersionId,
-            at: row.createdAt.toISOString(),
+            at: row.createdAtText ?? row.createdAt.toISOString(),
             source: row.source,
             authority: row.authority,
             protected: row.protected,
@@ -153,47 +183,29 @@ export function buildExtractionPrompt(snapshot: ProfileSynthesisSnapshot): strin
       : [];
   });
   const payload = {
-    currentFacts: [] as NonNullable<ProfileSynthesisSnapshot["currentVersion"]>["facts"],
-    activeTombstoneKeys: [] as string[],
-    observations: [] as typeof safeObservations,
-    memories: [] as typeof safeMemories,
+    currentFacts: [...(snapshot.currentVersion?.facts ?? [])].sort(
+      (a, b) =>
+        Number(b.authority === "user" || b.protected) -
+          Number(a.authority === "user" || a.protected) || a.order - b.order,
+    ),
+    // Tombstones are enforced server-side by claim identity after model output.
+    observations: safeObservations,
+    memories: safeMemories,
   };
-  const orderedCurrentFacts = [...(snapshot.currentVersion?.facts ?? [])].sort(
-    (a, b) =>
-      Number(b.authority === "user" || b.protected) -
-        Number(a.authority === "user" || a.protected) || a.order - b.order,
-  );
-  for (const fact of orderedCurrentFacts) {
-    if (!tryAppendBounded(payload, payload.currentFacts, fact)) break;
+  const serialized = JSON.stringify(payload);
+  if (serialized.length > 32_000) {
+    throw new Error("Bounded profile evidence page exceeded the extraction prompt limit.");
   }
-  for (const tombstone of snapshot.tombstones) {
-    if (!tryAppendBounded(payload, payload.activeTombstoneKeys, tombstone.factKey)) break;
-  }
-  // A bounded backlog favors the newest direct statements. Deterministic
-  // reconciliation and post-model tombstones still protect omitted history.
-  for (const observation of [...safeObservations].reverse()) {
-    if (!tryAppendBounded(payload, payload.observations, observation)) break;
-  }
-  const orderedMemories = [...safeMemories].sort(
-    (a, b) =>
-      Number(b.source === "user" || b.authority === "user") -
-        Number(a.source === "user" || a.authority === "user") || b.at.localeCompare(a.at),
-  );
-  for (const memory of orderedMemories) {
-    if (!tryAppendBounded(payload, payload.memories, memory)) break;
-  }
-  return JSON.stringify(payload);
-}
-
-function tryAppendBounded<T>(payload: unknown, target: T[], value: T): boolean {
-  target.push(value);
-  if (JSON.stringify(payload).length <= 32_000) return true;
-  target.pop();
-  return false;
+  return serialized;
 }
 
 function boundedSafeEvidence(value: string): string | null {
-  const text = redactText(value).text.trim().slice(0, 2_000);
-  if (!text || detectSecret(text) || detectPromptInjection(text)) return null;
+  const projection = redactReadProjection(value);
+  if (projection.contaminated) return null;
+  const redacted = redactText(projection.text);
+  const text = redacted.text.trim().slice(0, 2_000);
+  if (!text || redacted.secretDetected || detectSecret(value) || detectPromptInjection(value)) {
+    return null;
+  }
   return text;
 }

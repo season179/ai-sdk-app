@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 
+import { sql } from "drizzle-orm";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
 import { getDb } from "@/db";
+import { renderCategorizedProfileText } from "@/lib/profile/context";
 import {
   applyDirectiveOverlay,
   captureSynthesisSnapshot,
   getCurrentProfile,
   markProfileDirty,
+  recordSynthesisFailure,
 } from "@/lib/profile/repository";
 import { synthesizeProfile } from "@/lib/profile/synthesis";
 import type {
@@ -95,7 +98,7 @@ function fakeModel(): ProfileSynthesisModel & {
       };
     }),
     render: vi.fn(async ({ facts }: { facts: ProfileFactV1[] }) =>
-      facts.map((fact) => fact.sentence).join("\n"),
+      renderCategorizedProfileText(facts),
     ),
     repair: vi.fn(async ({ body }) => body),
   };
@@ -148,7 +151,7 @@ describeIntegration("profile synthesis repository and fake model (integration)",
               memoryVersionId: null,
             },
           ],
-          body: userFact.sentence,
+          body: renderCategorizedProfileText([userFact]),
           tokenCount: 6,
           trigger: "explicit",
           modelId: null,
@@ -164,7 +167,7 @@ describeIntegration("profile synthesis repository and fake model (integration)",
       authority: "user",
       trigger: "explicit",
       facts: [userFact],
-      body: userFact.sentence,
+      body: renderCategorizedProfileText([userFact]),
     });
     expect(current?.dirtyGeneration).toBeGreaterThan(current?.synthesizedGeneration ?? 0);
 
@@ -185,7 +188,7 @@ describeIntegration("profile synthesis repository and fake model (integration)",
               memoryVersionId: null,
             },
           ],
-          body: correctedFact.sentence,
+          body: renderCategorizedProfileText([correctedFact]),
           tokenCount: 6,
           trigger: "explicit",
           modelId: null,
@@ -228,7 +231,7 @@ describeIntegration("profile synthesis repository and fake model (integration)",
                   memoryVersionId: null,
                 },
               ],
-              body: explicitFact.sentence,
+              body: renderCategorizedProfileText([explicitFact]),
               tokenCount: 6,
               trigger: "explicit",
               modelId: null,
@@ -252,7 +255,7 @@ describeIntegration("profile synthesis repository and fake model (integration)",
     const current = await getCurrentProfile(fixture.agentId);
     expect(current).toMatchObject({
       authority: "user",
-      body: "The user requires direct replies.",
+      body: "Interaction instructions\nThe user requires direct replies.",
     });
   });
 
@@ -270,7 +273,7 @@ describeIntegration("profile synthesis repository and fake model (integration)",
     expect(first.result).toBe("created");
     const current = await getCurrentProfile(fixture.agentId);
     expect(current?.facts).toHaveLength(1);
-    expect(current?.body).toBe("The user prefers concise replies.");
+    expect(current?.body).toBe("Preferences and constraints\nThe user prefers concise replies.");
 
     const sourceRows = await getPool().query(
       `select fact_key, trace_event_id from agent_profile_version_sources where profile_version_id=$1`,
@@ -512,6 +515,160 @@ describeIntegration("profile synthesis repository and fake model (integration)",
       expect.objectContaining({ sessionId: null, content: "The user prefers concise replies." }),
     ]);
     expect(snapshot.upperBounds.observation.id).toBe(snapshot.observationDeltas[0].id);
+  });
+
+  it("does not skip an older observation that commits after a newer synthesized watermark", async () => {
+    const agentId = randomUUID();
+    const olderSession = randomUUID();
+    const newerSession = randomUUID();
+    await getPool().query(
+      "insert into agent_chat_sessions (id, agent_id, origin) values ($1,$3,'chat'),($2,$3,'chat')",
+      [olderSession, newerSession, agentId],
+    );
+    let releaseOlder!: () => void;
+    let olderInserted!: () => void;
+    const inserted = new Promise<void>((resolve) => {
+      olderInserted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    const olderTx = getDb().transaction(async (tx) => {
+      const trace = randomUUID();
+      const event = randomUUID();
+      await tx.execute(sql`insert into agent_trace_events
+        (id,agent_id,trace_id,sequence_no,session_id,event_type,actor,trust_class,payload,content_hash,idempotency_key,retention_class,policy_version,occurred_at)
+        values (${event},${agentId},${trace},0,${olderSession},'explicit_memory_write','user','user_assertion','{}','older-hash',${`older-${event}`},'audit','test','2026-01-01T00:00:00Z')`);
+      await tx.execute(sql`insert into agent_grounded_observations
+        (agent_id,session_id,origin_kind,source_message_id,trace_event_id,content,content_hash,created_at)
+        values (${agentId},${olderSession},'chat_user',${`older-${event}`},${event},'The older transaction committed last.','older-observation','2026-01-01T00:00:00Z')`);
+      olderInserted();
+      await release;
+      await markProfileDirty(agentId, tx);
+    });
+    await inserted;
+
+    await getDb().transaction(async (tx) => {
+      const trace = randomUUID();
+      const event = randomUUID();
+      await tx.execute(sql`insert into agent_trace_events
+        (id,agent_id,trace_id,sequence_no,session_id,event_type,actor,trust_class,payload,content_hash,idempotency_key,retention_class,policy_version,occurred_at)
+        values (${event},${agentId},${trace},0,${newerSession},'explicit_memory_write','user','user_assertion','{}','newer-hash',${`newer-${event}`},'audit','test','2026-01-02T00:00:00Z')`);
+      await tx.execute(sql`insert into agent_grounded_observations
+        (agent_id,session_id,origin_kind,source_message_id,trace_event_id,content,content_hash,created_at)
+        values (${agentId},${newerSession},'chat_user',${`newer-${event}`},${event},'The newer transaction committed first.','newer-observation','2026-01-02T00:00:00Z')`);
+      await markProfileDirty(agentId, tx);
+    });
+    await synthesizeProfile(agentId, {
+      trigger: "scheduled",
+      synthesisKey: `newer-first:${agentId}`,
+      model: fakeModel(),
+    });
+    releaseOlder();
+    await olderTx;
+    const retry = await captureSynthesisSnapshot(agentId);
+    expect(retry.observationDeltas.map((row) => row.content)).toContain(
+      "The older transaction committed last.",
+    );
+  });
+
+  it("rejects a stale synthesis commit that races a memory archive", async () => {
+    vi.stubEnv("AGENT_PROFILE_SYNTHESIS_ENABLED", "true");
+    const fixture = await createFixture();
+    const memory = await createMemory({
+      agentId: fixture.agentId,
+      kind: "preference",
+      content: "The user prefers concise replies.",
+      source: "user",
+      confidence: 100,
+      sourceEventIds: [fixture.traceEventId],
+    });
+    await synthesizeProfile(fixture.agentId, {
+      trigger: "scheduled",
+      synthesisKey: `archive-base:${fixture.agentId}`,
+      model: fakeModel(),
+    });
+    await markProfileDirty(fixture.agentId);
+    let releaseExtract!: () => void;
+    let extractionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      extractionStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseExtract = resolve;
+    });
+    const model = fakeModel();
+    model.extract = vi.fn(async () => {
+      extractionStarted();
+      await release;
+      return { operations: [] };
+    });
+    const stale = synthesizeProfile(fixture.agentId, {
+      trigger: "scheduled",
+      synthesisKey: `archive-race:${fixture.agentId}`,
+      maxAttempts: 1,
+      model,
+    });
+    await started;
+    await archiveMemory(memory.id, fixture.agentId);
+    releaseExtract();
+    await expect(stale).rejects.toThrow("dirty generation changed");
+    vi.unstubAllEnvs();
+  });
+
+  it("pages oversized evidence without advancing synthesized generation past omitted rows", async () => {
+    const fixture = await createFixture(`Initial ${"x".repeat(1400)}.`);
+    for (let index = 0; index < 14; index += 1) {
+      const trace = randomUUID();
+      const event = randomUUID();
+      await getPool().query(
+        `insert into agent_trace_events
+          (id,agent_id,trace_id,sequence_no,session_id,event_type,actor,trust_class,payload,content_hash,idempotency_key,retention_class,policy_version,occurred_at)
+         values ($1,$2,$3,0,$4,'explicit_memory_write','user','user_assertion','{}',$5,$6,'audit','test',now())`,
+        [event, fixture.agentId, trace, fixture.sessionId, `hash-${event}`, `large-${event}`],
+      );
+      await getPool().query(
+        `insert into agent_grounded_observations
+          (agent_id,session_id,origin_kind,source_message_id,trace_event_id,content,content_hash)
+         values ($1,$2,'chat_user',$3,$4,$5,$6)`,
+        [
+          fixture.agentId,
+          fixture.sessionId,
+          `large-${event}`,
+          event,
+          `Evidence ${index} ${"x".repeat(1400)}.`,
+          `observation-${event}`,
+        ],
+      );
+    }
+    await markProfileDirty(fixture.agentId);
+    const firstPage = await captureSynthesisSnapshot(fixture.agentId);
+    expect(firstPage.hasMoreEvidence).toBe(true);
+    expect(firstPage.processedGeneration).toBeLessThan(firstPage.expectedDirtyGeneration);
+    const model = fakeModel();
+    await synthesizeProfile(fixture.agentId, {
+      trigger: "scheduled",
+      synthesisKey: `paged:${fixture.agentId}`,
+      model,
+    });
+    expect(model.extract.mock.calls.length).toBeGreaterThan(1);
+    const current = await getCurrentProfile(fixture.agentId);
+    expect(current?.synthesizedGeneration).toBe(current?.dirtyGeneration);
+  });
+
+  it("does not let stale failure metadata overwrite a newer generation", async () => {
+    const fixture = await createFixture();
+    const snapshot = await captureSynthesisSnapshot(fixture.agentId);
+    await markProfileDirty(fixture.agentId);
+    await recordSynthesisFailure(fixture.agentId, new Error("stale worker failure"), {
+      versionId: snapshot.expectedVersionId,
+      dirtyGeneration: snapshot.expectedDirtyGeneration,
+    });
+    const result = await getPool().query<{ last_synthesis_error: string | null }>(
+      "select last_synthesis_error from agent_profiles where agent_id=$1",
+      [fixture.agentId],
+    );
+    expect(result.rows[0].last_synthesis_error).toBeNull();
   });
 
   it("runs one repair then rejects without moving the old head", async () => {

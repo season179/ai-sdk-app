@@ -21,8 +21,9 @@ import {
 } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import { getProfilePolicyVersion } from "@/lib/profile/config";
+import { renderCategorizedProfileText } from "@/lib/profile/context";
 import { enqueueProfileSynthesis } from "@/lib/profile/jobs";
-import { normalizeStableFactKey } from "@/lib/profile/reconcile";
+import { profileClaimHash, stableFactKeyForClaim } from "@/lib/profile/reconcile";
 import {
   applyDirectiveOverlay,
   ensureProfileRoot,
@@ -67,7 +68,7 @@ export type ExplicitProfileApplyResult = {
   factKey: string;
   memoryId: string | null;
   profileVersionId: string;
-  synthesis: "completed" | "queued";
+  synthesis: "completed" | "queued" | "pending";
 };
 
 export class ExplicitProfileIntentError extends Error {
@@ -117,6 +118,20 @@ type ResolvedTarget = {
 };
 
 type TransactionResult = Omit<ExplicitProfileApplyResult, "synthesis">;
+
+export function explicitProfileIntentFingerprint(intent: ExplicitProfileIntent): string {
+  return sha256(
+    JSON.stringify({
+      action: intent.action,
+      content: "content" in intent ? normalizeExact(intent.content) : null,
+      targetMemoryId:
+        "targetMemoryId" in intent ? (intent.targetMemoryId?.toLocaleLowerCase() ?? null) : null,
+      targetFactKey: "targetFactKey" in intent ? (intent.targetFactKey ?? null) : null,
+      targetText: "targetText" in intent ? normalizeExact(intent.targetText ?? "") : null,
+      kind: "kind" in intent ? (intent.kind ?? null) : null,
+    }),
+  );
+}
 
 /** Conservative route pre-parser. It intentionally recognizes only anchored prefixes. */
 export function parseExplicitProfileIntent(rawUserText: string): ExplicitProfileIntent | null {
@@ -275,7 +290,7 @@ async function applyRemember(
     memoryVersionId = memory.currentVersionId;
   }
 
-  await retireTombstone(options.agentId, factKey, eventId, tx);
+  await retireTombstone(options.agentId, factKey, sentence, eventId, tx);
   const fact: ProfileFactV1 = {
     factKey,
     sentence,
@@ -353,7 +368,7 @@ async function applyCorrect(
     memoryVersionId = memory.currentVersionId;
   }
 
-  await retireTombstone(options.agentId, target.factKey, eventId, tx);
+  await retireTombstone(options.agentId, target.factKey, sentence, eventId, tx);
   const fact: ProfileFactV1 = {
     factKey: target.factKey,
     sentence,
@@ -399,6 +414,7 @@ async function applyForget(
       agentId: options.agentId,
       factKey: target.factKey,
       deletedBy: "user",
+      claimHash: profileClaimHash(target.sentence),
       reason: "Explicit user forget request.",
       explicitTraceEventId: eventId,
     })
@@ -407,6 +423,7 @@ async function applyForget(
       set: {
         deletedAt: sql`now()`,
         deletedBy: "user",
+        claimHash: profileClaimHash(target.sentence),
         reason: "Explicit user forget request.",
         explicitTraceEventId: eventId,
         retiredAt: null,
@@ -486,7 +503,7 @@ async function commitOverlay(
     .map((fact, order) => ({ ...fact, order }));
   const keptKeys = new Set(orderedFacts.map((fact) => fact.factKey));
   sources = dedupeSources(sources.filter((source) => keptKeys.has(source.factKey)));
-  const body = orderedFacts.map((fact) => fact.sentence).join("\n");
+  const body = renderCategorizedProfileText(orderedFacts);
   const result = await applyDirectiveOverlay(
     {
       agentId,
@@ -567,13 +584,14 @@ async function resolveTarget(
     const directive = readProfileDirective(memory.structured);
     const factKey = directive.factKey ?? factKeyFor(memory.kind, memory.content);
     const profileFact = profileByKey.get(factKey);
-    candidates.set(factKey, {
+    const candidate = {
       factKey,
       sentence: profileFact?.sentence ?? memory.content,
       category: profileFact?.category ?? categoryForKind(memory.kind),
       protected: profileFact?.protected ?? memory.isProtected,
       memory,
-    });
+    };
+    candidates.set(candidates.has(factKey) ? `${factKey}:${memory.id}` : factKey, candidate);
   }
   for (const fact of profileFacts) {
     const prior = candidates.get(fact.factKey);
@@ -720,6 +738,7 @@ async function appendAuditEvent(
 async function retireTombstone(
   agentId: string,
   factKey: string,
+  sentence: string,
   eventId: string,
   tx: AppDbClient,
 ): Promise<void> {
@@ -729,7 +748,7 @@ async function retireTombstone(
     .where(
       and(
         eq(agentProfileFactTombstones.agentId, agentId),
-        eq(agentProfileFactTombstones.factKey, factKey),
+        sql`(${agentProfileFactTombstones.factKey} = ${factKey} or ${agentProfileFactTombstones.claimHash} = ${profileClaimHash(sentence)})`,
         sql`${agentProfileFactTombstones.retiredAt} is null`,
       ),
     );
@@ -768,14 +787,14 @@ async function finishSynthesis(
     });
     if (!jobId) {
       console.warn("Explicit profile synthesis remains dirty; fallback queue is disabled.");
+      return { ...committed, synthesis: "pending" };
     }
+    return { ...committed, synthesis: "queued" };
   } catch (error) {
-    // The authoritative overlay is already durable. Preserve the required queued
-    // response shape while making queue degradation observable; dirty generation
-    // remains available to retry/catch-up synthesis.
+    // Durable dirty state remains catch-up eligible, but no queue claim is made.
     console.error("Enqueuing explicit profile synthesis fallback failed", error);
+    return { ...committed, synthesis: "pending" };
   }
-  return { ...committed, synthesis: "queued" };
 }
 
 function auditIdentity(
@@ -912,12 +931,12 @@ function memoryForFactKey(memories: TargetMemory[], factKey: string): TargetMemo
   );
 }
 
-function canonicalKeyFor(kind: MemoryKind, sentence: string): string {
-  return `explicit:${kind}:${normalizeStableFactKey(sentence)}`.slice(0, 500);
+function canonicalKeyFor(_kind: MemoryKind, sentence: string): string {
+  return `profile:${profileClaimHash(sentence)}`;
 }
 
-function factKeyFor(kind: MemoryKind, sentence: string): string {
-  return `explicit-${kind}-${normalizeStableFactKey(sentence)}`.slice(0, 200).replace(/-+$/u, "");
+function factKeyFor(_kind: MemoryKind, sentence: string): string {
+  return stableFactKeyForClaim(sentence);
 }
 
 function categoryForKind(kind: MemoryKind): ProfileFactCategory {

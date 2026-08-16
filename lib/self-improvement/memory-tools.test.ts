@@ -179,10 +179,42 @@ describe("memory_search tool mapping", () => {
         messageId: "msg-1",
         rawUserText: "remember that I like pizza.",
         preAppliedExplicitResult,
+        preAppliedExplicitIntent: { action: "remember", content: "I like pizza." },
       },
     );
     expect(result).toEqual({ success: true, ...preAppliedExplicitResult });
     expect(applyExplicit).not.toHaveBeenCalled();
+  });
+
+  it("does not deduplicate a model write with different normalized content", async () => {
+    const applyExplicit = vi.fn(async () => ({
+      durable: true as const,
+      action: "remember" as const,
+      factKey: "claim-y",
+      memoryId: null,
+      profileVersionId: "00000000-0000-0000-0000-000000000011",
+      synthesis: "completed" as const,
+    }));
+    await executeMemoryTool(
+      "memory_write",
+      { action: "remember", content: "I like pasta." },
+      { applyExplicit },
+      {
+        sessionId: "00000000-0000-0000-0000-000000000002",
+        messageId: "msg-1",
+        rawUserText: "remember that I like pizza.",
+        preAppliedExplicitResult: {
+          durable: true,
+          action: "remember",
+          factKey: "claim-x",
+          memoryId: null,
+          profileVersionId: "00000000-0000-0000-0000-000000000010",
+          synthesis: "completed",
+        },
+        preAppliedExplicitIntent: { action: "remember", content: "I like pizza." },
+      },
+    );
+    expect(applyExplicit).toHaveBeenCalledTimes(1);
   });
 
   it("passes only hidden current-user scope to an authorized memory write", async () => {

@@ -21,11 +21,22 @@ export async function markProfileDirtyAndEnqueue(
     automatic?: boolean;
   },
 ): Promise<MarkProfileDirtyResult> {
-  const enabled = options.automatic
-    ? isAutomaticProfileSynthesisEnabled()
-    : isProfileSynthesisEnabled();
+  const enabled = profileDispatchEnabled(options.automatic);
   if (!enabled) return { marked: false, jobId: null, reason: "disabled" };
   const dirtyGeneration = await markProfileDirty(agentId);
   const jobId = await enqueueProfileSynthesis(agentId, { trigger: options.trigger });
   return { marked: true, jobId, dirtyGeneration };
+}
+
+/** Queue-only post-commit boundary for writers that dirtied atomically. */
+export async function enqueueDirtyProfile(
+  agentId: string,
+  options: { trigger: ProfileAgentJobData["trigger"]; automatic?: boolean },
+): Promise<string | null> {
+  if (!profileDispatchEnabled(options.automatic)) return null;
+  return enqueueProfileSynthesis(agentId, { trigger: options.trigger });
+}
+
+function profileDispatchEnabled(automatic?: boolean): boolean {
+  return automatic ? isAutomaticProfileSynthesisEnabled() : isProfileSynthesisEnabled();
 }

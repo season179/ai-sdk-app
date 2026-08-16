@@ -29,7 +29,7 @@ import {
   isProfileSynthesisEnabled,
 } from "@/lib/profile/config";
 import { enqueueProfileSynthesis } from "@/lib/profile/jobs";
-import { normalizeStableFactKey } from "@/lib/profile/reconcile";
+import { profileClaimHash, stableFactKeyForClaim } from "@/lib/profile/reconcile";
 import {
   applyDirectiveOverlay,
   ensureProfileRoot,
@@ -324,9 +324,8 @@ export async function saveManualProfile(
       },
       tx,
     );
-    const activeTombstones = new Set(
-      (await listActiveTombstones(agentId, tx)).map((row) => row.factKey),
-    );
+    const activeTombstones = await listActiveTombstones(agentId, tx);
+    const activeTombstoneClaims = new Set(activeTombstones.map((row) => row.claimHash));
     const currentBySentence = new Map(currentFacts.map((fact) => [fact.sentence, fact]));
     const usedKeys = new Set(currentFacts.map((fact) => fact.factKey));
     const retainedKeys = new Set<string>();
@@ -348,14 +347,12 @@ export async function saveManualProfile(
         }
         return;
       }
-      const factKey = allocateUiFactKey(
-        next.sentence,
-        next.category,
-        usedKeys,
-        activeTombstones,
-        auditEventId,
-        order,
-      );
+      if (activeTombstoneClaims.has(profileClaimHash(next.sentence))) {
+        throw new ProfileServiceConflictError(
+          "This fact was explicitly deleted and can only be restored by an explicit remember/correct request.",
+        );
+      }
+      const factKey = allocateUiFactKey(next.sentence, usedKeys);
       usedKeys.add(factKey);
       retainedKeys.add(factKey);
       facts.push({
@@ -369,10 +366,12 @@ export async function saveManualProfile(
       sources.push(uiSource(factKey, auditEventId));
     });
 
-    const removedKeys = currentFacts
-      .map((fact) => fact.factKey)
-      .filter((factKey) => !retainedKeys.has(factKey));
-    await upsertActiveTombstones(agentId, removedKeys, auditEventId, "manual_ui_omission", tx);
+    const removedFacts = currentFacts.filter((fact) => !retainedKeys.has(fact.factKey));
+    const removedKeys = removedFacts.map((fact) => fact.factKey);
+    await upsertActiveTombstones(agentId, removedFacts, auditEventId, "manual_ui_omission", tx);
+    for (const removed of removedFacts) {
+      await archiveBackingUserMemories(agentId, removed.factKey, currentSources, auditEventId, tx);
+    }
     validateManualCandidate(body, facts, sources, currentFacts, removedKeys);
     await applyDirectiveOverlay(
       {
@@ -445,7 +444,7 @@ export async function deleteManualProfileFact(
       { expectedVersionId: hasExpected ? expectedVersionId : undefined, factKey },
       tx,
     );
-    await upsertActiveTombstones(agentId, [factKey], auditEventId, "manual_ui_delete", tx);
+    await upsertActiveTombstones(agentId, [target], auditEventId, "manual_ui_delete", tx);
     await archiveBackingUserMemories(agentId, factKey, currentSources, auditEventId, tx);
 
     const facts = current.facts
@@ -591,17 +590,18 @@ async function appendUiAuditEvent(
 
 async function upsertActiveTombstones(
   agentId: string,
-  factKeys: string[],
+  facts: Pick<ProfileFactV1, "factKey" | "sentence">[],
   eventId: string,
   reason: string,
   db: AppDbClient,
 ): Promise<void> {
-  for (const factKey of factKeys) {
+  for (const fact of facts) {
     await db
       .insert(agentProfileFactTombstones)
       .values({
         agentId,
-        factKey,
+        factKey: fact.factKey,
+        claimHash: profileClaimHash(fact.sentence),
         deletedBy: "manual_ui",
         reason,
         explicitTraceEventId: eventId,
@@ -610,6 +610,7 @@ async function upsertActiveTombstones(
         target: [agentProfileFactTombstones.agentId, agentProfileFactTombstones.factKey],
         set: {
           deletedAt: sql`now()`,
+          claimHash: profileClaimHash(fact.sentence),
           deletedBy: "manual_ui",
           reason,
           explicitTraceEventId: eventId,
@@ -630,17 +631,12 @@ function uiSource(factKey: string, auditEventId: string): ProfileSourceHandle {
   };
 }
 
-function allocateUiFactKey(
-  sentence: string,
-  category: ProfileFactCategory,
-  usedKeys: ReadonlySet<string>,
-  tombstones: ReadonlySet<string>,
-  auditEventId: string,
-  order: number,
-): string {
-  const base = normalizeStableFactKey(`${category}-${sentence}`);
-  if (!usedKeys.has(base) && !tombstones.has(base)) return base;
-  return `${base.slice(0, 166)}-ui-${sha256(`${auditEventId}:${order}:${sentence}`).slice(0, 24)}`;
+function allocateUiFactKey(sentence: string, usedKeys: ReadonlySet<string>): string {
+  const key = stableFactKeyForClaim(sentence);
+  if (!usedKeys.has(key)) return key;
+  throw new ProfileServiceInputError("The profile contains the same semantic claim twice.", [
+    "duplicate_claim",
+  ]);
 }
 
 function dedupeSources(sources: ProfileSourceHandle[]): ProfileSourceHandle[] {

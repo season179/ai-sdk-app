@@ -9,7 +9,9 @@ import { ingestUserTurn } from "@/lib/consolidation/observations";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
 import { canonicalJson } from "@/lib/memory/redaction";
 import { appendTraceEvents, type TraceEventInput } from "@/lib/memory/trace";
-import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
+import { isAutomaticProfileSynthesisEnabled } from "@/lib/profile/config";
+import { enqueueDirtyProfile } from "@/lib/profile/dirty";
+import { assignCompletedTraceProfileGenerations, markProfileDirty } from "@/lib/profile/repository";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
 
@@ -283,6 +285,8 @@ export async function appendSessionMessages(
       events: TraceEventInput[];
       groundedUserMessages?: ChatUIMessage[];
     };
+    /** Completed trace whose already-captured user observations become eligible now. */
+    completeProfileTraceId?: string;
   } = {},
 ): Promise<{
   traceCaptured: boolean;
@@ -393,6 +397,13 @@ export async function appendSessionMessages(
             (event) => !event.sourceMessageId || captureIds.has(event.sourceMessageId),
           );
           const traceRows = await appendTraceEvents(events ?? [], savepoint);
+          if (opts.completeProfileTraceId) {
+            await assignCompletedTraceProfileGenerations(
+              opts.agentId ?? DEFAULT_AGENT_ID,
+              opts.completeProfileTraceId,
+              savepoint,
+            );
+          }
           const traceEventIds = new Map(
             traceRows.flatMap((row) =>
               row.sourceMessageId ? ([[row.sourceMessageId, row.id]] as const) : [],
@@ -751,6 +762,7 @@ export async function deleteChatSession(
   id: string,
   agentId: string = DEFAULT_AGENT_ID,
 ): Promise<void> {
+  const shouldDirtyProfile = isAutomaticProfileSynthesisEnabled();
   await getDb().transaction(async (tx) => {
     const rows = await tx
       .update(agentChatSessions)
@@ -767,6 +779,7 @@ export async function deleteChatSession(
     if (rows.length === 0) {
       throw new ChatSessionNotFoundError(id);
     }
+    if (shouldDirtyProfile) await markProfileDirty(agentId, tx);
     await tx
       .update(agentGroundedObservations)
       .set({ deletedAt: sql`now()` })
@@ -779,9 +792,11 @@ export async function deleteChatSession(
       );
   });
 
-  await markProfileDirtyAndEnqueue(agentId, { trigger: "turn", automatic: true }).catch((error) => {
-    console.error("Marking profile dirty after session deletion failed", error);
-  });
+  if (shouldDirtyProfile) {
+    await enqueueDirtyProfile(agentId, { trigger: "turn", automatic: true }).catch((error) => {
+      console.error("Enqueuing profile synthesis after session deletion failed", error);
+    });
+  }
 }
 
 function mapSession(session: typeof agentChatSessions.$inferSelect): ChatSession {

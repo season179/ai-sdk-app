@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { redactReadProjection } from "@/lib/memory/projection-safety";
 import { detectPromptInjection, detectSecret, redactText } from "@/lib/memory/redaction";
 import type {
   ProfileFactCategory,
@@ -53,6 +55,12 @@ export function validateProfileCandidate(input: {
     if (!isCompleteSentence(fact.sentence)) issues.push(`fact_${index}_incomplete_sentence`);
     if (isUnsafeText(fact.sentence)) issues.push(`fact_${index}_unsafe`);
     if (tombstoneKeys.has(fact.factKey)) issues.push(`fact_${index}_tombstoned`);
+    const claimHash = profileClaimHash(fact.sentence);
+    if (
+      (input.tombstones ?? []).some((row) => typeof row !== "string" && row.claimHash === claimHash)
+    ) {
+      issues.push(`fact_${index}_claim_tombstoned`);
+    }
   }
 
   for (const [index, source] of input.sources.entries()) {
@@ -88,6 +96,11 @@ export function validateProfileCandidate(input: {
   }
   if (containsUnmanifestedText(input.body, input.facts)) {
     issues.push("body_contains_unmanifested_text");
+  }
+  for (const fact of input.facts) {
+    if (!sentenceIsInCategory(input.body, fact.sentence, fact.category)) {
+      issues.push(`body_category_mismatch_${fact.factKey}`);
+    }
   }
   return { valid: issues.length === 0, issues };
 }
@@ -126,8 +139,55 @@ function containsUnmanifestedText(body: string, facts: ProfileFactV1[]): boolean
 
 function isUnsafeText(value: string): boolean {
   if (detectSecret(value) || detectPromptInjection(value)) return true;
+  const projection = redactReadProjection(value);
+  if (projection.contaminated || projection.text !== value.trim()) return true;
   const redacted = redactText(value);
   return redacted.secretDetected || redacted.text !== value;
+}
+
+function sentenceIsInCategory(
+  body: string,
+  sentence: string,
+  expected: ProfileFactCategory,
+): boolean {
+  let category: ProfileFactCategory = "identity_context";
+  let offset = 0;
+  for (const line of body.split("\n")) {
+    const heading =
+      /^\s*#{0,6}\s*(Identity and context|Preferences and constraints|Active projects and goals|Interaction instructions)\s*:?\s*#*\s*$/i.exec(
+        line,
+      );
+    if (heading) {
+      const normalized = heading[1].toLocaleLowerCase("en-US");
+      category =
+        normalized === "preferences and constraints"
+          ? "preferences_constraints"
+          : normalized === "active projects and goals"
+            ? "active_projects_goals"
+            : normalized === "interaction instructions"
+              ? "interaction_instructions"
+              : "identity_context";
+    } else {
+      const at = line.indexOf(sentence);
+      if (at >= 0 && body.indexOf(sentence) === offset + at) return category === expected;
+    }
+    offset += line.length + 1;
+  }
+  return false;
+}
+
+function profileClaimHash(sentence: string): string {
+  // Kept local to avoid a validate↔reconcile import cycle.
+  return createHash("sha256")
+    .update(
+      sentence
+        .normalize("NFKC")
+        .toLocaleLowerCase("en-US")
+        .trim()
+        .replace(/\s+/gu, " ")
+        .replace(/[.!?。！？]+$/u, ""),
+    )
+    .digest("hex");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

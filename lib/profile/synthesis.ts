@@ -11,7 +11,12 @@ import {
   PROFILE_SYNTHESIZER_ID,
 } from "@/lib/profile/extract";
 import { reconcileProfile } from "@/lib/profile/reconcile";
-import { PROFILE_RENDER_PROMPT_HASH, renderProfile, repairProfile } from "@/lib/profile/render";
+import {
+  PROFILE_RENDER_PROMPT_HASH,
+  renderProfile,
+  repairProfile,
+  selectFactsForRenderBudget,
+} from "@/lib/profile/render";
 import {
   captureSynthesisSnapshot,
   commitProfileNoop,
@@ -63,24 +68,37 @@ export async function synthesizeProfile(
       PROFILE_SYNTHESIZER_ID,
     );
     if (receipt) return receipt;
+
     const attempts = Math.max(1, Math.min(2, options.maxAttempts ?? 1));
-    let lastConflict: ProfileGenerationConflictError | null = null;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let conflictAttempts = 0;
+    for (let batch = 0; batch < 1_000; ) {
       const snapshot = await captureSynthesisSnapshot(agentId);
+      const expectation = {
+        versionId: snapshot.expectedVersionId,
+        dirtyGeneration: snapshot.expectedDirtyGeneration,
+      };
+      const synthesisKey = snapshot.hasMoreEvidence
+        ? `${options.synthesisKey}:batch:${snapshot.synthesizedGeneration}-${snapshot.processedGeneration}`
+        : options.synthesisKey;
       try {
-        return await synthesizeSnapshot(snapshot, options, options.model);
+        const result = await synthesizeSnapshot(
+          snapshot,
+          { ...options, synthesisKey },
+          options.model,
+        );
+        if (!snapshot.hasMoreEvidence) return result;
+        batch += 1;
+        conflictAttempts = 0;
       } catch (error) {
-        if (error instanceof ProfileGenerationConflictError) {
-          lastConflict = error;
-          if (attempt + 1 < attempts) continue;
+        if (error instanceof ProfileGenerationConflictError && conflictAttempts + 1 < attempts) {
+          conflictAttempts += 1;
+          continue;
         }
+        await recordSynthesisFailure(agentId, error, expectation).catch(() => undefined);
         throw error;
       }
     }
-    throw lastConflict ?? new Error("Profile synthesis exhausted its attempts.");
-  } catch (error) {
-    await recordSynthesisFailure(agentId, error).catch(() => undefined);
-    throw error;
+    throw new Error("Profile synthesis exceeded the bounded evidence batch limit.");
   } finally {
     await client.query("select pg_advisory_unlock(hashtext($1))", [lockKey]).catch(() => undefined);
     client.release();
@@ -92,47 +110,45 @@ async function synthesizeSnapshot(
   options: SynthesizeProfileOptions,
   model: ProfileSynthesisModel | undefined,
 ): Promise<ProfileSynthesisResult> {
-  if (!hasSynthesisWork(snapshot)) {
-    return commitNoop(snapshot, options.synthesisKey);
-  }
+  if (!hasSynthesisWork(snapshot)) return commitNoop(snapshot, options.synthesisKey);
 
   const synthesisModel = model ?? createOpenRouterProfileModel();
-  // captureSynthesisSnapshot has committed before this model call starts.
+  // captureSynthesisSnapshot has committed before every model call.
   const extracted = await synthesisModel.extract(snapshot);
   const reconciled = reconcileProfile(snapshot, extracted);
-  if (sameProjection(snapshot, reconciled.facts, reconciled.sources)) {
-    return commitNoop(snapshot, options.synthesisKey);
-  }
-
   const maxChars = getProfileMaxChars();
   const tokenBudget = getProfileTokenBudget();
+  const facts = selectFactsForRenderBudget(reconciled.facts, maxChars, tokenBudget);
+  const keptKeys = new Set(facts.map((fact) => fact.factKey));
+  const sources = reconciled.sources.filter((source) => keptKeys.has(source.factKey));
+  if (sameProjection(snapshot, facts, sources)) return commitNoop(snapshot, options.synthesisKey);
+
   let body = await synthesisModel.render({
-    facts: reconciled.facts,
+    facts,
     previousBody: snapshot.currentVersion?.body ?? "",
     maxChars,
     tokenBudget,
   });
   let validation = validateProfileCandidate({
     body,
-    facts: reconciled.facts,
-    sources: reconciled.sources,
+    facts,
+    sources,
     previousFacts: preservableCurrentFacts(snapshot),
     tombstones: snapshot.tombstones,
     maxChars,
   });
   if (!validation.valid) {
-    // Exactly one repair pass. It may rewrite prose but never the manifest.
     body = await synthesisModel.repair({
       body,
-      facts: reconciled.facts,
+      facts,
       issues: validation.issues,
       maxChars,
       tokenBudget,
     });
     validation = validateProfileCandidate({
       body,
-      facts: reconciled.facts,
-      sources: reconciled.sources,
+      facts,
+      sources,
       previousFacts: preservableCurrentFacts(snapshot),
       tombstones: snapshot.tombstones,
       maxChars,
@@ -146,8 +162,8 @@ async function synthesizeSnapshot(
     agentId: snapshot.agentId,
     expectedVersionId: snapshot.expectedVersionId,
     expectedDirtyGeneration: snapshot.expectedDirtyGeneration,
-    facts: reconciled.facts,
-    sources: reconciled.sources,
+    facts,
+    sources,
     body,
     tokenCount: estimateTokens(body),
     trigger: options.trigger,
@@ -156,6 +172,7 @@ async function synthesizeSnapshot(
     promptHash: PROFILE_PROMPT_HASH,
     policyVersion: getProfilePolicyVersion(),
     upperBounds: snapshot.upperBounds,
+    processedGeneration: snapshot.processedGeneration,
     receipt: {
       synthesisKey: options.synthesisKey,
       synthesizerId: PROFILE_SYNTHESIZER_ID,
@@ -173,13 +190,24 @@ function commitNoop(snapshot: ProfileSynthesisSnapshot, synthesisKey: string) {
     upperBounds: snapshot.upperBounds,
     synthesisKey,
     synthesizerId: PROFILE_SYNTHESIZER_ID,
+    processedGeneration: snapshot.processedGeneration,
   });
 }
 
 function hasSynthesisWork(snapshot: ProfileSynthesisSnapshot): boolean {
   if (snapshot.observationDeltas.length || snapshot.memoryVersionDeltas.length) return true;
   const currentKeys = new Set(snapshot.currentVersion?.facts.map((fact) => fact.factKey) ?? []);
-  if (snapshot.tombstones.some((row) => currentKeys.has(row.factKey))) return true;
+  if (
+    snapshot.tombstones.some(
+      (row) =>
+        currentKeys.has(row.factKey) ||
+        snapshot.currentVersion?.facts.some(
+          (fact) => sha256(normalizeClaim(fact.sentence)) === row.claimHash,
+        ),
+    )
+  ) {
+    return true;
+  }
   const factsByKey = new Map(
     snapshot.currentVersion?.facts.map((fact) => [fact.factKey, fact]) ?? [],
   );
@@ -245,6 +273,15 @@ function sortSources(sources: ProfileSourceHandle[]) {
 
 function stableJson(value: unknown): string {
   return JSON.stringify(value);
+}
+
+function normalizeClaim(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .trim()
+    .replace(/\s+/gu, " ")
+    .replace(/[.!?。！？]+$/u, "");
 }
 
 function estimateTokens(body: string): number {

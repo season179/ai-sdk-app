@@ -47,6 +47,9 @@ export type ProfileObservationInput = {
   sessionId: string | null;
   content: string;
   createdAt: Date;
+  /** Exact UTC timestamp text plus id are the server-owned precedence tuple. */
+  createdAtText?: string;
+  profileGeneration?: number;
 };
 
 export type ProfileMemoryInput = {
@@ -58,11 +61,15 @@ export type ProfileMemoryInput = {
   protected: boolean;
   active: boolean;
   createdAt: Date;
+  /** Exact UTC timestamp text plus memoryVersionId are the precedence tuple. */
+  createdAtText?: string;
+  profileGeneration?: number | null;
   expiresAt: Date | null;
 };
 
 export type ProfileTombstone = {
   factKey: string;
+  claimHash?: string;
   deletedAt: Date;
   reason: string | null;
 };
@@ -107,6 +114,9 @@ export type ProfileSynthesisSnapshot = {
   memoryVersionDeltas: ProfileMemoryInput[];
   activeMemories: ProfileMemoryInput[];
   tombstones: ProfileTombstone[];
+  /** Highest authoritative generation fully represented in this bounded page. */
+  processedGeneration?: number;
+  hasMoreEvidence?: boolean;
 };
 
 export type ProfileExtractionOperation = {

@@ -23,7 +23,9 @@ import {
   invalidateMemory,
   type VersionAuthority,
 } from "@/lib/memory/versions";
-import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
+import { isProfileSynthesisEnabled } from "@/lib/profile/config";
+import { enqueueDirtyProfile } from "@/lib/profile/dirty";
+import { assignMemoryVersionProfileGeneration, markProfileDirty } from "@/lib/profile/repository";
 import { MemoryNotFoundError, SelfImprovementInputError } from "@/lib/self-improvement/errors";
 import {
   parseMemoryConfidence,
@@ -184,6 +186,9 @@ export async function createMemory(input: CreateMemoryInput, db?: AppDbClient): 
     return result;
   }
   const agentId = input.agentId ?? DEFAULT_AGENT_ID;
+  const profileGeneration = isProfileSynthesisEnabled()
+    ? await markProfileDirty(agentId, db)
+    : null;
   const kind = parseMemoryKind(input.kind);
   const memoryType = parseMemoryType(input.memoryType, familyForKind(kind));
   const content = parseMemoryContent(input.content);
@@ -225,6 +230,9 @@ export async function createMemory(input: CreateMemoryInput, db?: AppDbClient): 
     },
     db,
   );
+  if (profileGeneration !== null) {
+    await assignMemoryVersionProfileGeneration(agentId, result.version.id, profileGeneration, db);
+  }
   if (source === "user") {
     await ingestUserMemory(result.root.id, content, { agentId, db, traceEventId: evidence[0] });
   }
@@ -253,9 +261,14 @@ export async function updateMemory(
     await dirtyProfileBestEffort(agentId);
     return result;
   }
+  const profileGeneration = isProfileSynthesisEnabled()
+    ? await markProfileDirty(agentId, db)
+    : null;
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
-  if (input.status === "archived") return archiveMemory(id, agentId, db, input.sourceEventIds);
+  if (input.status === "archived") {
+    return archiveMemory(id, agentId, db, input.sourceEventIds, profileGeneration);
+  }
   const isContentEdit =
     input.kind !== undefined || input.content !== undefined || input.confidence !== undefined;
   if (existing.isProtected && isContentEdit) {
@@ -303,6 +316,9 @@ export async function updateMemory(
     },
     db,
   );
+  if (profileGeneration !== null) {
+    await assignMemoryVersionProfileGeneration(agentId, result.version.id, profileGeneration, db);
+  }
   await db
     .update(agentGroundedObservations)
     .set({ deletedAt: sql`now()` })
@@ -349,6 +365,7 @@ export async function setMemoryProtection(
     await dirtyProfileBestEffort(agentId);
     return result;
   }
+  if (isProfileSynthesisEnabled()) await markProfileDirty(agentId, db);
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
   if (existing.isProtected === isProtected) return existing;
@@ -384,6 +401,7 @@ export async function archiveMemory(
   agentId = DEFAULT_AGENT_ID,
   db?: AppDbClient,
   sourceEventIds?: string[],
+  reservedProfileGeneration?: number | null,
 ): Promise<Memory> {
   if (!db) {
     const result = await getDb().transaction((tx) =>
@@ -392,6 +410,12 @@ export async function archiveMemory(
     await dirtyProfileBestEffort(agentId);
     return result;
   }
+  const profileGeneration =
+    reservedProfileGeneration !== undefined
+      ? reservedProfileGeneration
+      : isProfileSynthesisEnabled()
+        ? await markProfileDirty(agentId, db)
+        : null;
   const existing = await getMemoryById(id, agentId, db);
   if (!existing) throw new MemoryNotFoundError(id);
   if (existing.isProtected)
@@ -404,6 +428,9 @@ export async function archiveMemory(
     { agentId, sourceEventIds: evidence, source: existing.source, authority: "user" },
     db,
   );
+  if (profileGeneration !== null) {
+    await assignMemoryVersionProfileGeneration(agentId, result.version.id, profileGeneration, db);
+  }
   await db
     .update(agentGroundedObservations)
     .set({ deletedAt: sql`now()` })
@@ -490,8 +517,8 @@ async function appendExplicitEvent(
 }
 
 async function dirtyProfileBestEffort(agentId: string): Promise<void> {
-  await markProfileDirtyAndEnqueue(agentId, { trigger: "manual_ui" }).catch((error) => {
-    console.error("Marking profile dirty after memory mutation failed", error);
+  await enqueueDirtyProfile(agentId, { trigger: "manual_ui" }).catch((error) => {
+    console.error("Enqueuing profile synthesis after memory mutation failed", error);
   });
 }
 

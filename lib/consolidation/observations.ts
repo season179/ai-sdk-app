@@ -15,7 +15,8 @@ import {
 import type { ChatUIMessage } from "@/lib/chat/sessions";
 import { contentHash } from "@/lib/consolidation/normalize";
 import { buildUserMessageEvent } from "@/lib/memory/capture";
-import { redactText } from "@/lib/memory/redaction";
+import { redactReadProjection } from "@/lib/memory/projection-safety";
+import { detectPromptInjection, detectSecret, redactText } from "@/lib/memory/redaction";
 import { appendTraceEvents } from "@/lib/memory/trace";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 
@@ -113,10 +114,16 @@ export async function ingestUserTurn(
 
   const rows: NewAgentGroundedObservation[] = [];
   for (const item of userTexts) {
-    // Grounded evidence is a durable memory input, so redact before both
-    // persistence and hashing; the trace copy follows the same policy.
-    const redacted = redactText(item.text).text;
-    const chunks = chunkText(redacted, OBSERVATION_CONTENT_MAX);
+    // Fail closed at the evidence boundary. A copied read projection, secret,
+    // or instruction-shaped payload remains in the sanitized audit trace but
+    // can never become grounded profile/consolidation evidence.
+    const projection = redactReadProjection(item.text);
+    if (projection.contaminated || detectSecret(item.text) || detectPromptInjection(item.text)) {
+      continue;
+    }
+    const redacted = redactText(projection.text);
+    if (redacted.secretDetected || redacted.text !== projection.text) continue;
+    const chunks = chunkText(redacted.text, OBSERVATION_CONTENT_MAX);
     chunks.forEach((chunk, index) => {
       rows.push({
         agentId,
@@ -199,7 +206,18 @@ export async function ingestUserMemory(
     throw new Error("User-memory observations require a trace event.");
   }
 
-  const chunk = redactText(content).text.trim().slice(0, OBSERVATION_CONTENT_MAX);
+  const projection = redactReadProjection(content);
+  const redacted = redactText(projection.text);
+  if (
+    projection.contaminated ||
+    detectSecret(content) ||
+    detectPromptInjection(content) ||
+    redacted.secretDetected ||
+    redacted.text !== projection.text
+  ) {
+    return;
+  }
+  const chunk = redacted.text.trim().slice(0, OBSERVATION_CONTENT_MAX);
   if (!chunk) {
     return;
   }
@@ -265,6 +283,7 @@ export async function listGroundedObservations(
     .where(
       and(
         ...conditions,
+        sql`coalesce(${agentTraceEvents.payload}->>'projectionContaminated', 'false') <> 'true'`,
         sql`(
           ${agentTraceEvents.eventType} in ('explicit_memory_write', 'legacy_import')
           or (

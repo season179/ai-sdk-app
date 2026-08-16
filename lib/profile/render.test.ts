@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { PROFILE_RENDER_PROMPT_HASH, sortForSurvival } from "@/lib/profile/render";
+import {
+  PROFILE_RENDER_PROMPT_HASH,
+  ProfileMandatoryFactsOverBudgetError,
+  selectFactsForRenderBudget,
+  sortForSurvival,
+} from "@/lib/profile/render";
 import type { ProfileFactV1 } from "@/lib/profile/types";
 
 function fact(overrides: Partial<ProfileFactV1>): ProfileFactV1 {
@@ -36,6 +41,23 @@ describe("profile render policy", () => {
       "identity",
       "recent",
     ]);
+  });
+
+  it("prunes optional facts but never user/protected facts beyond the render budget", () => {
+    const mandatory = fact({
+      factKey: "mandatory",
+      authority: "user",
+      sentence: "The user requires captions.",
+    });
+    const selected = selectFactsForRenderBudget(
+      [mandatory, fact({ factKey: "optional", sentence: `${"A".repeat(300)}.` })],
+      100,
+      100,
+    );
+    expect(selected.map((row) => row.factKey)).toEqual(["mandatory"]);
+    expect(() =>
+      selectFactsForRenderBudget([{ ...mandatory, sentence: `${"界".repeat(300)}。` }], 500, 50),
+    ).toThrow(ProfileMandatoryFactsOverBudgetError);
   });
 
   it("has a deterministic prompt hash", () => {

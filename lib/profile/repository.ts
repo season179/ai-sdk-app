@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { type AppDbClient, getDb } from "@/db";
 import {
@@ -14,7 +14,8 @@ import {
   agentProfileVersions,
   agentTraceEvents,
 } from "@/db/schema";
-import { getProfileMaxChars } from "@/lib/profile/config";
+import { getProfileMaxChars, getProfileTokenBudget } from "@/lib/profile/config";
+import { assertMandatoryFactsRenderable } from "@/lib/profile/render";
 import type {
   CurrentProfile,
   ProfileFactV1,
@@ -137,13 +138,154 @@ export async function markProfileDirty(
   db: AppDbClient = getDb(),
 ): Promise<number> {
   await ensureProfileRoot(agentId, db);
-  const [row] = await db
-    .update(agentProfiles)
-    .set({ dirtyGeneration: sql`${agentProfiles.dirtyGeneration} + 1`, updatedAt: sql`now()` })
+  const [root] = await db
+    .select({ dirtyGeneration: agentProfiles.dirtyGeneration })
+    .from(agentProfiles)
     .where(eq(agentProfiles.agentId, agentId))
-    .returning({ dirtyGeneration: agentProfiles.dirtyGeneration });
-  if (!row) throw new Error("Unable to mark profile dirty.");
-  return row.dirtyGeneration;
+    .for("update");
+  if (!root) throw new Error("Unable to lock profile root.");
+
+  // Compatibility/backfill safety: callers that atomically inserted eligible
+  // evidence before marking dirty still receive ordered generations here.
+  const observations = await db
+    .select({ id: agentGroundedObservations.id, createdAt: agentGroundedObservations.createdAt })
+    .from(agentGroundedObservations)
+    .innerJoin(agentTraceEvents, eq(agentTraceEvents.id, agentGroundedObservations.traceEventId))
+    .where(
+      and(
+        eq(agentGroundedObservations.agentId, agentId),
+        isNull(agentGroundedObservations.profileGeneration),
+        isNull(agentGroundedObservations.deletedAt),
+        sql`coalesce(${agentTraceEvents.payload}->>'projectionContaminated', 'false') <> 'true'`,
+        sql`(
+          ${agentTraceEvents.eventType} in ('explicit_memory_write', 'legacy_import')
+          or (
+            select terminal.terminal_status from agent_trace_events terminal
+            where terminal.agent_id = ${agentTraceEvents.agentId}
+              and terminal.trace_id = ${agentTraceEvents.traceId}
+              and terminal.event_type = 'task_terminal_state'
+            order by terminal.sequence_no desc, terminal.ingested_at desc limit 1
+          ) = 'completed'
+        )`,
+      ),
+    );
+  const memories = await db
+    .select({
+      id: agentMemoryVersions.id,
+      createdAt: agentMemoryVersions.createdAt,
+    })
+    .from(agentMemoryVersions)
+    .innerJoin(agentMemories, eq(agentMemories.id, agentMemoryVersions.memoryId))
+    .where(
+      and(
+        eq(agentMemories.agentId, agentId),
+        isNull(agentMemoryVersions.profileGeneration),
+        inArray(agentMemoryVersions.source, [...ALLOWED_MEMORY_SOURCES]),
+      ),
+    );
+  const pending = [
+    ...observations.map((row) => ({ ...row, lane: "observation" as const })),
+    ...memories.map((row) => ({ ...row, lane: "memory" as const })),
+  ].sort(
+    (a, b) =>
+      a.createdAt.getTime() - b.createdAt.getTime() ||
+      a.id.localeCompare(b.id) ||
+      a.lane.localeCompare(b.lane),
+  );
+  for (const [index, item] of pending.entries()) {
+    const generation = root.dirtyGeneration + index + 1;
+    if (item.lane === "observation") {
+      await db
+        .update(agentGroundedObservations)
+        .set({ profileGeneration: generation })
+        .where(
+          and(
+            eq(agentGroundedObservations.id, item.id),
+            isNull(agentGroundedObservations.profileGeneration),
+          ),
+        );
+    } else {
+      await db
+        .update(agentMemoryVersions)
+        .set({ profileGeneration: generation })
+        .where(
+          and(eq(agentMemoryVersions.id, item.id), isNull(agentMemoryVersions.profileGeneration)),
+        );
+    }
+  }
+  const dirtyGeneration = root.dirtyGeneration + pending.length + 1;
+  await db
+    .update(agentProfiles)
+    .set({ dirtyGeneration, updatedAt: sql`now()` })
+    .where(eq(agentProfiles.agentId, agentId));
+  return dirtyGeneration;
+}
+
+/** Assigns commit-ordered generations to observations made eligible by a completed trace. */
+export async function assignCompletedTraceProfileGenerations(
+  agentId: string,
+  traceId: string,
+  db: AppDbClient = getDb(),
+): Promise<number | null> {
+  await ensureProfileRoot(agentId, db);
+  const rows = await db
+    .select({ id: agentGroundedObservations.id })
+    .from(agentGroundedObservations)
+    .innerJoin(agentTraceEvents, eq(agentTraceEvents.id, agentGroundedObservations.traceEventId))
+    .where(
+      and(
+        eq(agentGroundedObservations.agentId, agentId),
+        eq(agentTraceEvents.traceId, traceId),
+        isNull(agentGroundedObservations.profileGeneration),
+        isNull(agentGroundedObservations.deletedAt),
+        sql`coalesce(${agentTraceEvents.payload}->>'projectionContaminated', 'false') <> 'true'`,
+      ),
+    )
+    .orderBy(asc(agentGroundedObservations.createdAt), asc(agentGroundedObservations.id));
+  if (!rows.length) return null;
+  const [root] = await db
+    .select({ dirtyGeneration: agentProfiles.dirtyGeneration })
+    .from(agentProfiles)
+    .where(eq(agentProfiles.agentId, agentId))
+    .for("update");
+  if (!root) throw new Error("Profile root unavailable while completing trace evidence.");
+  for (const [index, row] of rows.entries()) {
+    await db
+      .update(agentGroundedObservations)
+      .set({ profileGeneration: root.dirtyGeneration + index + 1 })
+      .where(
+        and(
+          eq(agentGroundedObservations.id, row.id),
+          isNull(agentGroundedObservations.profileGeneration),
+        ),
+      );
+  }
+  const generation = root.dirtyGeneration + rows.length;
+  await db
+    .update(agentProfiles)
+    .set({ dirtyGeneration: generation, updatedAt: sql`now()` })
+    .where(eq(agentProfiles.agentId, agentId));
+  return generation;
+}
+
+export async function assignMemoryVersionProfileGeneration(
+  agentId: string,
+  memoryVersionId: string,
+  generation: number,
+  db: AppDbClient = getDb(),
+): Promise<void> {
+  await db
+    .update(agentMemoryVersions)
+    .set({ profileGeneration: generation })
+    .where(
+      and(
+        eq(agentMemoryVersions.id, memoryVersionId),
+        sql`exists (
+          select 1 from agent_memories owner
+          where owner.id = ${agentMemoryVersions.memoryId} and owner.agent_id = ${agentId}
+        )`,
+      ),
+    );
 }
 
 export async function listActiveTombstones(
@@ -153,6 +295,7 @@ export async function listActiveTombstones(
   return db
     .select({
       factKey: agentProfileFactTombstones.factKey,
+      claimHash: agentProfileFactTombstones.claimHash,
       deletedAt: agentProfileFactTombstones.deletedAt,
       reason: agentProfileFactTombstones.reason,
     })
@@ -191,10 +334,13 @@ export async function captureSynthesisSnapshot(agentId: string): Promise<Profile
         : [];
       const currentVersion = currentRow ? mapVersion(currentRow) : null;
       const lowerBounds = await readProfileWatermarks(agentId, tx);
-      const observationUpper = await latestObservationTuple(agentId, tx);
-      const memoryUpper = await latestMemoryTuple(agentId, tx);
-      const upperBounds = { observation: observationUpper, memoryVersion: memoryUpper };
-      const deltas = await listDeltaInputs(agentId, lowerBounds, upperBounds, tx);
+      const page = await listGenerationDeltaInputs(
+        agentId,
+        root.synthesizedGeneration,
+        root.dirtyGeneration,
+        tx,
+      );
+      const upperBounds = page.upperBounds;
       const activeMemories = await listActiveProfileMemories(agentId, tx);
       const tombstones = await listActiveTombstones(agentId, tx);
       const currentSources = root.currentVersionId
@@ -211,10 +357,12 @@ export async function captureSynthesisSnapshot(agentId: string): Promise<Profile
         upperBounds,
         currentVersion,
         currentSources,
-        observationDeltas: deltas.observations,
-        memoryVersionDeltas: deltas.memoryVersions,
+        observationDeltas: page.observations,
+        memoryVersionDeltas: page.memoryVersions,
         activeMemories,
         tombstones,
+        processedGeneration: page.processedGeneration,
+        hasMoreEvidence: page.hasMoreEvidence,
       };
     },
     { isolationLevel: "repeatable read" },
@@ -277,6 +425,8 @@ export async function listDeltaInputs(
       sessionId: agentGroundedObservations.sessionId,
       content: agentGroundedObservations.content,
       createdAt: agentGroundedObservations.createdAt,
+      createdAtText: sql<string>`to_char(${agentGroundedObservations.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      profileGeneration: agentGroundedObservations.profileGeneration,
     })
     .from(agentGroundedObservations)
     .innerJoin(agentTraceEvents, eq(agentTraceEvents.id, agentGroundedObservations.traceEventId))
@@ -297,14 +447,38 @@ export async function listDeltaInputs(
     .where(and(...memoryConditions))
     .orderBy(asc(agentMemoryVersions.createdAt), asc(agentMemoryVersions.id));
 
-  return { observations, memoryVersions: memoryRows.map(mapMemoryInput) };
+  return {
+    observations: observations.map((row) => ({
+      ...row,
+      profileGeneration: Number(row.profileGeneration ?? 0),
+    })),
+    memoryVersions: memoryRows.map(mapMemoryInput),
+  };
 }
 
-async function latestObservationTuple(agentId: string, db: AppDbClient): Promise<ProfileTuple> {
-  const [row] = await db
+const PROFILE_EVIDENCE_PAGE_CHARS = 16_000;
+
+async function listGenerationDeltaInputs(
+  agentId: string,
+  afterGeneration: number,
+  throughGeneration: number,
+  db: AppDbClient,
+): Promise<{
+  observations: ProfileObservationInput[];
+  memoryVersions: ProfileMemoryInput[];
+  processedGeneration: number;
+  hasMoreEvidence: boolean;
+  upperBounds: ProfileWatermarks;
+}> {
+  const observationRows = await db
     .select({
-      createdAt: sql<string>`${agentGroundedObservations.createdAt}::text`,
       id: agentGroundedObservations.id,
+      traceEventId: agentGroundedObservations.traceEventId,
+      sessionId: agentGroundedObservations.sessionId,
+      content: agentGroundedObservations.content,
+      createdAt: agentGroundedObservations.createdAt,
+      createdAtText: sql<string>`to_char(${agentGroundedObservations.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      profileGeneration: agentGroundedObservations.profileGeneration,
     })
     .from(agentGroundedObservations)
     .innerJoin(agentTraceEvents, eq(agentTraceEvents.id, agentGroundedObservations.traceEventId))
@@ -313,6 +487,9 @@ async function latestObservationTuple(agentId: string, db: AppDbClient): Promise
       and(
         eq(agentGroundedObservations.agentId, agentId),
         isNull(agentGroundedObservations.deletedAt),
+        sql`${agentGroundedObservations.profileGeneration} > ${afterGeneration}`,
+        sql`${agentGroundedObservations.profileGeneration} <= ${throughGeneration}`,
+        sql`coalesce(${agentTraceEvents.payload}->>'projectionContaminated', 'false') <> 'true'`,
         or(
           and(
             eq(agentGroundedObservations.originKind, "memory_user"),
@@ -325,28 +502,14 @@ async function latestObservationTuple(agentId: string, db: AppDbClient): Promise
             isNull(agentChatSessions.deletedAt),
           ),
         ),
-        sql`(
-          ${agentTraceEvents.eventType} in ('explicit_memory_write', 'legacy_import')
-          or (
-            select terminal.terminal_status from agent_trace_events terminal
-            where terminal.agent_id = ${agentTraceEvents.agentId}
-              and terminal.trace_id = ${agentTraceEvents.traceId}
-              and terminal.event_type = 'task_terminal_state'
-            order by terminal.sequence_no desc, terminal.ingested_at desc limit 1
-          ) = 'completed'
-        )`,
       ),
     )
-    .orderBy(desc(agentGroundedObservations.createdAt), desc(agentGroundedObservations.id))
-    .limit(1);
-  return row ?? { createdAt: null, id: null };
-}
-
-async function latestMemoryTuple(agentId: string, db: AppDbClient): Promise<ProfileTuple> {
-  const [row] = await db
+    .orderBy(asc(agentGroundedObservations.profileGeneration));
+  const memoryRows = await db
     .select({
-      createdAt: sql<string>`${agentMemoryVersions.createdAt}::text`,
-      id: agentMemoryVersions.id,
+      root: agentMemories,
+      version: agentMemoryVersions,
+      createdAtText: sql<string>`to_char(${agentMemoryVersions.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
     })
     .from(agentMemoryVersions)
     .innerJoin(agentMemories, eq(agentMemories.id, agentMemoryVersions.memoryId))
@@ -354,11 +517,67 @@ async function latestMemoryTuple(agentId: string, db: AppDbClient): Promise<Prof
       and(
         eq(agentMemories.agentId, agentId),
         inArray(agentMemoryVersions.source, [...ALLOWED_MEMORY_SOURCES]),
+        sql`${agentMemoryVersions.profileGeneration} > ${afterGeneration}`,
+        sql`${agentMemoryVersions.profileGeneration} <= ${throughGeneration}`,
       ),
     )
-    .orderBy(desc(agentMemoryVersions.createdAt), desc(agentMemoryVersions.id))
-    .limit(1);
-  return row ?? { createdAt: null, id: null };
+    .orderBy(asc(agentMemoryVersions.profileGeneration));
+
+  const items = [
+    ...observationRows.map((row) => ({
+      lane: "observation" as const,
+      generation: Number(row.profileGeneration),
+      row,
+    })),
+    ...memoryRows.map((row) => ({
+      lane: "memory" as const,
+      generation: Number(row.version.profileGeneration),
+      row,
+    })),
+  ].sort((a, b) => a.generation - b.generation);
+  const selected: typeof items = [];
+  let chars = 0;
+  for (const item of items) {
+    const cost =
+      (item.lane === "observation" ? item.row.content : item.row.version.content).length + 500;
+    if (selected.length > 0 && chars + cost > PROFILE_EVIDENCE_PAGE_CHARS) break;
+    selected.push(item);
+    chars += cost;
+  }
+  const observations = selected.flatMap((item) =>
+    item.lane === "observation" ? [{ ...item.row, profileGeneration: item.generation }] : [],
+  );
+  const memoryVersions = selected.flatMap((item) =>
+    item.lane === "memory"
+      ? [{ ...mapMemoryInput(item.row), createdAtText: item.row.createdAtText }]
+      : [],
+  );
+  const processedGeneration =
+    selected.length < items.length
+      ? (selected.at(-1)?.generation ?? afterGeneration)
+      : throughGeneration;
+  const observationLast = observations.at(-1);
+  const memoryLast = memoryVersions.at(-1);
+  return {
+    observations,
+    memoryVersions,
+    processedGeneration,
+    hasMoreEvidence: selected.length < items.length,
+    upperBounds: {
+      observation: observationLast
+        ? {
+            createdAt: observationLast.createdAtText ?? exactTimestamp(observationLast.createdAt),
+            id: observationLast.id,
+          }
+        : { createdAt: null, id: null },
+      memoryVersion: memoryLast
+        ? {
+            createdAt: memoryLast.createdAtText ?? exactTimestamp(memoryLast.createdAt),
+            id: memoryLast.memoryVersionId,
+          }
+        : { createdAt: null, id: null },
+    },
+  };
 }
 
 async function listActiveProfileMemories(
@@ -422,7 +641,10 @@ async function listCurrentSourceStates(
       .leftJoin(agentChatSessions, eq(agentChatSessions.id, agentTraceEvents.sessionId))
       .where(and(eq(agentTraceEvents.agentId, agentId), inArray(agentTraceEvents.id, traceIds)));
     for (const row of rows) {
-      const directUser = row.event.actor === "user" && row.event.trustClass === "user_assertion";
+      const directUser =
+        row.event.actor === "user" &&
+        row.event.trustClass === "user_assertion" &&
+        row.event.payload.projectionContaminated !== true;
       const explicit = row.event.eventType === "explicit_memory_write";
       const liveSession =
         row.event.sessionId === null ||
@@ -494,6 +716,7 @@ export type CommitProfileVersionInput = {
   promptHash: string;
   policyVersion: string;
   upperBounds?: ProfileWatermarks;
+  processedGeneration?: number;
   receipt?: { synthesisKey: string; synthesizerId: string; lowerBounds: ProfileWatermarks };
 };
 
@@ -503,6 +726,21 @@ export async function commitProfileVersion(
 ): Promise<ProfileSynthesisResult> {
   if (!db) return getDb().transaction((tx) => commitProfileVersion(input, tx));
   validateManifestAndSources(input.facts, input.sources);
+  assertMandatoryFactsRenderable(input.facts, getProfileMaxChars(), getProfileTokenBudget());
+  const [root] = await db
+    .select()
+    .from(agentProfiles)
+    .where(eq(agentProfiles.agentId, input.agentId))
+    .for("update");
+  if (
+    !root ||
+    root.currentVersionId !== input.expectedVersionId ||
+    root.dirtyGeneration !== input.expectedDirtyGeneration
+  ) {
+    throw new ProfileGenerationConflictError();
+  }
+  // Revalidate only after the profile-root lock. Source invalidators take this
+  // same lock before mutation, preventing a stale source from becoming current.
   const tombstones = await listActiveTombstones(input.agentId, db);
   const validation = validateProfileCandidate({
     body: input.body,
@@ -517,18 +755,6 @@ export async function commitProfileVersion(
     );
   }
   await validateSourceOwnership(input.agentId, input.sources, db);
-  const [root] = await db
-    .select()
-    .from(agentProfiles)
-    .where(eq(agentProfiles.agentId, input.agentId))
-    .for("update");
-  if (
-    !root ||
-    root.currentVersionId !== input.expectedVersionId ||
-    root.dirtyGeneration !== input.expectedDirtyGeneration
-  ) {
-    throw new ProfileGenerationConflictError();
-  }
   if (input.receipt) {
     const [existing] = await db
       .select({
@@ -601,7 +827,7 @@ export async function commitProfileVersion(
   };
   if (input.receipt && input.upperBounds) {
     Object.assign(rootSet, watermarkUpdate(input.upperBounds), {
-      synthesizedGeneration: input.expectedDirtyGeneration,
+      synthesizedGeneration: input.processedGeneration ?? input.expectedDirtyGeneration,
       lastSynthesisAttemptAt: now,
       lastSynthesizedAt: now,
       lastSynthesisError: null,
@@ -629,6 +855,7 @@ export async function commitProfileNoop(
     upperBounds: ProfileWatermarks;
     synthesisKey: string;
     synthesizerId: string;
+    processedGeneration?: number;
   },
   db?: AppDbClient,
 ): Promise<ProfileSynthesisResult> {
@@ -659,7 +886,7 @@ export async function commitProfileNoop(
     .update(agentProfiles)
     .set({
       ...watermarkUpdate(input.upperBounds),
-      synthesizedGeneration: input.expectedDirtyGeneration,
+      synthesizedGeneration: input.processedGeneration ?? input.expectedDirtyGeneration,
       lastSynthesisAttemptAt: now,
       lastSynthesizedAt: now,
       lastSynthesisError: null,
@@ -707,6 +934,7 @@ export async function getSynthesisReceipt(
 export async function recordSynthesisFailure(
   agentId: string,
   error: unknown,
+  expected?: { versionId: string | null; dirtyGeneration: number },
   db: AppDbClient = getDb(),
 ): Promise<void> {
   await ensureProfileRoot(agentId, db);
@@ -717,7 +945,19 @@ export async function recordSynthesisFailure(
       lastSynthesisError: String(error instanceof Error ? error.message : error).slice(0, 2000),
       updatedAt: sql`now()`,
     })
-    .where(eq(agentProfiles.agentId, agentId));
+    .where(
+      and(
+        eq(agentProfiles.agentId, agentId),
+        ...(expected
+          ? [
+              expected.versionId === null
+                ? isNull(agentProfiles.currentVersionId)
+                : eq(agentProfiles.currentVersionId, expected.versionId),
+              eq(agentProfiles.dirtyGeneration, expected.dirtyGeneration),
+            ]
+          : []),
+      ),
+    );
 }
 
 export async function applyDirectiveOverlay(
@@ -802,6 +1042,7 @@ async function validateSourceOwnership(
           eq(agentTraceEvents.agentId, agentId),
           eq(agentTraceEvents.actor, "user"),
           eq(agentTraceEvents.trustClass, "user_assertion"),
+          sql`coalesce(${agentTraceEvents.payload}->>'projectionContaminated', 'false') <> 'true'`,
           inArray(agentTraceEvents.id, traceIds),
           or(
             eq(agentTraceEvents.eventType, "explicit_memory_write"),
@@ -939,8 +1180,14 @@ function mapMemoryInput(row: {
       !row.root.injectionBlocked &&
       (row.version.expiresAt === null || row.version.expiresAt > now),
     createdAt: row.version.createdAt,
+    createdAtText: exactTimestamp(row.version.createdAt),
+    profileGeneration: row.version.profileGeneration,
     expiresAt: row.version.expiresAt,
   };
+}
+
+function exactTimestamp(value: Date): string {
+  return value.toISOString().replace(/\.\d{3}Z$/u, (fraction) => `${fraction.slice(0, -1)}000Z`);
 }
 
 async function readProfileWatermarks(agentId: string, db: AppDbClient): Promise<ProfileWatermarks> {

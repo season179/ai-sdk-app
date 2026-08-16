@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildExtractionPrompt,
   constrainExtractionOutput,
+  operationSchemaDefinition,
+  PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS,
   PROFILE_EXTRACTION_PROMPT_HASH,
 } from "@/lib/profile/extract";
 import type { ProfileSynthesisSnapshot } from "@/lib/profile/types";
@@ -48,6 +50,14 @@ function snapshot(): ProfileSynthesisSnapshot {
 }
 
 describe("profile extraction boundary", () => {
+  it("bounds provider output and every model-controlled string", () => {
+    expect(PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS).toBeLessThanOrEqual(600);
+    const item = operationSchemaDefinition.properties.operations.items;
+    expect(item.properties.targetFactKey.maxLength).toBe(200);
+    expect(item.properties.sentence.maxLength).toBe(2000);
+    expect(item.properties.observationIds.items.maxLength).toBe(64);
+    expect(item.properties.memoryVersionIds.items.maxLength).toBe(64);
+  });
   it("removes invented source IDs and unsafe sentences", () => {
     const result = constrainExtractionOutput(
       {

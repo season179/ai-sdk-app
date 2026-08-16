@@ -78,6 +78,13 @@
       "when": 1786844767687,
       "tag": "0010_profile_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786851435321,
+      "tag": "0011_profile_hardening",
+      "breakpoints": true
     }
   ]
 }

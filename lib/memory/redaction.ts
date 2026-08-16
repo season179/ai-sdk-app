@@ -32,16 +32,36 @@ const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const PROVIDER_TOKEN =
   /\b(?:sk-(?:proj-)?|sk-or-v1-|ghp_|github_pat_|xox[baprs]-|AIza)[A-Za-z0-9_\-.]{12,}/g;
 const CREDENTIAL_ASSIGNMENT =
-  /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd)\s*[:=]\s*["']?[^\s,"'}]{6,}/gi;
+  /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd)\s*[:=]\s*["']?[^\s,"'}]{4,}/gi;
+const NATURAL_LANGUAGE_CREDENTIAL =
+  /\b(?:my\s+)?(?:password|passcode|pin|otp|one[-\s]?time\s+(?:password|code)|verification\s+code|recovery\s+(?:code|key)|backup\s+code|private\s+key|secret\s+key|api\s+key|access\s+token)\s+(?:is|was|equals?|reads?)\s+["']?[^\s,"'}]{3,}/gi;
+const HIGH_RISK_IDENTIFIER =
+  /\b(?:social\s+security\s+number|ssn|credit\s+card(?:\s+number)?|seed\s+phrase)\s*(?:is|:|=)\s*["']?[A-Za-z0-9][A-Za-z0-9\s-]{5,}/gi;
 const INJECTION_PATTERNS = [
-  /ignore\s+(?:all\s+)?(?:previous|prior|system)\s+instructions/i,
-  /reveal\s+(?:the\s+)?(?:system prompt|hidden instructions|secrets?)/i,
-  /(?:send|exfiltrate|upload)\s+.{0,40}(?:credentials?|tokens?|secrets?)/i,
-  /override\s+(?:safety|permissions?|policy)/i,
+  /(?:ignore|disregard|forget|bypass|do\s+not\s+follow)\s+(?:all\s+)?(?:previous|prior|earlier|system|developer|safety)?\s*(?:instructions|directions|rules|policy|prompt)/i,
+  /reveal\s+(?:the\s+)?(?:system prompt|developer message|hidden instructions|secrets?)/i,
+  /(?:send|exfiltrate|upload|leak)\s+.{0,60}(?:credentials?|tokens?|secrets?|private data)/i,
+  /(?:override|disable|change|grant|elevate)\s+.{0,30}(?:safety|permissions?|policy|authorization|access)/i,
+  /(?:always|must|immediately)\s+(?:call|invoke|execute|run|use)\s+[a-z][a-z0-9_.-]{2,}/i,
+  /(?:call|invoke|execute|run|use)\s+(?:the\s+)?(?:tool|function)\s+[a-z][a-z0-9_.-]{2,}/i,
+  /(?:you\s+are\s+now|act\s+as|treat\s+(?:this|me)\s+as)\s+(?:a\s+)?(?:system|developer|administrator|root)/i,
+  /(?:system|developer|assistant)\s*(?:message|instructions?)\s*:/i,
+  /(?:^|\n)\s*```(?:system|developer|assistant|tool|prompt)?/i,
+  /<\/?(?:system|developer|assistant|tool|user_profile|memory_context|profile_text|available_skills)\b/i,
+  /(?:begin|end)\s+(?:system|developer|hidden)\s+(?:prompt|instructions|message)/i,
+];
+
+const SECRET_PATTERNS = [
+  PRIVATE_KEY,
+  BEARER,
+  PROVIDER_TOKEN,
+  CREDENTIAL_ASSIGNMENT,
+  NATURAL_LANGUAGE_CREDENTIAL,
+  HIGH_RISK_IDENTIFIER,
 ];
 
 export function detectSecret(value: string): boolean {
-  return [PRIVATE_KEY, BEARER, PROVIDER_TOKEN, CREDENTIAL_ASSIGNMENT].some((pattern) => {
+  return SECRET_PATTERNS.some((pattern) => {
     pattern.lastIndex = 0;
     return pattern.test(value);
   });
@@ -54,7 +74,7 @@ export function detectPromptInjection(value: string): boolean {
 export function redactText(value: string): { text: string; secretDetected: boolean } {
   let secretDetected = false;
   let text = value;
-  for (const pattern of [PRIVATE_KEY, BEARER, PROVIDER_TOKEN, CREDENTIAL_ASSIGNMENT]) {
+  for (const pattern of SECRET_PATTERNS) {
     pattern.lastIndex = 0;
     text = text.replace(pattern, () => {
       secretDetected = true;

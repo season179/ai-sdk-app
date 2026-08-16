@@ -96,6 +96,42 @@ describe("profile reconciliation", () => {
     expect(result.sources[0].traceEventId).toBe("00000000-0000-0000-0000-000000000014");
   });
 
+  it("uses exact timestamp+id precedence rather than model output order", () => {
+    const older = {
+      ...snapshot().observationDeltas[0],
+      id: "00000000-0000-0000-0000-000000000020",
+      traceEventId: "00000000-0000-0000-0000-000000000030",
+      createdAtText: "2026-01-02T00:00:00.123455Z",
+    };
+    const newer = {
+      ...older,
+      id: "00000000-0000-0000-0000-000000000021",
+      traceEventId: "00000000-0000-0000-0000-000000000031",
+      createdAtText: "2026-01-02T00:00:00.123456Z",
+    };
+    const result = reconcileProfile(snapshot({ observationDeltas: [older, newer] }), {
+      operations: [
+        {
+          operation: "update",
+          targetFactKey: "editor",
+          sentence: "The user prefers the newer editor.",
+          category: "preferences_constraints",
+          observationIds: [newer.id],
+          memoryVersionIds: [],
+        },
+        {
+          operation: "update",
+          targetFactKey: "editor",
+          sentence: "The user prefers the older editor.",
+          category: "preferences_constraints",
+          observationIds: [older.id],
+          memoryVersionIds: [],
+        },
+      ],
+    });
+    expect(result.facts[0].sentence).toBe("The user prefers the newer editor.");
+  });
+
   it("preserves user/protected facts against implicit update and invalidation", () => {
     const protectedFact = { ...fact, authority: "user" as const, protected: true };
     const base = snapshot();

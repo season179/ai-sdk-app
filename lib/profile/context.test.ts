@@ -15,7 +15,9 @@ describe("renderUserProfileBlock", () => {
     expect(block).toBe(
       [
         '<user_profile trust="untrusted-read-projection" version="00000000-0000-4000-8000-000000000123">',
-        "  <profile_text>Uses &lt;xml&gt; &amp; &quot;quotes&quot;.&#10;Never emit &lt;/user_profile&gt; or &apos;raw&apos;.</profile_text>",
+        '  <profile_section category="identity_context" label="Identity and context">',
+        "    Uses &lt;xml&gt; &amp; &quot;quotes&quot;.&#10;Never emit &lt;/user_profile&gt; or &apos;raw&apos;.",
+        "  </profile_section>",
         "</user_profile>",
       ].join("\n"),
     );

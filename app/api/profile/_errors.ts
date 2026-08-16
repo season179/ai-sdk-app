@@ -1,3 +1,4 @@
+import { ProfileMandatoryFactsOverBudgetError } from "@/lib/profile/render";
 import {
   ProfileGenerationConflictError,
   ProfileSourceValidationError,
@@ -30,6 +31,12 @@ export function profileErrorResponse(error: unknown): Response {
   }
   if (error instanceof ProfileServiceDisabledError) {
     return Response.json({ error: error.message }, { status: 409 });
+  }
+  if (error instanceof ProfileMandatoryFactsOverBudgetError) {
+    return Response.json(
+      { error: error.message, issues: ["mandatory_facts_over_render_budget"] },
+      { status: 400 },
+    );
   }
   if (error instanceof ProfileSourceValidationError) {
     return Response.json({ error: "Profile text failed validation." }, { status: 400 });

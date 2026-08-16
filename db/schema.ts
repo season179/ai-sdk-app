@@ -888,6 +888,10 @@ export const agentMemoryVersions = pgTable(
     authority: text("authority")
       .$type<"user" | "tool" | "reviewed" | "consolidated" | "legacy_import">()
       .notNull(),
+    // Monotonic profile evidence sequence assigned while holding agent_profiles.
+    // Unlike created_at, this becomes visible in commit/lock order and is safe
+    // for incremental synthesis checkpoints.
+    profileGeneration: integer("profile_generation"),
     sensitivityClass: text("sensitivity_class")
       .$type<SensitivityClass>()
       .notNull()
@@ -926,6 +930,10 @@ export const agentMemoryVersions = pgTable(
       "agent_memory_versions_sensitivity_check",
       sql`${t.sensitivityClass} in ('normal', 'sensitive', 'restricted')`,
     ),
+    check(
+      "agent_memory_versions_profile_generation_check",
+      sql`${t.profileGeneration} is null or ${t.profileGeneration} > 0`,
+    ),
     unique("agent_memory_versions_memory_version_uniq").on(t.memoryId, t.versionNo),
     uniqueIndex("agent_memory_versions_supersedes_uniq")
       .on(t.supersedesMemoryVersionId)
@@ -935,6 +943,9 @@ export const agentMemoryVersions = pgTable(
     index("agent_memory_versions_valid_during_idx").using("gist", t.validDuring),
     index("agent_memory_versions_recorded_during_idx").using("gist", t.recordedDuring),
     index("agent_memory_versions_memory_version_idx").on(t.memoryId, t.versionNo.desc()),
+    index("agent_memory_versions_profile_generation_idx")
+      .on(t.profileGeneration)
+      .where(sql`${t.profileGeneration} is not null`),
     index("agent_memory_versions_expires_idx")
       .on(t.expiresAt)
       .where(sql`${t.expiresAt} is not null`),
@@ -1085,6 +1096,8 @@ export const agentProfileFactTombstones = pgTable(
     factKey: text("fact_key").notNull(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
     deletedBy: text("deleted_by").notNull(),
+    // Stable semantic identity shared by explicit, UI, and synthesized lanes.
+    claimHash: text("claim_hash").notNull(),
     reason: text("reason"),
     explicitTraceEventId: uuid("explicit_trace_event_id")
       .notNull()
@@ -1103,10 +1116,14 @@ export const agentProfileFactTombstones = pgTable(
       "agent_profile_fact_tombstones_fact_key_check",
       sql`char_length(${t.factKey}) between 1 and 200`,
     ),
+    check("agent_profile_fact_tombstones_claim_hash_check", sql`char_length(${t.claimHash}) = 64`),
     check(
       "agent_profile_fact_tombstones_reason_check",
       sql`${t.reason} is null or char_length(${t.reason}) <= 2000`,
     ),
+    index("agent_profile_fact_tombstones_claim_active_idx")
+      .on(t.agentId, t.claimHash)
+      .where(sql`${t.retiredAt} is null`),
     index("agent_profile_fact_tombstones_active_idx")
       .on(t.agentId, t.deletedAt)
       .where(sql`${t.retiredAt} is null`),
@@ -1263,6 +1280,9 @@ export const agentGroundedObservations = pgTable(
       .references(() => agentTraceEvents.id),
     content: text("content").notNull(),
     contentHash: text("content_hash").notNull(),
+    // Assigned only when this evidence becomes eligible (completed terminal or
+    // committed user-memory mutation), under the profile-root row lock.
+    profileGeneration: integer("profile_generation"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
@@ -1274,6 +1294,10 @@ export const agentGroundedObservations = pgTable(
     check(
       "agent_grounded_observations_content_check",
       sql`char_length(${t.content}) between 1 and 2000`,
+    ),
+    check(
+      "agent_grounded_observations_profile_generation_check",
+      sql`${t.profileGeneration} is null or ${t.profileGeneration} > 0`,
     ),
     // Source shape is enforced by a CHECK (not convention): a chat_user row must
     // carry session_id + source_message_id and no source_memory_id; a memory_user
@@ -1293,6 +1317,9 @@ export const agentGroundedObservations = pgTable(
       .on(t.agentId, t.createdAt)
       .where(sql`${t.deletedAt} is null`),
     index("agent_grounded_observations_trace_event_idx").on(t.traceEventId),
+    index("agent_grounded_observations_profile_generation_idx")
+      .on(t.agentId, t.profileGeneration)
+      .where(sql`${t.profileGeneration} is not null and ${t.deletedAt} is null`),
   ],
 );
 

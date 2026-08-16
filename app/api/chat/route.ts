@@ -36,12 +36,17 @@ import { classifyChatStreamEnd } from "@/lib/memory/stream-status";
 import { appendTraceEventsFailOpen } from "@/lib/memory/trace";
 import { mockToolCount, mockTools } from "@/lib/mock-tools";
 import { resolveChatModel } from "@/lib/models/openrouter";
-import { isProfileEnabled, isProfileExplicitWriteEnabled } from "@/lib/profile/config";
+import {
+  isAutomaticProfileSynthesisEnabled,
+  isProfileEnabled,
+  isProfileExplicitWriteEnabled,
+} from "@/lib/profile/config";
 import { PROFILE_REFERENCE_POLICY, renderUserProfileBlock } from "@/lib/profile/context";
-import { markProfileDirtyAndEnqueue } from "@/lib/profile/dirty";
+import { enqueueDirtyProfile } from "@/lib/profile/dirty";
 import {
   applyExplicitProfileIntent,
   type ExplicitProfileApplyResult,
+  type ExplicitProfileIntent,
   parseExplicitProfileIntent,
 } from "@/lib/profile/explicit";
 import {
@@ -371,6 +376,7 @@ export async function POST(req: Request) {
       : undefined;
     const rawUserText = messageText(persistedTarget);
     let preAppliedExplicitResult: ExplicitProfileApplyResult | null = null;
+    let preAppliedExplicitIntent: ExplicitProfileIntent | null = null;
     if (
       trigger === "submit-message" &&
       sessionId &&
@@ -379,6 +385,7 @@ export async function POST(req: Request) {
     ) {
       const explicitIntent = parseExplicitProfileIntent(rawUserText);
       if (explicitIntent) {
+        preAppliedExplicitIntent = explicitIntent;
         // This authoritative write runs after the clean message commit and before
         // profile projection, so this same request can bind the new overlay head.
         // Failure is pre-stream and the clean message remains retryable/idempotent.
@@ -600,6 +607,7 @@ export async function POST(req: Request) {
         messageId: run.targetMessageId,
         rawUserText,
         preAppliedExplicitResult,
+        preAppliedExplicitIntent,
       }),
     };
     // Dynamic run state is either materialized in api_parts or referenced by
@@ -704,6 +712,10 @@ export async function POST(req: Request) {
             traceCapture: {
               events: [buildAssistantMessageEvent(traceContext, responseMessage), terminalEvent],
             },
+            completeProfileTraceId:
+              run.userCaptured && isAutomaticProfileSynthesisEnabled()
+                ? traceContext.traceId
+                : undefined,
           });
         } catch (error) {
           console.error("Persisting completed chat turn failed", error);
@@ -730,7 +742,7 @@ export async function POST(req: Request) {
           console.error("Enqueuing self-improvement review failed", error);
         });
         if (run.userCaptured) {
-          void markProfileDirtyAndEnqueue(DEFAULT_AGENT_ID, {
+          void enqueueDirtyProfile(DEFAULT_AGENT_ID, {
             trigger: "turn",
             automatic: true,
           }).catch((error) => {
