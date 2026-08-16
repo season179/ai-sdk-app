@@ -71,6 +71,13 @@
       "when": 1786768843746,
       "tag": "0009_bitter_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786844767687,
+      "tag": "0010_profile_foundation",
+      "breakpoints": true
     }
   ]
 }

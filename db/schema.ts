@@ -17,8 +17,17 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+import type { ProfileFactV1 } from "@/lib/profile/types";
 import type { ScheduledTaskPayload } from "@/lib/scheduler/execute";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
+
+export type {
+  ProfileFactAuthority,
+  ProfileFactCategory,
+  ProfileFactV1,
+  ProfileVersionAuthority,
+  ProfileVersionTrigger,
+} from "@/lib/profile/types";
 
 // Column-level unions mirror the text+CHECK enums on the live tables; the
 // CHECK constraints below are the database-side backstop for the same sets.
@@ -360,6 +369,11 @@ export const agentChatMessages = pgTable(
     // Exact model-facing projection for replay. UI/evidence paths read `parts`;
     // run history reads this first-writer-wins sidecar when present.
     apiParts: jsonb("api_parts").$type<UIMessage<ChatMessageMetadata>["parts"]>(),
+    // Immutable profile version bound alongside api_parts by the first writer.
+    // A null value on a materialized legacy sidecar permanently means no profile.
+    profileVersionId: uuid("profile_version_id").references(
+      (): AnyPgColumn => agentProfileVersions.id,
+    ),
     metadata: jsonb("metadata").$type<ChatMessageMetadata>(),
     // Ordering only: equals the array index at save time. Deliberately NOT
     // unique — saveChatSession rewrites the whole transcript (delete-all then
@@ -374,6 +388,10 @@ export const agentChatMessages = pgTable(
     primaryKey({ columns: [t.sessionId, t.id] }),
     check("agent_chat_messages_role_check", sql`${t.role} in ('user', 'assistant', 'system')`),
     index("agent_chat_messages_session_ordinal_idx").on(t.sessionId, t.ordinal),
+    index("agent_chat_messages_profile_version_idx")
+      .on(t.profileVersionId)
+      .where(sql`${t.profileVersionId} is not null`),
+    index("agent_chat_messages_time_search_idx").on(t.sessionId, t.createdAt, t.id),
   ],
 );
 
@@ -942,6 +960,178 @@ export const agentMemoryVersionTraceEvents = pgTable(
       sql`${t.sourceRole} in ('primary', 'corroborating', 'context')`,
     ),
     index("agent_memory_version_trace_events_event_idx").on(t.eventId),
+  ],
+);
+
+// ============================================================================
+// V2 running profile. Profile facts are an immutable, agent-scoped read
+// projection; curated agent_memories remain the durable memory authority.
+// ============================================================================
+
+export const agentProfiles = pgTable(
+  "agent_profiles",
+  {
+    agentId: uuid("agent_id").primaryKey().default("00000000-0000-0000-0000-000000000001"),
+    currentVersionId: uuid("current_version_id").references(
+      (): AnyPgColumn => agentProfileVersions.id,
+    ),
+    lastObservationCreatedAt: timestamp("last_observation_created_at", { withTimezone: true }),
+    lastObservationId: uuid("last_observation_id"),
+    lastMemoryVersionCreatedAt: timestamp("last_memory_version_created_at", {
+      withTimezone: true,
+    }),
+    lastMemoryVersionId: uuid("last_memory_version_id"),
+    dirtyGeneration: integer("dirty_generation").notNull().default(0),
+    synthesizedGeneration: integer("synthesized_generation").notNull().default(0),
+    lastSynthesisAttemptAt: timestamp("last_synthesis_attempt_at", { withTimezone: true }),
+    lastSynthesizedAt: timestamp("last_synthesized_at", { withTimezone: true }),
+    lastSynthesisError: text("last_synthesis_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_profiles_generations_check",
+      sql`${t.dirtyGeneration} >= 0 and ${t.synthesizedGeneration} >= 0 and ${t.synthesizedGeneration} <= ${t.dirtyGeneration}`,
+    ),
+    check(
+      "agent_profiles_error_check",
+      sql`${t.lastSynthesisError} is null or char_length(${t.lastSynthesisError}) <= 2000`,
+    ),
+  ],
+);
+
+export const agentProfileVersions = pgTable(
+  "agent_profile_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id").notNull(),
+    versionNo: integer("version_no").notNull(),
+    body: text("body").notNull(),
+    facts: jsonb("facts").$type<ProfileFactV1[]>().notNull().default([]),
+    trigger: text("trigger").$type<"scheduled" | "explicit" | "manual_ui">().notNull(),
+    authority: text("authority").$type<"synthesized" | "user">().notNull(),
+    charCount: integer("char_count").generatedAlwaysAs(sql`char_length("body")`),
+    tokenCount: integer("token_count").notNull(),
+    recordedDuring: tstzrange("recorded_during").notNull(),
+    modelId: text("model_id"),
+    promptHash: text("prompt_hash").notNull(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    policyVersion: text("policy_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    supersedesProfileVersionId: uuid("supersedes_profile_version_id").references(
+      (): AnyPgColumn => agentProfileVersions.id,
+    ),
+  },
+  (t) => [
+    check("agent_profile_versions_version_check", sql`${t.versionNo} >= 1`),
+    check("agent_profile_versions_body_check", sql`char_length(${t.body}) <= 5000`),
+    check("agent_profile_versions_facts_check", sql`jsonb_typeof(${t.facts}) = 'array'`),
+    check(
+      "agent_profile_versions_trigger_check",
+      sql`${t.trigger} in ('scheduled', 'explicit', 'manual_ui')`,
+    ),
+    check("agent_profile_versions_authority_check", sql`${t.authority} in ('synthesized', 'user')`),
+    check("agent_profile_versions_token_count_check", sql`${t.tokenCount} >= 0`),
+    unique("agent_profile_versions_agent_version_uniq").on(t.agentId, t.versionNo),
+    uniqueIndex("agent_profile_versions_supersedes_uniq")
+      .on(t.supersedesProfileVersionId)
+      .where(sql`${t.supersedesProfileVersionId} is not null`),
+    index("agent_profile_versions_recorded_during_idx").using("gist", t.recordedDuring),
+    index("agent_profile_versions_agent_version_idx").on(t.agentId, t.versionNo.desc()),
+  ],
+);
+
+export const agentProfileVersionSources = pgTable(
+  "agent_profile_version_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    profileVersionId: uuid("profile_version_id")
+      .notNull()
+      .references(() => agentProfileVersions.id),
+    factKey: text("fact_key").notNull(),
+    traceEventId: uuid("trace_event_id").references(() => agentTraceEvents.id),
+    memoryVersionId: uuid("memory_version_id").references(() => agentMemoryVersions.id),
+    sourceRole: text("source_role").$type<"primary" | "corroborating" | "context">().notNull(),
+  },
+  (t) => [
+    check(
+      "agent_profile_version_sources_shape_check",
+      sql`(${t.traceEventId} is not null and ${t.memoryVersionId} is null) or (${t.traceEventId} is null and ${t.memoryVersionId} is not null)`,
+    ),
+    check(
+      "agent_profile_version_sources_fact_key_check",
+      sql`char_length(${t.factKey}) between 1 and 200`,
+    ),
+    check(
+      "agent_profile_version_sources_role_check",
+      sql`${t.sourceRole} in ('primary', 'corroborating', 'context')`,
+    ),
+    uniqueIndex("agent_profile_version_sources_trace_uniq")
+      .on(t.profileVersionId, t.factKey, t.traceEventId)
+      .where(sql`${t.traceEventId} is not null`),
+    uniqueIndex("agent_profile_version_sources_memory_uniq")
+      .on(t.profileVersionId, t.factKey, t.memoryVersionId)
+      .where(sql`${t.memoryVersionId} is not null`),
+    index("agent_profile_version_sources_trace_event_idx").on(t.traceEventId),
+    index("agent_profile_version_sources_memory_version_idx").on(t.memoryVersionId),
+    index("agent_profile_version_sources_fact_idx").on(t.profileVersionId, t.factKey),
+  ],
+);
+
+export const agentProfileFactTombstones = pgTable(
+  "agent_profile_fact_tombstones",
+  {
+    agentId: uuid("agent_id").notNull(),
+    factKey: text("fact_key").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedBy: text("deleted_by").notNull(),
+    reason: text("reason"),
+    explicitTraceEventId: uuid("explicit_trace_event_id")
+      .notNull()
+      .references(() => agentTraceEvents.id),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredBy: text("retired_by"),
+    retiredTraceEventId: uuid("retired_trace_event_id").references(() => agentTraceEvents.id),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.factKey] }),
+    check(
+      "agent_profile_fact_tombstones_retired_shape_check",
+      sql`(${t.retiredAt} is null and ${t.retiredBy} is null and ${t.retiredTraceEventId} is null) or (${t.retiredAt} is not null and ${t.retiredBy} is not null and ${t.retiredTraceEventId} is not null)`,
+    ),
+    check(
+      "agent_profile_fact_tombstones_fact_key_check",
+      sql`char_length(${t.factKey}) between 1 and 200`,
+    ),
+    check(
+      "agent_profile_fact_tombstones_reason_check",
+      sql`${t.reason} is null or char_length(${t.reason}) <= 2000`,
+    ),
+    index("agent_profile_fact_tombstones_active_idx")
+      .on(t.agentId, t.deletedAt)
+      .where(sql`${t.retiredAt} is null`),
+  ],
+);
+
+export const agentProfileSynthesisReceipts = pgTable(
+  "agent_profile_synthesis_receipts",
+  {
+    agentId: uuid("agent_id").notNull(),
+    synthesisKey: text("synthesis_key").notNull(),
+    synthesizerId: text("synthesizer_id").notNull(),
+    profileVersionId: uuid("profile_version_id").references(() => agentProfileVersions.id),
+    inputLowerBounds: jsonb("input_lower_bounds").$type<Record<string, unknown>>().notNull(),
+    inputUpperBounds: jsonb("input_upper_bounds").$type<Record<string, unknown>>().notNull(),
+    result: text("result").$type<"created" | "noop">().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.synthesisKey, t.synthesizerId] }),
+    check("agent_profile_synthesis_receipts_result_check", sql`${t.result} in ('created', 'noop')`),
+    check(
+      "agent_profile_synthesis_receipts_version_shape_check",
+      sql`(${t.result} = 'created' and ${t.profileVersionId} is not null) or (${t.result} = 'noop' and ${t.profileVersionId} is null)`,
+    ),
   ],
 );
 
