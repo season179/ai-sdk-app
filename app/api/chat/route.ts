@@ -48,7 +48,10 @@ import {
 import { createSchedulerTools } from "@/lib/scheduler/tool-specs";
 import { isSelfImprovementEnabled } from "@/lib/self-improvement/config";
 import { recordCompletedTurnAndMaybeEnqueueReview } from "@/lib/self-improvement/enqueue";
-import { createMemoryTools } from "@/lib/self-improvement/memory-tools";
+import {
+  createConversationSearchTools,
+  createMemoryTools,
+} from "@/lib/self-improvement/memory-tools";
 import { formatSkillCatalog, getSkillCatalog } from "@/lib/skills/catalog";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import { skillTools } from "@/lib/skills/tool-specs";
@@ -569,7 +572,9 @@ export async function POST(req: Request) {
         ? { ...mockTools, ...createSchedulerTools(schedulerContext) }
         : createToolSearchTools(toolSearchTrace, schedulerContext)),
       ...(skillCatalogBlock ? skillTools : {}),
-      ...(memorySearchEnabled ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId }) : {}),
+      ...(memorySearchEnabled
+        ? createMemoryTools({ agentId: DEFAULT_AGENT_ID, sessionId })
+        : createConversationSearchTools({ agentId: DEFAULT_AGENT_ID, sessionId })),
     };
     // Dynamic run state is either materialized in api_parts or referenced by
     // the target's immutable first-writer-wins profile version id.

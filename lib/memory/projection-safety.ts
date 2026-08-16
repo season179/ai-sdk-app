@@ -23,6 +23,7 @@ const PROJECTION_FENCES = [
 
 export const DERIVATIVE_RETRIEVAL_TOOLS = new Set([
   "memory_search",
+  "conversation_time_search",
   "skill_search",
   "skill_get_content",
 ]);

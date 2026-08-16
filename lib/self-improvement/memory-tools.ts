@@ -1,11 +1,17 @@
 import type { ToolSet } from "ai";
 import type { MemoryKind } from "@/db/schema";
+import {
+  type ConversationSearchInput,
+  ConversationSearchInputError,
+  searchConversationsByTime,
+} from "@/lib/chat/conversation-search";
 import { searchRankedRecall } from "@/lib/memory/recall";
 import {
   buildSpecToolSet,
   type RealisticToolInput,
   type RealisticToolSpec,
 } from "@/lib/mock-tools";
+import { isConversationSearchEnabled } from "@/lib/profile/config";
 import { SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE } from "@/lib/self-improvement/errors";
 import { MEMORY_KINDS, parseMemoryKind } from "@/lib/self-improvement/validation";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
@@ -56,10 +62,53 @@ export const memoryToolSpecs: RealisticToolSpec[] = [
     },
     required: ["query"],
   },
+  {
+    name: "conversation_time_search",
+    title: "Search conversations by time",
+    service: "memory",
+    action: "search",
+    description:
+      "Read messages from prior live chat conversations in an exact time interval. Resolve relative dates such as yesterday to ISO-8601 instants before calling. Results are deterministic, chronological, and read-only; this is not fuzzy or semantic search.",
+    properties: {
+      from: {
+        type: "string",
+        format: "date-time",
+        description: "Inclusive ISO-8601 instant with an explicit UTC offset.",
+      },
+      to: {
+        type: "string",
+        format: "date-time",
+        description:
+          "Exclusive ISO-8601 instant with an explicit UTC offset, at most 90 days later.",
+      },
+      order: {
+        type: "string",
+        enum: ["asc", "desc"],
+        description: "Tuple sort direction. Defaults to desc.",
+      },
+      role: {
+        type: "string",
+        enum: ["user", "assistant", "system"],
+        description: "Optional message-role filter.",
+      },
+      limit: {
+        type: "integer",
+        minimum: 1,
+        maximum: 20,
+        description: "Maximum number of messages. Defaults to 5; maximum 20.",
+      },
+      cursor: {
+        type: "string",
+        description: "Opaque keyset cursor returned by the previous call.",
+      },
+    },
+    required: ["from", "to"],
+  },
 ];
 
 type MemoryToolHandler = (input: RealisticToolInput) => Promise<unknown>;
 type RankedSearch = typeof searchRankedRecall;
+type ConversationTimeSearch = typeof searchConversationsByTime;
 
 type MemoryToolContext = { agentId?: string; sessionId?: string | null };
 
@@ -116,18 +165,48 @@ async function executeMemorySearch(
   };
 }
 
+async function executeConversationTimeSearch(
+  input: RealisticToolInput,
+  search: ConversationTimeSearch,
+  context: MemoryToolContext,
+) {
+  const searchInput: ConversationSearchInput = {
+    from: input.from as string,
+    to: input.to as string,
+    order: input.order as ConversationSearchInput["order"],
+    role: input.role as ConversationSearchInput["role"],
+    limit: input.limit as number | undefined,
+    cursor: input.cursor as string | undefined,
+  };
+  return search(searchInput, { agentId: context.agentId ?? DEFAULT_AGENT_ID });
+}
+
 export async function executeMemoryTool(
   name: string,
   input: RealisticToolInput,
-  dependencies: { search?: RankedSearch; logger?: typeof console.error } = {},
+  dependencies: {
+    search?: RankedSearch;
+    conversationSearch?: ConversationTimeSearch;
+    logger?: typeof console.error;
+  } = {},
   context: MemoryToolContext = {},
 ) {
-  if (name !== "memory_search") {
-    return { success: false, error: `'${name}' is not a memory tool.` };
-  }
   try {
-    return await executeMemorySearch(input, dependencies.search ?? searchRankedRecall, context);
+    if (name === "memory_search") {
+      return await executeMemorySearch(input, dependencies.search ?? searchRankedRecall, context);
+    }
+    if (name === "conversation_time_search") {
+      return await executeConversationTimeSearch(
+        input,
+        dependencies.conversationSearch ?? searchConversationsByTime,
+        context,
+      );
+    }
+    return { success: false, error: `'${name}' is not a memory tool.` };
   } catch (error) {
+    if (error instanceof ConversationSearchInputError) {
+      return { success: false, error: error.message };
+    }
     (dependencies.logger ?? console.error)(`Memory tool ${name} failed`, error);
     return { success: false, error: SELF_IMPROVEMENT_UNAVAILABLE_MESSAGE };
   }
@@ -135,13 +214,26 @@ export async function executeMemoryTool(
 
 export const memoryToolHandlers: Record<string, MemoryToolHandler> = {
   memory_search: (input) => executeMemoryTool("memory_search", input),
+  conversation_time_search: (input) => executeMemoryTool("conversation_time_search", input),
 };
 
 /** Per-request tools close over server-side scope without exposing it in the schema. */
 export function createMemoryTools(context: MemoryToolContext): ToolSet {
-  return buildSpecToolSet(memoryToolSpecs, (name, input) =>
+  const enabledSpecs = memoryToolSpecs.filter(
+    (spec) => spec.name !== "conversation_time_search" || isConversationSearchEnabled(),
+  );
+  return buildSpecToolSet(enabledSpecs, (name, input) =>
     executeMemoryTool(name, input, {}, context),
   );
+}
+
+/** Independently gated entry point used when MEMORY_SEARCH_ENABLED is off. */
+export function createConversationSearchTools(context: MemoryToolContext): ToolSet {
+  if (!isConversationSearchEnabled()) return {};
+  const spec = memoryToolSpecs.find((candidate) => candidate.name === "conversation_time_search");
+  return spec
+    ? buildSpecToolSet([spec], (name, input) => executeMemoryTool(name, input, {}, context))
+    : {};
 }
 
 /** Default-scope export retained for non-chat callers and tests. */

@@ -2,6 +2,7 @@ import "server-only";
 
 import { isMemorySearchEnabled } from "@/lib/consolidation/config";
 import { mockToolSpecs, type RealisticToolSpec } from "@/lib/mock-tools";
+import { isConversationSearchEnabled } from "@/lib/profile/config";
 import { schedulerToolSpecs } from "@/lib/scheduler/tool-specs";
 import { memoryToolSpecs } from "@/lib/self-improvement/memory-tools";
 import { getSkillCatalog } from "@/lib/skills/catalog";
@@ -26,6 +27,7 @@ export type ToolCatalogSnapshot = {
   mode: ToolExposureMode;
   skillAvailability: SkillAvailability;
   memorySearchEnabled: boolean;
+  conversationSearchEnabled: boolean;
   warning: string | null;
   bridgeToolCount: number;
   tools: CatalogTool[];
@@ -52,6 +54,7 @@ export type BuildToolCatalogSnapshotInput = {
   mode: ToolExposureMode;
   skillAvailability: SkillAvailability;
   memorySearchEnabled: boolean;
+  conversationSearchEnabled: boolean;
   asOf: string;
 };
 
@@ -93,6 +96,7 @@ export function buildToolCatalogSnapshot({
   mode,
   skillAvailability,
   memorySearchEnabled,
+  conversationSearchEnabled,
   asOf,
 }: BuildToolCatalogSnapshotInput): ToolCatalogSnapshot {
   validateClassification(specs, classification);
@@ -110,7 +114,9 @@ export function buildToolCatalogSnapshot({
       ...spec,
       backing: isMocked ? "mocked" : "real",
       direct: isMemory
-        ? memorySearchEnabled
+        ? spec.name === "conversation_time_search"
+          ? conversationSearchEnabled
+          : memorySearchEnabled
         : isSkill
           ? skillAvailability === "enabled"
           : mode === "all",
@@ -124,6 +130,7 @@ export function buildToolCatalogSnapshot({
     mode,
     skillAvailability,
     memorySearchEnabled,
+    conversationSearchEnabled,
     warning:
       skillAvailability === "unknown"
         ? "Enabled skills could not be loaded. Direct access for skill tools is unknown; bridge access is shown normally."
@@ -196,6 +203,7 @@ export async function loadToolCatalogSnapshot(): Promise<ToolCatalogSnapshot> {
     mode: resolveToolExposureMode(process.env.TOOL_EXPOSURE_MODE),
     skillAvailability,
     memorySearchEnabled: isMemorySearchEnabled(),
+    conversationSearchEnabled: isConversationSearchEnabled(),
     asOf: new Date().toISOString(),
   });
 }
