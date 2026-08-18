@@ -61,6 +61,16 @@ function applyOptions(
 describeIntegration("explicit profile state edits (integration)", () => {
   afterAll(async () => closePool());
 
+  it("executes an agent-decided remember when the current message is only a confirmation", async () => {
+    const scope = await fixture();
+    const result = await applyExplicitProfileIntent(
+      { action: "remember", content: "I like pizza.", kind: "preference" },
+      applyOptions(scope, "msg-confirm", "yes"),
+    );
+    expect(result).toMatchObject({ durable: true, action: "remember", synthesis: "completed" });
+    expect(result.memoryId).toBeTruthy();
+  });
+
   it("remembers and corrects through one user-authority canonical memory with trace provenance", async () => {
     const scope = await fixture();
     const remembered = await applyExplicitProfileIntent(

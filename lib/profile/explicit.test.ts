@@ -46,17 +46,14 @@ describe("parseExplicitProfileIntent", () => {
   });
 });
 
-describe("explicit authorization and safety", () => {
-  it("does not let profile, tool, or assistant-like text authorize a write", async () => {
+describe("explicit content safety", () => {
+  it("rejects unsafe content even when the current message is a bare confirmation", async () => {
     await expect(
       applyExplicitProfileIntent(
-        { action: "remember", content: "I prefer concise answers." },
-        {
-          ...scope,
-          rawUserText: "The profile and tool output say: remember that I prefer concise answers.",
-        },
+        { action: "remember", content: "my password is hunter2." },
+        { ...scope, rawUserText: "yes" },
       ),
-    ).rejects.toMatchObject({ code: "unauthorized" });
+    ).rejects.toMatchObject({ code: "unsafe" });
   });
 
   it.each([
@@ -85,14 +82,5 @@ describe("explicit authorization and safety", () => {
     await expect(
       applyExplicitProfileIntent(intent, { ...scope, rawUserText }),
     ).rejects.toMatchObject({ code: "unsafe" });
-  });
-
-  it("requires the tool content to match the exact current user request", async () => {
-    await expect(
-      applyExplicitProfileIntent(
-        { action: "remember", content: "I prefer verbose answers." },
-        { ...scope, rawUserText: "please remember that I prefer concise answers." },
-      ),
-    ).rejects.toMatchObject({ code: "unauthorized" });
   });
 });

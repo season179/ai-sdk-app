@@ -86,6 +86,7 @@ export type ApplyExplicitProfileIntentOptions = {
   agentId: string;
   sessionId: string;
   messageId: string;
+  /** Current user message, kept as call context only; it never gates the write. */
   rawUserText: string;
   inlineDeadlineMs?: number;
   synthesize?: typeof synthesizeProfile;
@@ -163,28 +164,9 @@ export async function applyExplicitProfileIntent(
 ): Promise<ExplicitProfileApplyResult> {
   validateContext(options);
   validateIntentShape(intent);
-  assertSafeStrings([options.rawUserText, ...intentStrings(intent)]);
-  const authorization = parseExplicitAuthorization(options.rawUserText);
-  if (!authorization || authorization.action !== intent.action) {
-    throw new ExplicitProfileIntentError(
-      "The exact current user message does not authorize this memory write.",
-      "unauthorized",
-    );
-  }
-  if (intent.action === "remember" || intent.action === "correct") {
-    assertAuthorizedContent(authorization, intent.content);
-  }
-  if (
-    intent.action !== "remember" &&
-    intent.targetText &&
-    (!("targetText" in authorization) ||
-      normalizeExact(authorization.targetText ?? "") !== normalizeExact(intent.targetText))
-  ) {
-    throw new ExplicitProfileIntentError(
-      "The requested target does not exactly match the current user message.",
-      "unauthorized",
-    );
-  }
+  // The tool is a pure executor: whether the user asked for this write is the
+  // calling agent's decision. Only deterministic content safety gates remain.
+  assertSafeStrings(intentStrings(intent));
 
   const db = getDb();
   const committed = await db.transaction(async (tx) => {
@@ -205,7 +187,6 @@ export async function applyExplicitProfileIntent(
     }
 
     const target = await resolveTarget(intent, options.agentId, current, tx);
-    assertAuthorizedTarget(authorization, target);
     if (intent.action === "correct") {
       return applyCorrect(intent, target, options, current, tx);
     }
@@ -800,27 +781,6 @@ function auditIdentity(
   return { identity, idempotencyKey: `explicit-profile:${identity}` };
 }
 
-function parseExplicitAuthorization(raw: string): ExplicitProfileIntent | null {
-  const text = raw.trim();
-  const remember = /^(?:please\s+)?remember(?:\s+that)\s+(.+)$/isu.exec(text);
-  if (remember) {
-    const content = cleanCommandValue(remember[1]);
-    return content ? { action: "remember", content } : null;
-  }
-  const forget = /^(?:please\s+)?forget\s+(.+)$/isu.exec(text);
-  if (forget) {
-    const targetText = stripOptionalThat(cleanCommandValue(forget[1]));
-    return targetText ? { action: "forget", targetText } : null;
-  }
-  const correct = /^(?:please\s+)?correct\s+(.+?)\s+to\s+(.+)$/isu.exec(text);
-  if (correct) {
-    const targetText = stripOptionalThat(cleanCommandValue(correct[1]));
-    const content = cleanCommandValue(correct[2]);
-    return targetText && content ? { action: "correct", targetText, content } : null;
-  }
-  return null;
-}
-
 function validateContext(options: ApplyExplicitProfileIntentOptions): void {
   if (!isUuid(options.agentId) || !isUuid(options.sessionId) || !options.messageId.trim()) {
     throw new ExplicitProfileIntentError("A persisted agent/session/message scope is required.");
@@ -861,40 +821,6 @@ function assertSafeStrings(values: string[]): void {
         "unsafe",
       );
     }
-  }
-}
-
-function assertAuthorizedContent(authorization: ExplicitProfileIntent, content: string): void {
-  if (
-    !("content" in authorization) ||
-    normalizeExact(authorization.content) !== normalizeExact(content)
-  ) {
-    throw new ExplicitProfileIntentError(
-      "The requested content does not exactly match the current user message.",
-      "unauthorized",
-    );
-  }
-}
-
-function assertAuthorizedTarget(
-  authorization: ExplicitProfileIntent,
-  target: ResolvedTarget,
-): void {
-  if (!("targetText" in authorization) || !authorization.targetText) {
-    throw new ExplicitProfileIntentError(
-      "The current user message does not name a target.",
-      "unauthorized",
-    );
-  }
-  const authorized = normalizeExact(authorization.targetText);
-  if (
-    authorized !== normalizeExact(target.sentence) &&
-    authorized !== normalizeExact(target.memory?.content ?? "")
-  ) {
-    throw new ExplicitProfileIntentError(
-      "The resolved target does not exactly match the current user message.",
-      "unauthorized",
-    );
   }
 }
 
