@@ -336,7 +336,7 @@ export function ChatSurface({
           {renderedMessages.length === 0 ? (
             <ConversationEmptyState title="How can I help?" />
           ) : (
-            renderedMessages.map((message) => {
+            renderedMessages.map((message, messageIndex) => {
               const reasoningText = message.parts
                 .filter((part) => part.type === "reasoning")
                 .map((part) => part.text.trim())
@@ -347,9 +347,13 @@ export function ChatSurface({
                 .map((part) => part.text)
                 .join("\n\n");
               const hasResponseText = responseText.trim().length > 0;
-              const isReasoningStreaming = message.parts.some(
-                (part) => part.type === "reasoning" && part.state === "streaming",
-              );
+              // Individual reasoning parts flip streaming -> done between steps
+              // (e.g. around tool calls), so keying on part state makes the panel
+              // flicker. Keep it open for the whole in-flight turn instead.
+              const isTurnStreaming =
+                status === "streaming" &&
+                message.role === "assistant" &&
+                messageIndex === renderedMessages.length - 1;
               const activatedSkill =
                 message.role === "user" ? message.metadata?.activatedSkill : undefined;
               const isScheduled =
@@ -378,7 +382,7 @@ export function ChatSurface({
                       </div>
                     ) : null}
                     {reasoningText ? (
-                      <MessageReasoning open={isReasoningStreaming && !hasResponseText}>
+                      <MessageReasoning open={isTurnStreaming && !hasResponseText}>
                         {reasoningText}
                       </MessageReasoning>
                     ) : null}
