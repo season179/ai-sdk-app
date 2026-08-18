@@ -23,7 +23,6 @@ function build(
     mode?: ToolExposureMode;
     skillAvailability?: SkillAvailability;
     memorySearchEnabled?: boolean;
-    profileExplicitWriteEnabled?: boolean;
     conversationSearchEnabled?: boolean;
   } = {},
 ) {
@@ -33,7 +32,6 @@ function build(
     mode: options.mode ?? "search",
     skillAvailability: options.skillAvailability ?? "none",
     memorySearchEnabled: options.memorySearchEnabled ?? false,
-    profileExplicitWriteEnabled: options.profileExplicitWriteEnabled ?? false,
     conversationSearchEnabled: options.conversationSearchEnabled ?? false,
     asOf: AS_OF,
   });
@@ -62,9 +60,9 @@ describe("buildToolCatalogSnapshot", () => {
     expect(mockToolSpecNames.size).toBe(200);
     expect(schedulerToolSpecNames.size).toBe(6);
     expect(skillToolSpecNames.size).toBe(2);
-    expect(memoryToolSpecNames.size).toBe(3);
-    expect(realToolSpecNames.size).toBe(11);
-    expect(snapshot.counts).toMatchObject({ total: 211, mocked: 200, real: 11 });
+    expect(memoryToolSpecNames.size).toBe(4);
+    expect(realToolSpecNames.size).toBe(12);
+    expect(snapshot.counts).toMatchObject({ total: 212, mocked: 200, real: 12 });
     expect(
       snapshot.tools.filter((tool) => tool.backing === "mocked").map((tool) => tool.name),
     ).toEqual(expect.arrayContaining([...mockToolSpecNames]));
@@ -77,7 +75,7 @@ describe("buildToolCatalogSnapshot", () => {
     const snapshot = build({ mode: "search" });
 
     expect(snapshot.bridgeToolCount).toBe(3);
-    expect(snapshot.counts).toMatchObject({ direct: 0, bridgeReachable: 208, unavailable: 3 });
+    expect(snapshot.counts).toMatchObject({ direct: 2, bridgeReachable: 208, unavailable: 2 });
     expect(getTool(snapshot, "github_search_repositories")).toMatchObject({
       direct: false,
       bridgeReachable: true,
@@ -92,7 +90,7 @@ describe("buildToolCatalogSnapshot", () => {
     const snapshot = build({ mode: "all" });
 
     expect(snapshot.bridgeToolCount).toBe(0);
-    expect(snapshot.counts).toMatchObject({ direct: 206, bridgeReachable: 0, unavailable: 5 });
+    expect(snapshot.counts).toMatchObject({ direct: 208, bridgeReachable: 0, unavailable: 4 });
     expect(getTool(snapshot, "scheduled_task_create")).toMatchObject({
       direct: true,
       bridgeReachable: false,
@@ -115,8 +113,16 @@ describe("buildToolCatalogSnapshot", () => {
     }
   });
 
-  it("gates both direct-only search tools independently and never bridges them", () => {
+  it("keeps document tools always direct while preserving unrelated read gates", () => {
     for (const mode of ["search", "all"] as const) {
+      expect(getTool(build({ mode }), "memory_read")).toMatchObject({
+        direct: true,
+        bridgeReachable: false,
+      });
+      expect(getTool(build({ mode }), "memory_write")).toMatchObject({
+        direct: true,
+        bridgeReachable: false,
+      });
       expect(getTool(build({ mode, memorySearchEnabled: false }), "memory_search")).toMatchObject({
         direct: false,
         bridgeReachable: false,
@@ -125,12 +131,6 @@ describe("buildToolCatalogSnapshot", () => {
         direct: true,
         bridgeReachable: false,
       });
-      expect(
-        getTool(build({ mode, profileExplicitWriteEnabled: false }), "memory_write"),
-      ).toMatchObject({ direct: false, bridgeReachable: false });
-      expect(
-        getTool(build({ mode, profileExplicitWriteEnabled: true }), "memory_write"),
-      ).toMatchObject({ direct: true, bridgeReachable: false });
       expect(
         getTool(build({ mode, conversationSearchEnabled: false }), "conversation_time_search"),
       ).toMatchObject({ direct: false, bridgeReachable: false });

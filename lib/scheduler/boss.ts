@@ -10,8 +10,6 @@ export const TURN_REVIEW_DLQ_NAME = "agent-turn-review-dlq";
 // user-facing agent-task-run queue and never appears as a user scheduled task.
 export const CONSOLIDATION_QUEUE_NAME = "agent-consolidation";
 export const CONSOLIDATION_DLQ_NAME = "agent-consolidation-dlq";
-export const PROFILE_SYNTHESIS_QUEUE_NAME = "agent-profile-synthesis";
-export const PROFILE_SYNTHESIS_DLQ_NAME = "agent-profile-synthesis-dlq";
 
 /**
  * Every job on the task queue must carry the task id as its singleton key.
@@ -40,11 +38,6 @@ export function turnReviewSendOptions(sessionId: string) {
  * twice concurrently for the same agent.
  */
 export function consolidationSendOptions(agentId: string) {
-  return { singletonKey: agentId };
-}
-
-/** One pending synthesis per agent; dirty generations preserve coalesced work. */
-export function profileSynthesisSendOptions(agentId: string) {
   return { singletonKey: agentId };
 }
 
@@ -85,10 +78,6 @@ async function startAndPrepare(boss: PgBoss) {
   await boss.createQueue(CONSOLIDATION_DLQ_NAME, {
     retentionSeconds: 14 * 24 * 60 * 60,
   });
-  // Profile synthesis retries are receipt/CAS-safe; dead jobs remain inspectable.
-  await boss.createQueue(PROFILE_SYNTHESIS_DLQ_NAME, {
-    retentionSeconds: 14 * 24 * 60 * 60,
-  });
   // Queues created before this option existed keep 'standard' (createQueue
   // is ON CONFLICT DO NOTHING); the worker's catch-up reconciler migrates
   // them once their schedules carry singleton keys.
@@ -118,15 +107,6 @@ async function startAndPrepare(boss: PgBoss) {
     retryDelay: 30,
     retryLimit: 1,
   });
-  await boss.createQueue(PROFILE_SYNTHESIS_QUEUE_NAME, {
-    deadLetter: PROFILE_SYNTHESIS_DLQ_NAME,
-    expireInSeconds: 10 * 60,
-    policy: "stately",
-    retryBackoff: true,
-    retryDelay: 30,
-    retryLimit: 2,
-  });
-
   return boss;
 }
 

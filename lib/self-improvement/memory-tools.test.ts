@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("server-only", () => ({}));
+
 import {
   createConversationSearchTools,
   createMemoryTools,
@@ -7,279 +9,154 @@ import {
   memoryToolSpecs,
 } from "@/lib/self-improvement/memory-tools";
 
-describe("memory tool specs", () => {
-  it("keeps read and explicit-write tools as separate direct-only contracts", () => {
-    expect(memoryToolSpecs).toHaveLength(3);
-    expect(memoryToolSpecs[0].name).toBe("memory_search");
-    expect(memoryToolSpecs[0].required).toEqual(["query"]);
-    expect(memoryToolSpecs[0].description).toContain("<memory_context>");
-    expect(memoryToolSpecs[0].description).toContain("typo-aware");
+const AGENT_ID = "00000000-0000-0000-0000-000000000009";
+const KEY = "mem_00000000000000000000000000000001";
 
-    const write = memoryToolSpecs[1];
-    expect(write.name).toBe("memory_write");
-    expect(write.required).toEqual(["action"]);
-    expect(write.properties).toEqual(
-      expect.objectContaining({
-        action: expect.objectContaining({ enum: ["remember", "forget", "correct"] }),
-        content: expect.objectContaining({ type: "string" }),
-        targetMemoryId: expect.objectContaining({ type: "string" }),
-        targetFactKey: expect.objectContaining({ type: "string" }),
-        targetText: expect.objectContaining({ type: "string" }),
-        kind: expect.objectContaining({ type: "string" }),
-      }),
-    );
-    expect(write.properties).not.toHaveProperty("agentId");
-    expect(write.properties).not.toHaveProperty("sessionId");
-    expect(write.properties).not.toHaveProperty("messageId");
-    expect(write.properties).not.toHaveProperty("rawUserText");
+describe("memory tool contracts", () => {
+  it("exposes intent-only memory_write and 1..5-key memory_read schemas", () => {
+    const write = memoryToolSpecs.find((spec) => spec.name === "memory_write");
+    expect(write).toMatchObject({
+      required: ["intent"],
+      properties: { intent: { type: "string" } },
+    });
+    expect(Object.keys(write?.properties ?? {})).toEqual(["intent"]);
 
-    const temporal = memoryToolSpecs[2];
-    expect(temporal.name).toBe("conversation_time_search");
-    expect(temporal.required).toEqual(["from", "to"]);
-    expect(temporal.properties).toEqual(
-      expect.objectContaining({
-        from: expect.objectContaining({ type: "string" }),
-        to: expect.objectContaining({ type: "string" }),
-        order: expect.objectContaining({ enum: ["asc", "desc"] }),
-        role: expect.objectContaining({ enum: ["user", "assistant", "system"] }),
-        limit: expect.objectContaining({ minimum: 1, maximum: 20 }),
-        cursor: expect.objectContaining({ type: "string" }),
-      }),
-    );
-    expect(temporal.properties).not.toHaveProperty("agentId");
-    expect(temporal.properties).not.toHaveProperty("sessionId");
-    expect(temporal.properties).not.toHaveProperty("query");
+    const read = memoryToolSpecs.find((spec) => spec.name === "memory_read");
+    expect(read).toMatchObject({
+      required: ["keys"],
+      properties: {
+        keys: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          uniqueItems: true,
+          items: { pattern: "^mem_[0-9a-f]{32}$" },
+        },
+      },
+    });
+    expect(read?.properties).not.toHaveProperty("agentId");
+    expect(write?.properties).not.toHaveProperty("modelId");
   });
 
-  it("gates every spec independently", () => {
+  it("keeps document read/write always on with all flags disabled", () => {
     vi.stubEnv("MEMORY_SEARCH_ENABLED", "false");
-    vi.stubEnv("AGENT_PROFILE_EXPLICIT_WRITE_ENABLED", "false");
     vi.stubEnv("CONVERSATION_SEARCH_ENABLED", "false");
-    expect(createMemoryTools({})).toEqual({});
-    expect(createConversationSearchTools({})).not.toHaveProperty("conversation_time_search");
-
-    vi.stubEnv("MEMORY_SEARCH_ENABLED", "true");
-    expect(createMemoryTools({})).toHaveProperty("memory_search");
-    expect(createMemoryTools({})).not.toHaveProperty("memory_write");
-    expect(createMemoryTools({})).not.toHaveProperty("conversation_time_search");
-
-    vi.stubEnv("MEMORY_SEARCH_ENABLED", "false");
-    vi.stubEnv("AGENT_PROFILE_EXPLICIT_WRITE_ENABLED", "true");
-    expect(createMemoryTools({})).toHaveProperty("memory_write");
-    expect(createMemoryTools({})).not.toHaveProperty("memory_search");
-
-    vi.stubEnv("AGENT_PROFILE_EXPLICIT_WRITE_ENABLED", "false");
-    vi.stubEnv("CONVERSATION_SEARCH_ENABLED", "true");
-    expect(createConversationSearchTools({})).toHaveProperty("conversation_time_search");
-    expect(createMemoryTools({})).toHaveProperty("conversation_time_search");
-    expect(createMemoryTools({})).not.toHaveProperty("memory_search");
+    const tools = createMemoryTools({});
+    expect(tools).toHaveProperty("memory_read");
+    expect(tools).toHaveProperty("memory_write");
+    expect(tools).not.toHaveProperty("memory_search");
+    expect(tools).not.toHaveProperty("conversation_time_search");
+    expect(createConversationSearchTools({})).toEqual({});
     vi.unstubAllEnvs();
   });
 });
 
-describe("memory_search tool mapping", () => {
-  it("forwards query, kind, and a bounded limit to ranked recall", async () => {
+describe("memory document tool execution", () => {
+  it("passes server-owned scope, resolved model, API key, and abort signal to memory_write", async () => {
+    const write = vi.fn(async () => ({
+      status: "no_op" as const,
+      durable: false as const,
+      version: 2,
+      entryCount: 1,
+      indexTokenCount: 20,
+      detailsTokenCount: 30,
+      affectedKeys: [],
+      newKeys: [],
+      droppedKeys: [],
+      changedSummaries: [],
+    }));
+    const abort = new AbortController();
+    const result = await executeMemoryTool(
+      "memory_write",
+      { intent: "remember that I prefer tea", agentId: "model-controlled" },
+      { write },
+      {
+        agentId: AGENT_ID,
+        sessionId: "00000000-0000-0000-0000-000000000010",
+        messageId: "msg-1",
+        modelId: "anthropic/resolved",
+        apiKey: "server-key",
+        abortSignal: abort.signal,
+      },
+    );
+    expect(result).toMatchObject({ success: true, status: "no_op", version: 2 });
+    expect(write).toHaveBeenCalledWith("remember that I prefer tea", {
+      agentId: AGENT_ID,
+      sessionId: "00000000-0000-0000-0000-000000000010",
+      messageId: "msg-1",
+      modelId: "anthropic/resolved",
+      apiKey: "server-key",
+      abortSignal: abort.signal,
+    });
+  });
+
+  it("returns memory_read results and keeps agent scope server-owned", async () => {
+    const read = vi.fn(async () => ({
+      status: "ok" as const,
+      content: "complete entry",
+      returnedKeys: [KEY],
+      missingKeys: [],
+      omittedKeys: [],
+      degradedKeys: [],
+      estimatedTokens: 4,
+      version: 3,
+    }));
+    const result = await executeMemoryTool(
+      "memory_read",
+      { keys: [KEY], agentId: "model-controlled" },
+      { read },
+      { agentId: AGENT_ID },
+    );
+    expect(result).toMatchObject({ success: true, content: "complete entry", version: 3 });
+    expect(read).toHaveBeenCalledWith({ agentId: AGENT_ID, keys: [KEY] });
+  });
+
+  it("maps bounded write failures without exposing model or database errors", async () => {
+    const write = vi.fn(async () => ({
+      status: "unavailable" as const,
+      durable: false as const,
+      version: 1,
+      error: "Memory update is temporarily unavailable.",
+    }));
+    const result = await executeMemoryTool(
+      "memory_write",
+      { intent: "remember tea" },
+      { write },
+      { modelId: "resolved", apiKey: "key" },
+    );
+    expect(result).toEqual({
+      success: false,
+      status: "unavailable",
+      durable: false,
+      version: 1,
+      error: "Memory update is temporarily unavailable.",
+    });
+  });
+});
+
+describe("unchanged passive memory tools", () => {
+  it("forwards bounded passive search with server scope", async () => {
     const search = vi.fn(async () => [memoryItem()]);
     const result = await executeMemoryTool(
       "memory_search",
-      {
-        query: "  deployment telemetry  ",
-        kind: "procedure",
-        limit: 99,
-      },
+      { query: " telemetry ", kind: "procedure", limit: 99 },
       { search },
+      { agentId: AGENT_ID },
     );
     expect(search).toHaveBeenCalledWith({
-      agentId: "00000000-0000-0000-0000-000000000001",
+      agentId: AGENT_ID,
       sessionId: undefined,
-      query: "deployment telemetry",
+      query: "telemetry",
       kind: "procedure",
       limit: 20,
     });
-    expect(result).toMatchObject({
-      success: true,
-      count: 1,
-      memories: [
-        {
-          id: "memory-id",
-          versionId: "version-id",
-          type: "procedural",
-          kind: "procedure",
-          content: "check telemetry",
-          provenance: ["event-id"],
-          score: 0.712346,
-        },
-      ],
-    });
+    expect(result).toMatchObject({ success: true, count: 1 });
   });
 
-  it("keeps session scope server-side and out of the model-visible schema", async () => {
-    const search = vi.fn(async () => [memoryItem()]);
-    await executeMemoryTool(
-      "memory_search",
-      { query: "session decision" },
-      { search },
-      {
-        agentId: "00000000-0000-0000-0000-000000000002",
-        sessionId: "00000000-0000-0000-0000-000000000003",
-      },
-    );
-    expect(search).toHaveBeenCalledWith(
-      expect.objectContaining({
-        agentId: "00000000-0000-0000-0000-000000000002",
-        sessionId: "00000000-0000-0000-0000-000000000003",
-      }),
-    );
-    expect(memoryToolSpecs[0].properties).not.toHaveProperty("sessionId");
-    vi.stubEnv("MEMORY_SEARCH_ENABLED", "true");
-    expect(createMemoryTools({ sessionId: "hidden" })).toHaveProperty("memory_search");
+  it("keeps conversation time search independently gated", () => {
+    vi.stubEnv("CONVERSATION_SEARCH_ENABLED", "true");
+    expect(createConversationSearchTools({})).toHaveProperty("conversation_time_search");
     vi.unstubAllEnvs();
-  });
-
-  it("forwards exact temporal parameters with agent scope closed over", async () => {
-    const conversationSearch = vi.fn(async () => ({ results: [], nextCursor: null }));
-    const input = {
-      from: "2026-01-01T00:00:00Z",
-      to: "2026-01-02T00:00:00Z",
-      order: "asc",
-      role: "user",
-      limit: 7,
-      cursor: "opaque",
-    };
-    expect(
-      await executeMemoryTool(
-        "conversation_time_search",
-        input,
-        { conversationSearch },
-        { agentId: "00000000-0000-0000-0000-000000000009", sessionId: "hidden" },
-      ),
-    ).toEqual({ results: [], nextCursor: null });
-    expect(conversationSearch).toHaveBeenCalledWith(input, {
-      agentId: "00000000-0000-0000-0000-000000000009",
-    });
-  });
-
-  it("returns a route-preapplied write result without applying it twice", async () => {
-    const applyExplicit = vi.fn();
-    const preAppliedExplicitResult = {
-      durable: true as const,
-      action: "remember" as const,
-      factKey: "explicit-fact-pizza",
-      memoryId: "00000000-0000-0000-0000-000000000010",
-      profileVersionId: "00000000-0000-0000-0000-000000000011",
-      synthesis: "completed" as const,
-    };
-    const result = await executeMemoryTool(
-      "memory_write",
-      { action: "remember", content: "I like pizza." },
-      { applyExplicit },
-      {
-        agentId: "00000000-0000-0000-0000-000000000001",
-        sessionId: "00000000-0000-0000-0000-000000000002",
-        messageId: "msg-1",
-        rawUserText: "remember that I like pizza.",
-        preAppliedExplicitResult,
-        preAppliedExplicitIntent: { action: "remember", content: "I like pizza." },
-      },
-    );
-    expect(result).toEqual({ success: true, ...preAppliedExplicitResult });
-    expect(applyExplicit).not.toHaveBeenCalled();
-  });
-
-  it("does not deduplicate a model write with different normalized content", async () => {
-    const applyExplicit = vi.fn(async () => ({
-      durable: true as const,
-      action: "remember" as const,
-      factKey: "claim-y",
-      memoryId: null,
-      profileVersionId: "00000000-0000-0000-0000-000000000011",
-      synthesis: "completed" as const,
-    }));
-    await executeMemoryTool(
-      "memory_write",
-      { action: "remember", content: "I like pasta." },
-      { applyExplicit },
-      {
-        sessionId: "00000000-0000-0000-0000-000000000002",
-        messageId: "msg-1",
-        rawUserText: "remember that I like pizza.",
-        preAppliedExplicitResult: {
-          durable: true,
-          action: "remember",
-          factKey: "claim-x",
-          memoryId: null,
-          profileVersionId: "00000000-0000-0000-0000-000000000010",
-          synthesis: "completed",
-        },
-        preAppliedExplicitIntent: { action: "remember", content: "I like pizza." },
-      },
-    );
-    expect(applyExplicit).toHaveBeenCalledTimes(1);
-  });
-
-  it("passes only hidden current-user scope to an authorized memory write", async () => {
-    const applyExplicit = vi.fn(async () => ({
-      durable: true as const,
-      action: "remember" as const,
-      factKey: "key",
-      memoryId: "00000000-0000-0000-0000-000000000010",
-      profileVersionId: "00000000-0000-0000-0000-000000000011",
-      synthesis: "queued" as const,
-    }));
-    await executeMemoryTool(
-      "memory_write",
-      { action: "remember", content: "I like pizza.", kind: "preference" },
-      { applyExplicit },
-      {
-        agentId: "00000000-0000-0000-0000-000000000001",
-        sessionId: "00000000-0000-0000-0000-000000000002",
-        messageId: "msg-1",
-        rawUserText: "please remember that I like pizza.",
-      },
-    );
-    expect(applyExplicit).toHaveBeenCalledWith(
-      { action: "remember", content: "I like pizza.", kind: "preference" },
-      expect.objectContaining({
-        agentId: "00000000-0000-0000-0000-000000000001",
-        sessionId: "00000000-0000-0000-0000-000000000002",
-        messageId: "msg-1",
-        rawUserText: "please remember that I like pizza.",
-      }),
-    );
-  });
-
-  it("maps backend rejection to the fail-soft error", async () => {
-    const result = (await executeMemoryTool(
-      "memory_search",
-      { query: "x" },
-      {
-        search: async () => {
-          throw new Error("database unavailable");
-        },
-        logger: vi.fn(),
-      },
-    )) as { success: boolean; error?: string };
-    expect(result.success).toBe(false);
-    expect(result.error).toBeTruthy();
-  });
-
-  it("rejects empty query, invalid kind, and unknown tool without searching", async () => {
-    const search = vi.fn(async () => [memoryItem()]);
-    expect(await executeMemoryTool("memory_search", { query: "   " }, { search })).toMatchObject({
-      success: false,
-      error: "query is required.",
-    });
-    expect(
-      await executeMemoryTool(
-        "memory_search",
-        { query: "x", kind: "bogus" },
-        { search, logger: vi.fn() },
-      ),
-    ).toMatchObject({ success: false });
-    expect(await executeMemoryTool("memory_insert", { query: "x" }, { search })).toMatchObject({
-      success: false,
-    });
-    expect(search).not.toHaveBeenCalled();
   });
 });
 

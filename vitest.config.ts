@@ -8,7 +8,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["lib/**/*.test.ts", "lib/**/*.test.tsx"],
+    include: ["lib/**/*.test.ts", "lib/**/*.test.tsx", "scripts/**/*.test.ts"],
     // Pure scoring/normalization tests run without a DB; integration tests that
     // need Postgres are skipped unless DATABASE_URL is set (see pipeline.test.ts).
     environment: "node",

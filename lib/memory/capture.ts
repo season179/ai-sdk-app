@@ -144,7 +144,15 @@ export function mapStepToTraceEvents(
         eventType: "tool_requested",
         actor: "assistant",
         trustClass: "model_inference",
-        payload: { toolName: call.toolName, input: call.input ?? null },
+        payload: {
+          toolName: call.toolName,
+          // A memory_write intent may carry a rejected secret or prompt
+          // injection; the raw text must never be stored or re-prompted.
+          input:
+            call.toolName === "memory_write"
+              ? { intent: "[redacted memory intent]" }
+              : (call.input ?? null),
+        },
         idempotencyKey: `trace:${context.traceId}:tool:${call.toolCallId}:request`,
         retentionClass: "standard",
       }),

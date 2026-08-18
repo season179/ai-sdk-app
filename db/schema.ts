@@ -17,6 +17,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+import type { MemoryDocumentEntry } from "@/lib/memory-document/types";
 import type { ProfileFactV1 } from "@/lib/profile/types";
 import type { ScheduledTaskPayload } from "@/lib/scheduler/execute";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
@@ -392,6 +393,31 @@ export const agentChatMessages = pgTable(
       .on(t.profileVersionId)
       .where(sql`${t.profileVersionId} is not null`),
     index("agent_chat_messages_time_search_idx").on(t.sessionId, t.createdAt, t.id),
+  ],
+);
+
+export const agentMemoryDocuments = pgTable(
+  "agent_memory_documents",
+  {
+    agentId: uuid("agent_id").primaryKey(),
+    version: integer("version").notNull().default(0),
+    indexBody: text("index_body").notNull().default(""),
+    details: jsonb("details").$type<MemoryDocumentEntry[]>().notNull().default([]),
+    indexTokenCount: integer("index_token_count").notNull().default(0),
+    detailsTokenCount: integer("details_token_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_memory_documents_index_tokens_check",
+      sql`${t.indexTokenCount} between 0 and 1000`,
+    ),
+    check(
+      "agent_memory_documents_details_tokens_check",
+      sql`${t.detailsTokenCount} between 0 and 4000`,
+    ),
+    check("agent_memory_documents_details_array_check", sql`jsonb_typeof(${t.details}) = 'array'`),
   ],
 );
 

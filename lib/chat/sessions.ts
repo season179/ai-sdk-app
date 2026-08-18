@@ -9,9 +9,6 @@ import { ingestUserTurn } from "@/lib/consolidation/observations";
 import { isMemoryWriteEnabled } from "@/lib/memory/config";
 import { canonicalJson } from "@/lib/memory/redaction";
 import { appendTraceEvents, type TraceEventInput } from "@/lib/memory/trace";
-import { isAutomaticProfileSynthesisEnabled } from "@/lib/profile/config";
-import { enqueueDirtyProfile } from "@/lib/profile/dirty";
-import { assignCompletedTraceProfileGenerations, markProfileDirty } from "@/lib/profile/repository";
 import { DEFAULT_AGENT_ID } from "@/lib/skills/skills";
 import type { ChatMessageMetadata } from "@/lib/token-usage";
 
@@ -44,7 +41,6 @@ export type ChatSessionForRun = {
   cleanMessages: ChatUIMessage[];
   modelMessages: ChatUIMessage[];
   apiPartMessageIds: string[];
-  profileVersionIds: Record<string, string | null>;
   branchRevision: number;
 };
 
@@ -193,7 +189,6 @@ export async function getChatSessionForRun(
       cleanMessages,
       modelMessages: validation.success ? validation.data : modelMessages,
       apiPartMessageIds: rows.filter((row) => row.apiParts !== null).map((row) => row.id),
-      profileVersionIds: Object.fromEntries(rows.map((row) => [row.id, row.profileVersionId])),
       branchRevision: session.branchRevision,
     };
   });
@@ -205,9 +200,8 @@ export async function materializeMessageRunProjection(
   messageId: string,
   expectedCleanParts: ChatUIMessage["parts"],
   projectedParts: ChatUIMessage["parts"],
-  candidateProfileVersionId: string | null,
   expectedBranchRevision?: number,
-): Promise<{ parts: ChatUIMessage["parts"]; profileVersionId: string | null }> {
+): Promise<{ parts: ChatUIMessage["parts"] }> {
   return getDb().transaction(async (tx) => {
     const [session] = await tx
       .select({ branchRevision: agentChatSessions.branchRevision })
@@ -220,11 +214,7 @@ export async function materializeMessageRunProjection(
     }
 
     const [winner] = await tx
-      .select({
-        apiParts: agentChatMessages.apiParts,
-        parts: agentChatMessages.parts,
-        profileVersionId: agentChatMessages.profileVersionId,
-      })
+      .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
       .from(agentChatMessages)
       .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
     if (!winner) {
@@ -239,7 +229,7 @@ export async function materializeMessageRunProjection(
     if (winner.apiParts === null) {
       await tx
         .update(agentChatMessages)
-        .set({ apiParts: projectedParts, profileVersionId: candidateProfileVersionId })
+        .set({ apiParts: projectedParts })
         .where(
           and(
             eq(agentChatMessages.sessionId, sessionId),
@@ -249,17 +239,10 @@ export async function materializeMessageRunProjection(
         );
     }
     const [materialized] = await tx
-      .select({
-        apiParts: agentChatMessages.apiParts,
-        parts: agentChatMessages.parts,
-        profileVersionId: agentChatMessages.profileVersionId,
-      })
+      .select({ apiParts: agentChatMessages.apiParts, parts: agentChatMessages.parts })
       .from(agentChatMessages)
       .where(and(eq(agentChatMessages.sessionId, sessionId), eq(agentChatMessages.id, messageId)));
-    return {
-      parts: materialized?.apiParts ?? materialized?.parts ?? winner.parts,
-      profileVersionId: materialized?.profileVersionId ?? null,
-    };
+    return { parts: materialized?.apiParts ?? materialized?.parts ?? winner.parts };
   });
 }
 
@@ -285,8 +268,6 @@ export async function appendSessionMessages(
       events: TraceEventInput[];
       groundedUserMessages?: ChatUIMessage[];
     };
-    /** Completed trace whose already-captured user observations become eligible now. */
-    completeProfileTraceId?: string;
   } = {},
 ): Promise<{
   traceCaptured: boolean;
@@ -405,13 +386,6 @@ export async function appendSessionMessages(
             (event) => !event.sourceMessageId || captureIds.has(event.sourceMessageId),
           );
           const traceRows = await appendTraceEvents(events ?? [], savepoint);
-          if (opts.completeProfileTraceId) {
-            await assignCompletedTraceProfileGenerations(
-              opts.agentId ?? DEFAULT_AGENT_ID,
-              opts.completeProfileTraceId,
-              savepoint,
-            );
-          }
           const traceEventIds = new Map(
             traceRows.flatMap((row) =>
               row.sourceMessageId ? ([[row.sourceMessageId, row.id]] as const) : [],
@@ -770,7 +744,6 @@ export async function deleteChatSession(
   id: string,
   agentId: string = DEFAULT_AGENT_ID,
 ): Promise<void> {
-  const shouldDirtyProfile = isAutomaticProfileSynthesisEnabled();
   await getDb().transaction(async (tx) => {
     const rows = await tx
       .update(agentChatSessions)
@@ -787,7 +760,6 @@ export async function deleteChatSession(
     if (rows.length === 0) {
       throw new ChatSessionNotFoundError(id);
     }
-    if (shouldDirtyProfile) await markProfileDirty(agentId, tx);
     await tx
       .update(agentGroundedObservations)
       .set({ deletedAt: sql`now()` })
@@ -799,12 +771,6 @@ export async function deleteChatSession(
         ),
       );
   });
-
-  if (shouldDirtyProfile) {
-    await enqueueDirtyProfile(agentId, { trigger: "turn", automatic: true }).catch((error) => {
-      console.error("Enqueuing profile synthesis after session deletion failed", error);
-    });
-  }
 }
 
 function mapSession(session: typeof agentChatSessions.$inferSelect): ChatSession {

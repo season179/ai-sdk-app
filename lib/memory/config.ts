@@ -20,6 +20,11 @@ export function isMemoryWriteEnabled(): boolean {
   return booleanEnv("AGENT_MEMORY_WRITE_ENABLED", false);
 }
 
+/** Deterministic conversation retrieval keeps its existing independent switch. */
+export function isConversationSearchEnabled(): boolean {
+  return booleanEnv("CONVERSATION_SEARCH_ENABLED", false);
+}
+
 export function getMemoryPolicyVersion(): string {
   return process.env.AGENT_MEMORY_POLICY_VERSION?.trim() || MEMORY_WRITE_POLICY_DEFAULT;
 }

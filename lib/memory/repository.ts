@@ -270,6 +270,7 @@ function eligibleWhere(request: RecallRequest) {
     and (v.valid_during is null or v.valid_during @> ${request.asOf}::timestamptz)
     and v.recorded_during @> ${request.asOf}::timestamptz
     and (v.expires_at is null or v.expires_at > ${request.asOf}::timestamptz)
+    and not (v.structured ? 'profileDirective')
     and (${request.kind ?? null}::text is null or m.kind = ${request.kind ?? null}::text)
   `;
 }

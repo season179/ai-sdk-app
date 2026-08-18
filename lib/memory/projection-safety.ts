@@ -14,6 +14,11 @@ const PROJECTION_FENCES = [
     opening: /<memory_context(?:\s[^>]*)?>/gi,
     closing: "</memory_context>",
   },
+  {
+    name: "memory_index",
+    opening: /<memory_index(?:\s[^>]*)?>/gi,
+    closing: "</memory_index>",
+  },
   { name: "memory", opening: /<memory(?:\s[^>]*)?>/gi, closing: "</memory>" },
   {
     name: "user_profile",
@@ -58,6 +63,7 @@ const PROJECTION_FENCES = [
 
 export const DERIVATIVE_RETRIEVAL_TOOLS = new Set([
   "memory_search",
+  "memory_read",
   "conversation_time_search",
   "skill_search",
   "skill_get_content",

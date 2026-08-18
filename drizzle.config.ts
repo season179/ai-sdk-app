@@ -17,6 +17,7 @@ export default defineConfig({
     "agent_skills",
     "agent_chat_sessions",
     "agent_chat_messages",
+    "agent_memory_documents",
     "agent_trace_artifacts",
     "agent_trace_events",
     "agent_memory_candidates",

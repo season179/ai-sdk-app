@@ -30,7 +30,6 @@ const NAV_ITEMS = [
   { href: "/skills", icon: BookOpen, label: "Skills" },
   { href: "/tools", icon: Wrench, label: "Tools" },
   { href: "/proposals", icon: Check, label: "Review proposals" },
-  { href: "/memories", icon: Pencil, label: "Memories" },
   { href: "/profile", icon: UserRound, label: "Profile" },
   { href: "/consolidation", icon: Brain, label: "Consolidation" },
 ] as const;

@@ -22,3 +22,13 @@ Reach for raw `Read`/`grep` only to modify or debug specific lines after codedb 
 - Persistent chat lives in `agent_chat_sessions` (one row per conversation, soft-deleted via `deleted_at`) and `agent_chat_messages` (UIMessage `parts`/`metadata` as jsonb, ordered by `ordinal`, composite PK `(session_id, id)`, FK cascade). Access them through `lib/chat/sessions.ts`; the whole transcript is saved per turn by delete-all-then-insert from the chat route's `onFinish`.
 - `db/schema.ts` is the source of truth: `pnpm db:generate` writes a migration to `db/drizzle/`, `pnpm db:migrate` applies it. The baseline migration is idempotent (safe on fresh and existing databases). The raw SQL in `db/migrations/` is historical only.
 - pg-boss owns the `pgboss` schema; never model or migrate its tables with Drizzle.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

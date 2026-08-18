@@ -1,5 +1,7 @@
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
 
 import { getDb } from "@/db";
 import {
@@ -24,6 +26,7 @@ integration("memory_search ranked backend mapping", () => {
   const sessionId = "00000000-0000-4000-8000-000000000099";
   let memoryId = "";
   let scopedMemoryId = "";
+  let legacyProfileMemoryId = "";
 
   beforeAll(async () => {
     getPool();
@@ -46,12 +49,23 @@ integration("memory_search ranked backend mapping", () => {
         source: "curated",
       })
     ).id;
+    legacyProfileMemoryId = (
+      await createMemory({
+        agentId: DEFAULT_AGENT_ID,
+        kind: "preference",
+        content: `${marker} legacy profile directive`,
+        structured: { profileDirective: { factKey: "legacy-test" } },
+        source: "curated",
+      })
+    ).id;
   });
 
   afterAll(async () => {
     const db = getDb();
     const eventIds: string[] = [];
-    for (const cleanupMemoryId of [memoryId, scopedMemoryId].filter(Boolean)) {
+    for (const cleanupMemoryId of [memoryId, scopedMemoryId, legacyProfileMemoryId].filter(
+      Boolean,
+    )) {
       const versions = await db
         .select({ id: agentMemoryVersions.id })
         .from(agentMemoryVersions)
@@ -94,6 +108,14 @@ integration("memory_search ranked backend mapping", () => {
     })) as { memories: Array<{ id: string }> };
     expect(owned.memories.map((item) => item.id)).toContain(scopedMemoryId);
     expect(unscoped.memories.map((item) => item.id)).not.toContain(scopedMemoryId);
+  });
+
+  it("unconditionally excludes legacy profileDirective memories", async () => {
+    const result = (await executeMemoryTool("memory_search", {
+      query: `${marker} legacy profile directive`,
+      limit: 10,
+    })) as { memories: Array<{ id: string }> };
+    expect(result.memories.map((item) => item.id)).not.toContain(legacyProfileMemoryId);
   });
 
   it("maps kind/limit and compact ranked fields from the shared repository", async () => {

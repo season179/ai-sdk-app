@@ -427,6 +427,14 @@ function runtimeLabel(tool: CatalogTool): string {
 
 function gateNote(tool: CatalogTool, snapshot: ToolCatalogSnapshot): string {
   if (tool.gate === "memory") {
+    if (tool.name === "memory_read" || tool.name === "memory_write") {
+      return "Direct access is always enabled. Memory document tools are never bridge-reachable.";
+    }
+    if (tool.name === "conversation_time_search") {
+      return snapshot.conversationSearchEnabled
+        ? "Direct access is enabled by CONVERSATION_SEARCH_ENABLED."
+        : "Direct access requires CONVERSATION_SEARCH_ENABLED.";
+    }
     return snapshot.memorySearchEnabled
       ? "Direct access is enabled by MEMORY_SEARCH_ENABLED. Memory search is never bridge-reachable."
       : "Direct access requires MEMORY_SEARCH_ENABLED. Memory search is never bridge-reachable.";

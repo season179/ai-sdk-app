@@ -85,6 +85,13 @@
       "when": 1786851435321,
       "tag": "0011_profile_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787032631457,
+      "tag": "0012_agent_memory_documents",
+      "breakpoints": true
     }
   ]
 }
