@@ -54,6 +54,16 @@ describe("profile extraction boundary", () => {
   it("bounds provider output and every model-controlled string", () => {
     expect(PROFILE_EXTRACTION_MAX_OUTPUT_TOKENS).toBe(2_000);
     const item = operationSchemaDefinition.properties.operations.items;
+    // Constrained decoding must force the fields that carry fact content;
+    // optional sentence/category let providers emit key-only adds that all
+    // filter out and silently no-op the synthesis run.
+    expect(item.required).toEqual([
+      "operation",
+      "sentence",
+      "category",
+      "observationIds",
+      "memoryVersionIds",
+    ]);
     expect(item.properties.targetFactKey.maxLength).toBe(200);
     expect(item.properties.sentence.maxLength).toBe(2000);
     expect(item.properties.observationIds.items.maxLength).toBe(64);

@@ -13,6 +13,8 @@ export const PROFILE_SYNTHESIZER_ID = "profile-synthesis-v1";
 const EXTRACT_INSTRUCTIONS = [
   "You reconcile a compact user profile from direct user evidence only.",
   "Return operations, not prose. Cite only exact supplied observationIds or memoryVersionIds.",
+  "Every operation must fill 'sentence' with the complete third-person profile sentence (for example 'The user likes pizza.') and 'category'; 'targetFactKey' never carries fact content.",
+  "For invalidate, repeat the target fact's existing sentence and category verbatim.",
   "Use update/invalidate only with an existing targetFactKey. Never invent IDs or keys.",
   "Prefer durable identity, constraints, projects, preferences, and explicit interaction instructions.",
   "Direct preference statements are evidence even without the word remember; for example, 'I like pizza.' is a durable preference to add.",
@@ -55,7 +57,7 @@ export const operationSchemaDefinition = {
             items: { type: "string", maxLength: 64 },
           },
         },
-        required: ["operation", "observationIds", "memoryVersionIds"],
+        required: ["operation", "sentence", "category", "observationIds", "memoryVersionIds"],
         additionalProperties: false,
       },
     },
